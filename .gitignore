@@ -1,0 +1,10 @@
+node_modules/
+dist/
+src/generated/
+tests/fixtures/from-rust/
+tests/fixtures/from-ts/
+coverage/
+*.log
+.DS_Store
+.vscode/
+.idea/

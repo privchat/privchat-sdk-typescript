@@ -1,0 +1,55 @@
+{
+  "name": "@privchat/sdk",
+  "version": "0.1.0-alpha.0",
+  "description": "TypeScript SDK for PrivChat — typed FlatBuffers protocol on top of @msgtrans/client",
+  "type": "module",
+  "private": true,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "codegen": "node scripts/codegen.mjs",
+    "prebuild": "npm run codegen",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "example:accounts": "npm run codegen && tsx examples/accounts/src/main.ts",
+    "example:transfer": "npm run codegen && tsx examples/transfer/src/main.ts"
+  },
+  "dependencies": {
+    "flatbuffers": "^24.3.25",
+    "lossless-json": "^4.3.0"
+  },
+  "peerDependencies": {
+    "@msgtrans/client": "^0.1.0-beta.0"
+  },
+  "devDependencies": {
+    "@msgtrans/client": "file:../msgtrans-typescript",
+    "@types/node": "^20.11.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "privchat",
+    "im",
+    "instant-messaging",
+    "flatbuffers",
+    "websocket"
+  ]
+}
