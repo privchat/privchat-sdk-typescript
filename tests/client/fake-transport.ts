@@ -59,7 +59,16 @@ export class FakeTransport implements Transport {
   }
 
   async close(): Promise<void> {
+    if (!this._connected) return;
     this._connected = false;
+    // Mirror real WebSocketTransport: closing the socket fires onclose
+    // on the next microtask, which is what runs the close handlers.
+    // Without this, code paths that call `transport.close()` to trigger
+    // the SDK's own close-driven state machine (e.g. heartbeat failure
+    // → close → auto-reconnect) silently dead-end in tests.
+    queueMicrotask(() => {
+      for (const cb of this.closeHandlers) cb(undefined);
+    });
   }
 
   isConnected(): boolean {

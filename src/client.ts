@@ -160,6 +160,8 @@ export interface PrivchatClientOptions
   eventHistoryLimit?: number;
   /** Auto-reconnect tuning. Default: enabled, 1s → 2s → 4s → ... → 30s, infinite attempts. */
   reconnect?: ReconnectOptions;
+  /** Idle-heartbeat tuning. Default: enabled, 30s idle interval, 10s ping timeout. */
+  heartbeat?: HeartbeatOptions;
   /** Phase 4: opt-in IndexedDB message cache. Default: disabled. When
    *  disabled, all cache-related methods (`bootstrapChannels`,
    *  `openConversation`, `scrollHistory`, `getCachedMessages`,
@@ -193,6 +195,33 @@ export interface ReconnectOptions {
   multiplier?: number;
   /** Stop after this many consecutive failures. Default: Infinity. */
   maxAttempts?: number;
+}
+
+/**
+ * Idle-heartbeat tuning. The SDK sends `PingRequest` packets while the
+ * connection is `authenticated` AND has been idle for at least
+ * [intervalMs]. "Idle" means no inbound or outbound packets within
+ * [intervalMs]; any traffic resets the timer. A failed ping (timeout
+ * or transport error) closes the transport, which triggers the
+ * existing auto-reconnect path.
+ *
+ * Why: WebSocket connections behind NAT / corporate proxies / mobile
+ * radios time out after a few minutes of silence. Periodic pings keep
+ * the path warm and surface zombie connections quickly.
+ *
+ * Not the WebSocket control-frame ping (browser handles those
+ * automatically and doesn't expose a way to send them). This is the
+ * application-level `PingRequest` packet that the server expects.
+ */
+export interface HeartbeatOptions {
+  /** Disable the idle heartbeat loop. Default: true. */
+  enabled?: boolean;
+  /** Idle threshold; if no traffic flows for this long, send a ping.
+   *  Also the resume cadence after a ping. Default: 30_000. */
+  intervalMs?: number;
+  /** Maximum time to wait for a Pong before treating the connection as
+   *  dead. Default: 10_000. */
+  timeoutMs?: number;
 }
 
 export interface RequestOptions {
@@ -604,6 +633,14 @@ export class PrivchatClient {
   private disposed = false;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Resolved heartbeat options (defaults applied). */
+  private readonly heartbeatOpts: Required<HeartbeatOptions>;
+  /** Idle-heartbeat timer; non-null when armed. */
+  private heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Monotonic-ish timestamp of the last inbound OR outbound packet. The
+   *  heartbeat tick uses this to skip pings when traffic is already
+   *  flowing — no need to ping a busy connection. */
+  private lastActivityMs = 0;
 
   constructor(options: PrivchatClientOptions = {}) {
     const {
@@ -611,6 +648,7 @@ export class PrivchatClient {
       defaultDeviceInfo: di,
       eventHistoryLimit,
       reconnect,
+      heartbeat,
       cache,
       outbox,
       ...rest
@@ -628,6 +666,11 @@ export class PrivchatClient {
       maxDelayMs: reconnect?.maxDelayMs ?? 30_000,
       multiplier: reconnect?.multiplier ?? 2,
       maxAttempts: reconnect?.maxAttempts ?? Infinity,
+    };
+    this.heartbeatOpts = {
+      enabled: heartbeat?.enabled ?? true,
+      intervalMs: heartbeat?.intervalMs ?? 30_000,
+      timeoutMs: heartbeat?.timeoutMs ?? 10_000,
     };
 
     if (cache?.enabled) {
@@ -672,6 +715,12 @@ export class PrivchatClient {
 
     this.transport.on('message', (ctx) => this.handleIncoming(ctx));
     this.transport.on('close', () => this.handleTransportClose());
+    // Outbound packets count as activity for the idle-heartbeat tracker;
+    // an actively-sending client doesn't need synthetic pings to keep
+    // the path warm.
+    this.transport.on('messageSent', () => {
+      this.lastActivityMs = Date.now();
+    });
   }
 
   /** True when constructor opted into the cache. */
@@ -2402,6 +2451,9 @@ export class PrivchatClient {
   // ----- Internal: incoming dispatch -----
 
   private handleIncoming(ctx: TransportContext): void {
+    // Any inbound packet is a sign of life — bump the idle-heartbeat
+    // activity tracker so we don't ping a busy connection.
+    this.lastActivityMs = Date.now();
     // Auto-ACK Request-typed pushes BEFORE invoking user callbacks, so a
     // throwing handler can't leave the server hanging. Mirrors Rust SDK.
     if (ctx.packet.packetType === PacketType.Request) {
@@ -2853,8 +2905,18 @@ export class PrivchatClient {
 
   private setState(next: ConnectionState, reason?: string): void {
     if (this.state === next) return;
+    const prev = this.state;
     this.state = next;
     this.bus.emit({ type: 'connection_state_changed', state: next, reason });
+    // Idle-heartbeat: arm only while authenticated. Any other transition
+    // (closing, disconnected, reconnecting, authenticating, connected,
+    // connecting) must stop the timer so we don't ping a half-ready or
+    // teardown-in-progress connection.
+    if (next === 'authenticated') {
+      this.startHeartbeat();
+    } else if (prev === 'authenticated') {
+      this.stopHeartbeat();
+    }
   }
 
   private cancelReconnect(): void {
@@ -2863,6 +2925,90 @@ export class PrivchatClient {
       this.reconnectTimer = null;
     }
     this.reconnectAttempt = 0;
+  }
+
+  // ----- Internal: idle heartbeat -----
+
+  /** Arm the idle-heartbeat timer. Called on transition into
+   *  `authenticated`. Idempotent — re-arming an already-armed timer
+   *  cancels the old one first. */
+  private startHeartbeat(): void {
+    if (!this.heartbeatOpts.enabled) return;
+    this.stopHeartbeat();
+    // Treat the moment we became authenticated as the baseline activity
+    // — otherwise the first tick would fire a ping immediately after
+    // login.
+    this.lastActivityMs = Date.now();
+    this.heartbeatTimer = setTimeout(
+      () => this.heartbeatTick(),
+      this.heartbeatOpts.intervalMs,
+    );
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer !== null) {
+      clearTimeout(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  /**
+   * Heartbeat tick handler. Fired by the timer. Behaviour:
+   *
+   *   - If state is no longer `authenticated`, bail (defensive — setState
+   *     should have already stopped us, but a queued tick could land
+   *     after).
+   *   - If recent activity is within `intervalMs`, reschedule without
+   *     sending a ping (idle-aware).
+   *   - Otherwise send `client.ping()` with `timeoutMs`. On success,
+   *     reschedule. On failure, close the transport — `handleTransportClose`
+   *     then drives the existing auto-reconnect path.
+   */
+  private heartbeatTick(): void {
+    this.heartbeatTimer = null;
+    if (this.state !== 'authenticated') return;
+
+    const sinceLast = Date.now() - this.lastActivityMs;
+    if (sinceLast < this.heartbeatOpts.intervalMs) {
+      // Recent traffic; reschedule for the remaining slice + small fudge.
+      this.heartbeatTimer = setTimeout(
+        () => this.heartbeatTick(),
+        Math.max(1_000, this.heartbeatOpts.intervalMs - sinceLast),
+      );
+      return;
+    }
+
+    void this.runHeartbeatPing();
+  }
+
+  private async runHeartbeatPing(): Promise<void> {
+    try {
+      await this.ping(
+        { timestamp: Date.now() },
+        { timeoutMs: this.heartbeatOpts.timeoutMs },
+      );
+    } catch {
+      // Treat any failure (timeout, transport error, auth race) the
+      // same way: close the transport so the existing close-handler
+      // schedules reconnect with replay credentials. We do NOT call
+      // setState here — `transport.close()` → `handleTransportClose()`
+      // owns the transition.
+      try {
+        await this.transport.close();
+      } catch {
+        // Best-effort: even if close throws, the next inbound/outbound
+        // failure will eventually trip the same path.
+      }
+      return;
+    }
+    // Success: pong arrived (handleIncoming already bumped lastActivityMs).
+    // Reschedule for the next interval.
+    if (this.state === 'authenticated' && this.heartbeatOpts.enabled) {
+      this.heartbeatTimer = setTimeout(
+        () => this.heartbeatTick(),
+        this.heartbeatOpts.intervalMs,
+      );
+    }
   }
 
   /**

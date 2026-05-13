@@ -17,6 +17,7 @@ export {
 export type {
   BootstrapChannelsOptions,
   CacheOptions,
+  HeartbeatOptions,
   MarkReadOptions,
   OpenConversationOptions,
   OutboxOptions,
