@@ -504,6 +504,32 @@ export function buildSendVoiceInput(args: {
   };
 }
 
+/** Send a video message. Caller has already uploaded the video file
+ *  and has the `file_id` + width/height/duration. `thumbnail_url` is
+ *  optional — clients that don't generate a poster frame (e.g. the
+ *  Web client, where we'd need to decode + draw a `<video>` element
+ *  before send) can omit it and the receiver renders the player chrome
+ *  without a poster. */
+export function buildSendVideoInput(args: {
+  channel_id: string;
+  channel_type: number;
+  from_uid: string;
+  metadata: SendVideoMetadata;
+  caption?: string;
+  local_message_id?: string;
+}): import('./client.js').SendTextInput {
+  const caption = args.caption ?? '';
+  return {
+    channel_id: args.channel_id,
+    channel_type: args.channel_type,
+    from_uid: args.from_uid,
+    content: caption !== '' ? caption : '[视频]',
+    message_type: ContentMessageType.Video,
+    payload: encodeMediaPayload('video', caption, args.metadata),
+    local_message_id: args.local_message_id,
+  };
+}
+
 /** Progress event from `uploadFileViaToken`. Emits during the
  *  upload-body phase (i.e. the multipart write), not on response
  *  download. `total === 0` when the underlying transport doesn't

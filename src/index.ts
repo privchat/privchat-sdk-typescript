@@ -113,6 +113,7 @@ export {
   ContentMessageType,
   buildSendFileInput,
   buildSendImageInput,
+  buildSendVideoInput,
   buildSendVoiceInput,
   uploadFileViaToken,
   type SendFileMetadata,
