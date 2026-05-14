@@ -120,7 +120,9 @@ declare module './client.js' {
     /** Transfer ownership to another existing group member. Server
      *  reads `currentOwnerId` from the wire body for the permission
      *  check (must equal session uid AND be the current owner). The
-     *  outgoing owner is downgraded to admin in the same transaction. */
+     *  outgoing owner becomes a regular member — per server impl
+     *  `rpc/group/role/transfer_owner.rs:99-101` it sets the role to
+     *  `MemberRole::Member`, NOT admin. */
     groupTransferOwner(
       groupId: number,
       currentOwnerId: number,

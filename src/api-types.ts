@@ -444,9 +444,12 @@ export interface GroupTransferOwnerResponse {
 // Server route group: `group/settings/{get, update, mute_all}`.
 //
 // `name` and `avatar_url` are deliberately ABSENT from the patch
-// shape — spec has no user-facing route to mutate either of those,
-// only admin tooling can change them. The web client displays both
-// fields (from `GroupInfoResponse`) but renders them read-only.
+// shape — those are PLATFORM-mode-only fields edited via
+// privchat-application HTTP endpoints (parallel to how member
+// profile name/avatar are edited). The IM server's RPC layer
+// intentionally does NOT carry them. SDKs should display name +
+// avatar from `GroupInfoResponse` and route user-side edits through
+// the PLATFORM application HTTP path when those endpoints land.
 
 /** All fields optional — caller sends a partial patch; server merges
  *  it into the persisted row. Setting a string field to `''` clears
