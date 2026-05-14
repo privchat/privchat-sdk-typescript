@@ -55,6 +55,11 @@ export const Routes = {
     SET: 'group/role/set',
     TRANSFER_OWNER: 'group/role/transfer_owner',
   },
+  group_settings: {
+    GET: 'group/settings/get',
+    UPDATE: 'group/settings/update',
+    MUTE_ALL: 'group/settings/mute_all',
+  },
   message: {
     REVOKE: 'message/revoke',
   },

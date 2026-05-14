@@ -439,6 +439,60 @@ export interface GroupTransferOwnerResponse {
   transferred_at?: number;
 }
 
+// ----- Group settings -----
+// Wire shape mirrors `privchat_protocol::rpc::group::settings`.
+// Server route group: `group/settings/{get, update, mute_all}`.
+//
+// `name` and `avatar_url` are deliberately ABSENT from the patch
+// shape — spec has no user-facing route to mutate either of those,
+// only admin tooling can change them. The web client displays both
+// fields (from `GroupInfoResponse`) but renders them read-only.
+
+/** All fields optional — caller sends a partial patch; server merges
+ *  it into the persisted row. Setting a string field to `''` clears
+ *  it; omitting the field leaves it unchanged. */
+export interface GroupSettingsPatch {
+  join_need_approval?: boolean;
+  member_can_invite?: boolean;
+  all_muted?: boolean;
+  max_members?: number;
+  announcement?: string;
+  description?: string;
+}
+
+export interface GroupSettingsData {
+  join_need_approval: boolean;
+  member_can_invite: boolean;
+  all_muted: boolean;
+  max_members: number;
+  announcement?: string;
+  description?: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface GroupSettingsGetResponse {
+  group_id: number;
+  settings: GroupSettingsData;
+}
+
+export interface GroupSettingsUpdateResponse {
+  success: boolean;
+  group_id: string;
+  message: string;
+  updated_count: number;
+  updated_at: number;
+}
+
+export interface GroupMuteAllResponse {
+  success: boolean;
+  group_id: string;
+  all_muted: boolean;
+  message: string;
+  operator_id: string;
+  updated_at: number;
+}
+
 export interface GroupMemberRemoveRequest {
   group_id: number;
   user_id: number;

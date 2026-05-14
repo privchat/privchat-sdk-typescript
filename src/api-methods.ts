@@ -44,8 +44,12 @@ import type {
   GroupMemberMuteResponse,
   GroupMemberRemoveResponse,
   GroupMemberUnmuteResponse,
+  GroupMuteAllResponse,
   GroupRoleSetResponse,
   GroupRoleSetValue,
+  GroupSettingsGetResponse,
+  GroupSettingsPatch,
+  GroupSettingsUpdateResponse,
   GroupTransferOwnerResponse,
   MessageHistoryResponse,
   MessageReactionAddResponse,
@@ -122,6 +126,36 @@ declare module './client.js' {
       currentOwnerId: number,
       newOwnerId: number,
     ): Promise<GroupTransferOwnerResponse>;
+
+    /** Fetch the group's mutable settings (description / announcement /
+     *  approval flags / mute-all / member limit). Server fills the
+     *  viewer uid from session; only members can read. */
+    groupSettingsGet(groupId: number): Promise<GroupSettingsGetResponse>;
+
+    /** Apply a partial patch to the group's settings. Owner-only per
+     *  spec; server validates `operatorId` against the group's owner.
+     *  Pass `''` to clear a string field; omit fields to leave them
+     *  unchanged.
+     *
+     *  Note: per spec, group `name` and `avatar_url` have NO user-side
+     *  RPC and cannot be set through this method — they belong to the
+     *  admin-tool surface only. */
+    groupSettingsUpdate(
+      groupId: number,
+      operatorId: number,
+      settings: GroupSettingsPatch,
+    ): Promise<GroupSettingsUpdateResponse>;
+
+    /** Toggle whole-group mute. Convenience wrapper around the
+     *  `group/settings/mute_all` route; semantically equivalent to
+     *  `groupSettingsUpdate(groupId, op, { all_muted: muted })` but
+     *  goes through the dedicated route (server emits a distinct
+     *  notification) — match spec. */
+    groupMuteAll(
+      groupId: number,
+      operatorId: number,
+      muted: boolean,
+    ): Promise<GroupMuteAllResponse>;
 
     // message
     messageHistory(channelId: number, limit?: number, beforeServerMessageId?: number): Promise<MessageHistoryResponse>;
@@ -334,6 +368,26 @@ proto.groupTransferOwner = function (groupId, currentOwnerId, newOwnerId) {
     group_id: groupId,
     current_owner_id: currentOwnerId,
     new_owner_id: newOwnerId,
+  });
+};
+
+proto.groupSettingsGet = function (groupId) {
+  return this.rpcCallTyped(Routes.group_settings.GET, { group_id: groupId });
+};
+
+proto.groupSettingsUpdate = function (groupId, operatorId, settings) {
+  return this.rpcCallTyped(Routes.group_settings.UPDATE, {
+    group_id: groupId,
+    operator_id: operatorId,
+    settings,
+  });
+};
+
+proto.groupMuteAll = function (groupId, operatorId, muted) {
+  return this.rpcCallTyped(Routes.group_settings.MUTE_ALL, {
+    group_id: groupId,
+    operator_id: operatorId,
+    muted,
   });
 };
 

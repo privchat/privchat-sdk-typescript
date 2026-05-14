@@ -149,6 +149,16 @@ describe('group', () => {
       (c: PrivchatClient) => c.groupTransferOwner(1, 100, 200),
       'group/role/transfer_owner',
     ],
+    [(c: PrivchatClient) => c.groupSettingsGet(1), 'group/settings/get'],
+    [
+      (c: PrivchatClient) =>
+        c.groupSettingsUpdate(1, 100, { description: 'x' }),
+      'group/settings/update',
+    ],
+    [
+      (c: PrivchatClient) => c.groupMuteAll(1, 100, true),
+      'group/settings/mute_all',
+    ],
   ] as const)('hits %#', async (fn, expectedRoute) => {
     const cap = captureRpc();
     const c = new PrivchatClient({ transport: cap.t });
