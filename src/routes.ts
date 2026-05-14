@@ -51,6 +51,10 @@ export const Routes = {
     MUTE: 'group/member/mute',
     UNMUTE: 'group/member/unmute',
   },
+  group_role: {
+    SET: 'group/role/set',
+    TRANSFER_OWNER: 'group/role/transfer_owner',
+  },
   message: {
     REVOKE: 'message/revoke',
   },

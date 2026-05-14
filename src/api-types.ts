@@ -397,6 +397,48 @@ export interface GroupMemberLeaveRequest {
 }
 export type GroupMemberLeaveResponse = boolean;
 
+// ----- Group role / transfer -----
+// Wire shape mirrors `privchat_protocol::rpc::group::role_set` and
+// `::transfer`. The server reads `operator_id` / `current_owner_id`
+// from the request body for the permission check (it does NOT silently
+// substitute the session uid), so the SDK forwards them verbatim and
+// the caller (React adapter) fills them from `sessionSnapshot()`.
+
+/** Role value carried on the `group/role/set` wire. Owner cannot be
+ *  assigned via this RPC — use `group/role/transfer_owner` for that. */
+export type GroupRoleSetValue = 'admin' | 'member';
+
+export interface GroupRoleSetRequest {
+  group_id: number;
+  /** Caller's user id; server validates this is the group owner. */
+  operator_id: number;
+  /** Member being promoted / demoted. */
+  user_id: number;
+  role: GroupRoleSetValue;
+}
+
+export interface GroupRoleSetResponse {
+  group_id: number;
+  user_id: number;
+  role: string;
+  /** Unix epoch ms when the role flipped; absent on no-op (server
+   *  observed the member already had that role). */
+  updated_at?: number;
+}
+
+export interface GroupTransferOwnerRequest {
+  group_id: number;
+  /** Caller's user id; server validates this matches the current owner. */
+  current_owner_id: number;
+  new_owner_id: number;
+}
+
+export interface GroupTransferOwnerResponse {
+  group_id: number;
+  new_owner_id: number;
+  transferred_at?: number;
+}
+
 export interface GroupMemberRemoveRequest {
   group_id: number;
   user_id: number;

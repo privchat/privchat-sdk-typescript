@@ -44,6 +44,9 @@ import type {
   GroupMemberMuteResponse,
   GroupMemberRemoveResponse,
   GroupMemberUnmuteResponse,
+  GroupRoleSetResponse,
+  GroupRoleSetValue,
+  GroupTransferOwnerResponse,
   MessageHistoryResponse,
   MessageReactionAddResponse,
   MessageReactionListResponse,
@@ -98,6 +101,27 @@ declare module './client.js' {
     /** `muteDuration` is in seconds; 0 = permanent. */
     groupMemberMute(groupId: number, userId: number, muteDuration: number): Promise<GroupMemberMuteResponse>;
     groupMemberUnmute(groupId: number, userId: number): Promise<GroupMemberUnmuteResponse>;
+
+    /** Promote a member to admin or demote them back to member. Owner
+     *  cannot be assigned this way — use [groupTransferOwner]. Server
+     *  reads `operatorId` from the wire body for the permission check
+     *  (must be the current owner), so callers must pass it explicitly. */
+    groupRoleSet(
+      groupId: number,
+      operatorId: number,
+      userId: number,
+      role: GroupRoleSetValue,
+    ): Promise<GroupRoleSetResponse>;
+
+    /** Transfer ownership to another existing group member. Server
+     *  reads `currentOwnerId` from the wire body for the permission
+     *  check (must equal session uid AND be the current owner). The
+     *  outgoing owner is downgraded to admin in the same transaction. */
+    groupTransferOwner(
+      groupId: number,
+      currentOwnerId: number,
+      newOwnerId: number,
+    ): Promise<GroupTransferOwnerResponse>;
 
     // message
     messageHistory(channelId: number, limit?: number, beforeServerMessageId?: number): Promise<MessageHistoryResponse>;
@@ -293,6 +317,23 @@ proto.groupMemberUnmute = function (groupId, userId) {
   return this.rpcCallTyped(Routes.group_member.UNMUTE, {
     group_id: groupId,
     user_id: userId,
+  });
+};
+
+proto.groupRoleSet = function (groupId, operatorId, userId, role) {
+  return this.rpcCallTyped(Routes.group_role.SET, {
+    group_id: groupId,
+    operator_id: operatorId,
+    user_id: userId,
+    role,
+  });
+};
+
+proto.groupTransferOwner = function (groupId, currentOwnerId, newOwnerId) {
+  return this.rpcCallTyped(Routes.group_role.TRANSFER_OWNER, {
+    group_id: groupId,
+    current_owner_id: currentOwnerId,
+    new_owner_id: newOwnerId,
   });
 };
 

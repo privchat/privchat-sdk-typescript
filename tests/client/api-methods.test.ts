@@ -141,6 +141,14 @@ describe('group', () => {
     [(c: PrivchatClient) => c.groupMemberAdd(1, 2), 'group/member/add'],
     [(c: PrivchatClient) => c.groupMemberList(1), 'group/member/list'],
     [(c: PrivchatClient) => c.groupMemberLeave(1), 'group/member/leave'],
+    [
+      (c: PrivchatClient) => c.groupRoleSet(1, 100, 200, 'admin'),
+      'group/role/set',
+    ],
+    [
+      (c: PrivchatClient) => c.groupTransferOwner(1, 100, 200),
+      'group/role/transfer_owner',
+    ],
   ] as const)('hits %#', async (fn, expectedRoute) => {
     const cap = captureRpc();
     const c = new PrivchatClient({ transport: cap.t });
