@@ -83,4 +83,16 @@ export const Routes = {
     UPLOAD_CALLBACK: 'file/upload_callback',
     GET_URL: 'file/get_url',
   },
+  // QR_CODE_SPEC v1.3 — 个人名片二维码
+  user_qrcode: {
+    GET: 'user/qrcode/get',
+    REFRESH: 'user/qrcode/refresh',
+    RESOLVE: 'user/qrcode/resolve',
+  },
+  // QR_CODE_SPEC v1.3 — 群二维码
+  group_qrcode: {
+    GET: 'group/qrcode/get',
+    REFRESH: 'group/qrcode/refresh',
+    JOIN: 'group/join/qrcode',
+  },
 } as const;

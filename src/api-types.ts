@@ -744,3 +744,80 @@ export interface PresenceBatchStatusResponse {
   items: PresenceStatusItem[];
   denied_user_ids: number[];
 }
+
+// =====================================================
+// QR_CODE_SPEC v1.3 — 用户/群二维码
+// =====================================================
+
+/** `user/qrcode/get` — 读取当前用户名片二维码。 */
+export interface UserQrCodeGetResponse {
+  /** opaque token, 16-char base62, 永久（来自 privchat_users.qr_key）。 */
+  qr_key: string;
+  /**
+   * 已拼好的完整 URL：
+   * `https://<qr_base_url>/privchat:protocol/user/get?qrkey=<qr_key>`
+   */
+  qr_code: string;
+  /** 回显的当前用户 ID。 */
+  user_id: number;
+}
+
+/** `user/qrcode/refresh` — 旋转当前用户名片二维码。 */
+export interface UserQrCodeRefreshResponse {
+  /** 旧 qr_key（已作废）。 */
+  old_qr_key: string;
+  /** 新 qr_key。 */
+  new_qr_key: string;
+  /** 已拼好的新 URL。 */
+  qr_code: string;
+  /** 用户 ID。 */
+  user_id: number;
+}
+
+/** `user/qrcode/resolve` — 把对端 qrkey 翻译成最小用户卡片。
+ *  Server 故意**不返回 qr_key**，避免二次扩散。 */
+export interface UserQrCodeResolveResponse {
+  user_id: number;
+  username: string;
+  display_name?: string;
+  avatar_url?: string;
+  /** 0=普通用户 / 1=系统用户 / 2=机器人。 */
+  user_type: number;
+  /** 调用方与目标用户是否已是好友。 */
+  is_friend: boolean;
+  /** 调用方是不是目标用户本身（扫了自己的名片码）。 */
+  is_self: boolean;
+}
+
+/** `group/qrcode/get` — 读群二维码。Member 及以上可见。 */
+export interface GroupQrCodeGetResponse {
+  qr_key: string;
+  /** `https://<qr_base_url>/privchat:protocol/group/join?qrkey=<qr_key>` */
+  qr_code: string;
+  /** 回显的群组 ID。注意：JSON 数字可能溢出 JS 安全整数，建议按字符串处理。 */
+  group_id: number;
+}
+
+/** `group/qrcode/refresh` — 旋转群二维码。Owner/Admin only。 */
+export interface GroupQrCodeRefreshResponse {
+  old_qr_key: string;
+  new_qr_key: string;
+  qr_code: string;
+  group_id: number;
+}
+
+/** `group/join/qrcode` — 通过 qrkey 加群。 */
+export interface GroupQrCodeJoinResponse {
+  /** `"joined"` 或 `"pending"`（pending = 进入审批队列）。 */
+  status: 'joined' | 'pending' | string;
+  /** Server reverse-lookup 出来的群组 ID。 */
+  group_id: number;
+  /** 仅当 status='pending' 时返回。 */
+  request_id?: string;
+  /** 提示文案。 */
+  message?: string;
+  /** status='joined' 时返回当前用户 ID。 */
+  user_id?: number;
+  /** status='joined' 时返回加群时间 Unix 毫秒。 */
+  joined_at?: number;
+}

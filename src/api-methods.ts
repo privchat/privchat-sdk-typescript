@@ -58,6 +58,13 @@ import type {
   MessageRevokeResponse,
   PresenceBatchStatusResponse,
   TypingIndicatorResponse,
+  // QR_CODE_SPEC v1.3
+  GroupQrCodeGetResponse,
+  GroupQrCodeJoinResponse,
+  GroupQrCodeRefreshResponse,
+  UserQrCodeGetResponse,
+  UserQrCodeRefreshResponse,
+  UserQrCodeResolveResponse,
 } from './api-types.js';
 
 // ----- Public method declarations (declaration merge into PrivchatClient) -----
@@ -196,6 +203,40 @@ declare module './client.js' {
     /** Resolve a file_id to a fresh signed URL. Use when the embedded
      *  url in a message bubble has expired. */
     fileGetUrl(fileId: number): Promise<FileGetUrlResponse>;
+
+    // QR_CODE_SPEC v1.3 — user qrcode（个人名片码）
+
+    /** Read self's permanent qr_key + fully-built URL.
+     *
+     *  `qr_code` shape:
+     *  `https://<host>/privchat:protocol/user/get?qrkey=<qr_key>` */
+    userQrcodeGet(): Promise<UserQrCodeGetResponse>;
+
+    /** Rotate self's qr_key (in-place UPDATE). Old key is immediately
+     *  unreachable by `resolve`. Use this when the user wants to fight
+     *  spam — there's no time-based expiry. */
+    userQrcodeRefresh(): Promise<UserQrCodeRefreshResponse>;
+
+    /** Resolve a qr_key (scanned from another user's QR code) to the
+     *  minimum user card. Server intentionally does NOT return the
+     *  qr_key in the response to discourage secondary spreading. */
+    userQrcodeResolve(qrKey: string): Promise<UserQrCodeResolveResponse>;
+
+    // QR_CODE_SPEC v1.3 — group qrcode（群二维码）
+
+    /** Read a group's permanent qr_key + URL. Any member of the group
+     *  can call (server enforces). Use to render the group QR sheet. */
+    groupQrcodeGet(groupId: number): Promise<GroupQrCodeGetResponse>;
+
+    /** Rotate the group's qr_key. Owner/Admin only (server enforces).
+     *  Same anti-spam pattern as `userQrcodeRefresh`. */
+    groupQrcodeRefresh(groupId: number): Promise<GroupQrCodeRefreshResponse>;
+
+    /** Join a group by scanning its QR. Server reverse-looks-up the
+     *  group_id via `qr_key` and runs the same membership + capacity +
+     *  `join_need_approval` checks as `member/invite`. Response `status`
+     *  is `'joined'` or `'pending'`. */
+    groupJoinByQrcode(qrKey: string, message?: string): Promise<GroupQrCodeJoinResponse>;
   }
 }
 
@@ -469,6 +510,41 @@ proto.fileUploadCallback = function (args) {
 
 proto.fileGetUrl = function (fileId) {
   return this.rpcCallTyped(Routes.file.GET_URL, { file_id: fileId });
+};
+
+// ---------- QR_CODE_SPEC v1.3 — user qrcode ----------
+
+proto.userQrcodeGet = function (): Promise<UserQrCodeGetResponse> {
+  // user_id 服务端从 ctx 读，请求体无入参；空对象保留以保持 wire 形式一致。
+  return this.rpcCallTyped(Routes.user_qrcode.GET, {});
+};
+
+proto.userQrcodeRefresh = function (): Promise<UserQrCodeRefreshResponse> {
+  return this.rpcCallTyped(Routes.user_qrcode.REFRESH, {});
+};
+
+proto.userQrcodeResolve = function (qrKey: string): Promise<UserQrCodeResolveResponse> {
+  return this.rpcCallTyped(Routes.user_qrcode.RESOLVE, { qr_key: qrKey });
+};
+
+// ---------- QR_CODE_SPEC v1.3 — group qrcode ----------
+
+proto.groupQrcodeGet = function (groupId: number): Promise<GroupQrCodeGetResponse> {
+  return this.rpcCallTyped(Routes.group_qrcode.GET, { group_id: groupId });
+};
+
+proto.groupQrcodeRefresh = function (groupId: number): Promise<GroupQrCodeRefreshResponse> {
+  return this.rpcCallTyped(Routes.group_qrcode.REFRESH, { group_id: groupId });
+};
+
+proto.groupJoinByQrcode = function (
+  qrKey: string,
+  message?: string,
+): Promise<GroupQrCodeJoinResponse> {
+  return this.rpcCallTyped(Routes.group_qrcode.JOIN, {
+    qr_key: qrKey,
+    ...(message !== undefined && message !== '' ? { message } : {}),
+  });
 };
 
 // ---------- Media message helpers ----------
