@@ -221,6 +221,38 @@ export interface TypingReceivedEvent {
   timestamp: number;
 }
 
+/**
+ * Generic inbound channel publish for **non-typing** topics. Emitted when
+ * the SDK receives a `PublishRequest` packet for a channel the client is
+ * subscribed to, whose `topic` is anything other than `"typing"` (typing
+ * keeps its dedicated `typing_received` event).
+ *
+ * This is the transport for application-defined room broadcasts —
+ * notably the game module's table-state fan-out (`topic="game_state"` /
+ * `"hand_started"` / `"state_updated"` etc.). The SDK does NOT interpret
+ * the payload; it forwards `topic` + raw `payload_text` (the publish
+ * bytes decoded as UTF-8, which the game server sends as JSON) so the
+ * application layer can parse per-topic.
+ *
+ * Consumers should match on `channel_id` + `topic` and parse
+ * `payload_text` as needed. Unknown topics can be safely ignored.
+ */
+export interface ChannelPublishReceivedEvent {
+  type: 'channel_publish_received';
+  channel_id: string;
+  /** Publisher-chosen discriminator, e.g. "game_state". Never "typing"
+   *  (that path emits `typing_received` instead). */
+  topic: string;
+  /** Publish payload decoded as UTF-8 text. Game server sends JSON here;
+   *  caller does `JSON.parse(payload_text)`. Empty string when the
+   *  publish carried no payload. */
+  payload_text: string;
+  /** Publishing user id (decimal string); empty for system publishes. */
+  publisher: string;
+  /** Server unix-seconds timestamp at publish time. */
+  timestamp: number;
+}
+
 export type SdkEvent =
   | ConnectionStateChangedEvent
   | MessageReceivedEvent
@@ -232,7 +264,8 @@ export type SdkEvent =
   | OutboxDrainedEvent
   | ReadCursorUpdatedEvent
   | PeerReadCursorUpdatedEvent
-  | TypingReceivedEvent;
+  | TypingReceivedEvent
+  | ChannelPublishReceivedEvent;
 
 export interface SequencedSdkEvent {
   sequence_id: number;

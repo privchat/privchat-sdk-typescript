@@ -2544,8 +2544,26 @@ export class PrivchatClient {
       this.dispatchTypingNotification(parsed);
       return;
     }
-    // Unknown topic — log once at debug, drop. Adding a real handler
-    // is the right place for new server-pushed signals.
+    // Non-typing topics → generic `channel_publish_received` event so the
+    // application layer (e.g. game module table-state fan-out) can consume
+    // room broadcasts. SDK does not interpret the payload; forward topic +
+    // UTF-8-decoded payload text (game server publishes JSON).
+    let payloadText = '';
+    if (parsed.payload.length > 0) {
+      try {
+        payloadText = new TextDecoder().decode(parsed.payload);
+      } catch {
+        payloadText = '';
+      }
+    }
+    this.bus.emit({
+      type: 'channel_publish_received',
+      channel_id: parsed.channel_id,
+      topic: parsed.topic,
+      payload_text: payloadText,
+      publisher: parsed.publisher,
+      timestamp: parsed.timestamp,
+    });
   }
 
   /** Parse a TypingStatusNotification JSON payload and emit it as an

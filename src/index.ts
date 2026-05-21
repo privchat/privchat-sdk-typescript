@@ -96,6 +96,7 @@ export type {
   SequencedSdkEvent,
   SyncFullRebuildRequiredEvent,
   TypingReceivedEvent,
+  ChannelPublishReceivedEvent,
 } from './events.js';
 
 // ----- MessageType / SubscribeAction -----
