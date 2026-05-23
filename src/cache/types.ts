@@ -149,6 +149,13 @@ export interface ChannelRecord {
   server_current_pts?: IdString;
   unread_count: number;
   last_message_preview?: string;
+  /** Canonical content type of the most-recent message ('text' / 'image'
+   *  / 'system' / …), as resolved by `derivePreview`. The conversation-
+   *  list UI shows `last_message_preview` verbatim for `text` and renders
+   *  a locale-specific placeholder ("[图片]" / "[Image]") for every other
+   *  type. Undefined for older cached rows written before this field
+   *  existed — the UI falls back to showing `last_message_preview`. */
+  last_message_type?: string;
   /**
    * `true` when the channel's most-recent message has been revoked.
    * Set by the push-absorb path when a `deleted=true` push lands AND

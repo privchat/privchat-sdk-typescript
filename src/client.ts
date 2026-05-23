@@ -106,6 +106,7 @@ import {
   type PublishRequest,
 } from './codec/publish.js';
 import { parseRpcJson } from './codec/safe-json.js';
+import { derivePreview } from './preview.js';
 import {
   decodeRpcResponse,
   encodeRpcRequest,
@@ -1365,8 +1366,20 @@ export class PrivchatClient {
       next = { ...next, updated_at: acked.timestamp };
       mutated = true;
     }
-    if (acked.content !== '' && next.last_message_preview !== acked.content) {
-      next = { ...next, last_message_preview: acked.content };
+    const ackPreview = derivePreview(acked.content, acked.message_type);
+    // Skip only an empty *text* preview (keep the prior line); non-text
+    // always carries a type the UI renders a placeholder for.
+    const ackHasPreview = ackPreview.content_type !== 'text' || ackPreview.text !== '';
+    if (
+      ackHasPreview &&
+      (next.last_message_preview !== ackPreview.text ||
+        next.last_message_type !== ackPreview.content_type)
+    ) {
+      next = {
+        ...next,
+        last_message_preview: ackPreview.text,
+        last_message_type: ackPreview.content_type,
+      };
       mutated = true;
     }
     if (mutated) {
@@ -1545,6 +1558,13 @@ export class PrivchatClient {
       const bucket = cursorByChannel.get(channel_id);
       const selfPts = bucket?.self?.last_read_pts;
       const peerPts = bucket?.peer?.last_read_pts;
+      // Server only sends `last_msg_content` (no type); for non-text rows
+      // it is the raw message JSON envelope. `derivePreview` sniffs the
+      // type out of it so the UI can render a placeholder instead of JSON.
+      const preview =
+        payload.last_msg_content !== undefined
+          ? derivePreview(payload.last_msg_content)
+          : undefined;
       return {
         channel_id,
         channel_type,
@@ -1554,7 +1574,8 @@ export class PrivchatClient {
         read_pts: selfPts !== undefined ? String(selfPts) : '0',
         peer_read_pts: peerPts !== undefined ? String(peerPts) : undefined,
         unread_count: payload.unread_count ?? 0,
-        last_message_preview: payload.last_msg_content,
+        last_message_preview: preview?.text,
+        last_message_type: preview?.content_type,
         updated_at: payload.last_msg_timestamp ?? 0,
         sync_version: item.version,
       };
@@ -2869,13 +2890,21 @@ export class PrivchatClient {
       if (record.timestamp > channel.updated_at) {
         next = { ...next, updated_at: record.timestamp };
         mutated = true;
-        // Refresh the channel-list preview to the most recent message's
-        // text content. Only when timestamp is actually advancing (so an
-        // out-of-order push doesn't replace a newer preview with an older
-        // one) and only for non-revoked rows. Empty content (system push,
-        // unsupported message_type) is dropped — keep the prior preview.
-        if (!record.revoked && record.content !== '') {
-          next = { ...next, last_message_preview: record.content };
+        // Refresh the channel-list preview to the most recent message.
+        // Only when timestamp is actually advancing (so an out-of-order
+        // push doesn't replace a newer preview with an older one) and only
+        // for non-revoked rows. `derivePreview` resolves the content type
+        // (the UI renders a localized placeholder for non-text); an empty
+        // *text* preview is dropped — keep the prior line.
+        if (!record.revoked) {
+          const preview = derivePreview(record.content, record.message_type);
+          if (preview.content_type !== 'text' || preview.text !== '') {
+            next = {
+              ...next,
+              last_message_preview: preview.text,
+              last_message_type: preview.content_type,
+            };
+          }
         }
       }
       // Latest-message revoke handling. Two cases land here:
