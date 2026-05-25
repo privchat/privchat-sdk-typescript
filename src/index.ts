@@ -78,10 +78,22 @@ export {
 } from './auth-error.js';
 export type { AuthErrorKind } from './auth-error.js';
 
+// ----- Auth refresh (SDK-owned coordinator) -----
+export { AuthRefreshCoordinator, SessionExpiredError } from './auth-refresh.js';
+export type {
+  AuthRefreshConfig,
+  AuthRefreshContext,
+  AuthRefreshResult,
+} from './auth-refresh.js';
+
 // ----- L1 event surface -----
 export type {
   AuthExpiredEvent,
   AuthExpiredReason,
+  AuthRefreshStartedEvent,
+  AuthRefreshSucceededEvent,
+  AuthRefreshFailedEvent,
+  SessionExpiredEvent,
   ConnectionState,
   ConnectionStateChangedEvent,
   MessageBatchReceivedEvent,

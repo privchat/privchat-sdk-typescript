@@ -108,6 +108,11 @@ import {
 import { parseRpcJson } from './codec/safe-json.js';
 import { derivePreview } from './preview.js';
 import {
+  AuthRefreshCoordinator,
+  SessionExpiredError,
+  type AuthRefreshConfig,
+} from './auth-refresh.js';
+import {
   decodeRpcResponse,
   encodeRpcRequest,
   type RpcRequest,
@@ -607,6 +612,11 @@ export class PrivchatClient {
   private state: ConnectionState = 'disconnected';
   /** Captured on successful `authenticate()` so reconnect can replay it. Cleared on disconnect(). */
   private lastAuth: { user_id: string; access_token: string; device_id: string } | null = null;
+  /** Host-injected auth-refresh config (see `configureAuthRefresh`). Null = no auto-refresh (legacy behavior). */
+  private authRefreshCfg: AuthRefreshConfig | null = null;
+  private authRefreshCoordinator: AuthRefreshCoordinator | null = null;
+  /** Idempotency guard: `session_expired` (event + `onSessionExpired`) fires at most once per client. */
+  private sessionExpiredEmitted = false;
   /** Phase 4: IndexedDB cache + in-memory store. Both null when cache disabled. */
   private readonly cacheDb: CacheDB | null;
   private readonly cacheStore: MessageStore | null;
@@ -993,11 +1003,42 @@ export class PrivchatClient {
    * client_info/device_info), runs the layer-1 `authorize()`, and throws
    * `AuthorizationError` when the server returns `success=false`.
    */
+  /**
+   * Install the SDK-owned auth-refresh flow. Once configured, a recoverable
+   * auth failure (expired access token) at `authenticate()` OR at
+   * auto-reconnect replay triggers a single-flight `refreshAuth` + one
+   * retry, transparently to the caller. A terminal failure (refresh
+   * rejected / impossible) fires `session_expired` (event + callback) once.
+   *
+   * Client-level (not per-`authenticate()` arg) so it also covers the
+   * SDK-internal reconnect path, which replays `lastAuth` long after the
+   * original `authenticate()` call returned.
+   */
+  configureAuthRefresh(cfg: AuthRefreshConfig): void {
+    this.authRefreshCfg = cfg;
+    this.authRefreshCoordinator = new AuthRefreshCoordinator(cfg);
+  }
+
   async authenticate(
     user_id: string,
     token: string,
     device_id: string,
     opts: RequestOptions = {},
+  ): Promise<AuthorizationResponse> {
+    return this.authenticateInternal(user_id, token, device_id, opts, true);
+  }
+
+  /**
+   * @param allowRefresh when true (and a refresh config is installed), a
+   *   recoverable failure triggers refresh + a single retry (with
+   *   `allowRefresh=false` on the retry to bound it to one attempt — rule 1).
+   */
+  private async authenticateInternal(
+    user_id: string,
+    token: string,
+    device_id: string,
+    opts: RequestOptions,
+    allowRefresh: boolean,
   ): Promise<AuthorizationResponse> {
     const req: AuthorizationRequest = {
       auth_type: 'jwt',
@@ -1014,6 +1055,23 @@ export class PrivchatClient {
     const resp = await this.authorize(req, opts);
     if (!resp.success) {
       const err = new AuthorizationError(resp);
+      // SDK-owned refresh: a recoverable failure (expired access token)
+      // with a refresh config installed → refresh once + retry, instead of
+      // surfacing the failure. Bounded to one attempt by `allowRefresh`.
+      if (
+        err.errorKind === 'recoverable' &&
+        allowRefresh &&
+        this.authRefreshCoordinator !== null
+      ) {
+        return this.refreshAndRetryAuthenticate(
+          'token_expired',
+          user_id,
+          token,
+          device_id,
+          opts,
+        );
+      }
+      // No refresh (legacy behavior) OR terminal OR already retried.
       // State transition follows recovery class: recoverable keeps the
       // transport viable (caller will refresh + retry), terminal drops
       // back to disconnected so the caller knows to re-login fully.
@@ -1024,11 +1082,73 @@ export class PrivchatClient {
         error_code: err.errorCode,
         message: resp.error_message,
       });
+      // Terminal with a refresh config installed → the session is dead and
+      // refresh can't save it; surface `session_expired` for the host UX.
+      if (err.errorKind === 'terminal' && this.authRefreshCfg !== null) {
+        this.emitSessionExpired(err.errorCode, resp.error_message);
+      }
       throw err;
     }
     this.lastAuth = { user_id, access_token: token, device_id };
     this.setState('authenticated');
     return resp;
+  }
+
+  /**
+   * Run the injected refresh, then retry `authenticate` exactly once with
+   * the fresh token. On refresh failure (terminal), fires `session_expired`
+   * and rethrows a `SessionExpiredError`. On a successful retry, `lastAuth`
+   * is updated by `authenticateInternal`'s success path with the new token
+   * (rule 4), so the next auto-reconnect replays the fresh credential.
+   */
+  private async refreshAndRetryAuthenticate(
+    reason: 'token_expired' | 'auth_failed_reconnect',
+    user_id: string,
+    token: string,
+    device_id: string,
+    opts: RequestOptions,
+  ): Promise<AuthorizationResponse> {
+    this.bus.emit({ type: 'auth_refresh_started', reason });
+    let refreshed;
+    try {
+      refreshed = await this.authRefreshCoordinator!.refresh({
+        reason,
+        accessToken: token,
+        deviceId: device_id,
+        userId: user_id,
+        attempt: 1,
+      });
+    } catch (e) {
+      const code = e instanceof RefreshTokenError ? e.errorCode : undefined;
+      const message = e instanceof Error ? e.message : String(e);
+      this.bus.emit({ type: 'auth_refresh_failed', reason, error_code: code, message });
+      this.setState('disconnected', message);
+      this.emitSessionExpired(code, message);
+      throw new SessionExpiredError(message, code);
+    }
+    this.bus.emit({ type: 'auth_refresh_succeeded', reason });
+    // Retry once (allowRefresh=false bounds it to a single attempt).
+    return this.authenticateInternal(
+      refreshed.userId ?? user_id,
+      refreshed.accessToken,
+      refreshed.deviceId ?? device_id,
+      opts,
+      false,
+    );
+  }
+
+  /** Fire `session_expired` (event + `onSessionExpired`) at most once. */
+  private emitSessionExpired(error_code?: number, message?: string): void {
+    if (this.sessionExpiredEmitted) return;
+    this.sessionExpiredEmitted = true;
+    this.bus.emit({ type: 'session_expired', error_code, message });
+    try {
+      this.authRefreshCfg?.onSessionExpired?.(
+        new SessionExpiredError(message ?? 'session expired', error_code),
+      );
+    } catch {
+      /* host callback errors must not break the SDK */
+    }
   }
 
   /**
@@ -3106,11 +3226,20 @@ export class PrivchatClient {
     // Replay last authenticate (clears lastAuth on terminal failure).
     const { user_id, access_token, device_id } = this.lastAuth;
     try {
+      // authenticate() now performs SDK-owned refresh + one retry internally
+      // when a refresh config is installed and the failure is recoverable
+      // (expired token). On success the continuation below (subscriptions /
+      // sync / outbox) runs normally — the coordinator only replaces the
+      // auth-failure recovery, it does not truncate the reconnect.
       await this.authenticate(user_id, access_token, device_id);
     } catch (e) {
-      // authenticate() already emitted auth_expired + adjusted state.
-      // Stop the reconnect cycle — business layer must refresh / re-login.
-      if (e instanceof AuthorizationError && e.errorKind === 'terminal') {
+      // authenticate() already emitted auth_expired / session_expired and
+      // adjusted state. Stop the reconnect cycle — a terminal failure (incl.
+      // a failed refresh → SessionExpiredError) means the host must re-login.
+      if (
+        (e instanceof AuthorizationError && e.errorKind === 'terminal') ||
+        e instanceof SessionExpiredError
+      ) {
         this.lastAuth = null;
       }
       this.cancelReconnect();

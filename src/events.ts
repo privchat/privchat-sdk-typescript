@@ -72,6 +72,42 @@ export interface AuthExpiredEvent {
 }
 
 /**
+ * Auth-refresh coordinator lifecycle (debug/log). Emitted by the
+ * SDK-owned refresh flow: when a recoverable auth failure (expired access
+ * token) triggers an injected `refreshAuth` call. Web's only HARD
+ * dependency is `session_expired`; these three are for diagnostics.
+ */
+export interface AuthRefreshStartedEvent {
+  type: 'auth_refresh_started';
+  /** Which path hit the expiry — initial/explicit auth vs auto-reconnect replay. */
+  reason: 'token_expired' | 'auth_failed_reconnect';
+}
+export interface AuthRefreshSucceededEvent {
+  type: 'auth_refresh_succeeded';
+  reason: 'token_expired' | 'auth_failed_reconnect';
+}
+export interface AuthRefreshFailedEvent {
+  type: 'auth_refresh_failed';
+  reason: 'token_expired' | 'auth_failed_reconnect';
+  error_code?: number;
+  message?: string;
+}
+
+/**
+ * Terminal auth state: refresh is impossible or was rejected (refresh
+ * token expired/revoked, platform 401/403, or no refresh configured for a
+ * terminal failure). Fired AT MOST ONCE per client (idempotent). The host
+ * app turns this into a "session expired, please log in again" UX. Distinct
+ * from `auth_expired` (which also fires for recoverable cases the SDK then
+ * silently refreshes).
+ */
+export interface SessionExpiredEvent {
+  type: 'session_expired';
+  error_code?: number;
+  message?: string;
+}
+
+/**
  * Catastrophic sync state mismatch — server rejected even a per-channel
  * resync (typically `SyncFullRebuildRequired`, code 20902). The SDK does
  * NOT auto-wipe local state; the host application must decide whether to
@@ -259,6 +295,10 @@ export type SdkEvent =
   | MessageBatchReceivedEvent
   | PongReceivedEvent
   | AuthExpiredEvent
+  | AuthRefreshStartedEvent
+  | AuthRefreshSucceededEvent
+  | AuthRefreshFailedEvent
+  | SessionExpiredEvent
   | SyncFullRebuildRequiredEvent
   | OutboxStateChangedEvent
   | OutboxDrainedEvent
