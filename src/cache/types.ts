@@ -11,6 +11,7 @@
 
 import { decodeMessagePayloadEnvelope } from '../codec/payload.js';
 import type { PushMessageRequest } from '../codec/push.js';
+import { contentTypeFromWireTag } from '../content-type.js';
 
 /** All u64-grade ids stay as decimal strings at the public boundary —
  *  snowflake IDs exceed `Number.MAX_SAFE_INTEGER` in production. */
@@ -385,7 +386,11 @@ export function pushToMessageRecord(push: PushMessageRequest): MessageRecord {
       push.local_message_id !== '0' ? push.local_message_id : undefined,
     pts: String(push.message_seq),
     from_uid: push.from_uid,
-    message_type: String(push.message_type),
+    // Canonical word form ('text' / 'image' / …) — same representation
+    // the history / sync paths store, so dedup comparisons and consumers
+    // see ONE representation regardless of ingest path. (Legacy rows
+    // persisted as decimal strings are still understood by decoders.)
+    message_type: contentTypeFromWireTag(push.message_type),
     content: extractPushContent(push),
     payload: push.payload,
     timestamp: push.timestamp * 1000, // PushMessageRequest.timestamp is seconds

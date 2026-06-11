@@ -28,7 +28,8 @@ describe('pushToMessageRecord', () => {
     const rec = pushToMessageRecord(samplePush());
     expect(rec.server_message_id).toBe('700110001');
     expect(rec.pts).toBe('100');
-    expect(rec.message_type).toBe('0');
+    // Canonical word form — the same representation history/sync writes.
+    expect(rec.message_type).toBe('text');
     expect(rec.from_uid).toBe('999');
     expect(rec.timestamp).toBe(1_714_680_000_000);
     expect(rec.status).toBe('received');

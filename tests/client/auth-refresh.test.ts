@@ -166,8 +166,12 @@ describe('authenticate(): refresh-on-expiry + retry once', () => {
 });
 
 describe('auto-reconnect: refresh-on-expiry during replay', () => {
-  beforeEach(() => vi.useFakeTimers());
-  afterEach(() => vi.useRealTimers());
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
   it('replay hits expired token → refresh → reconnect ends authenticated', async () => {
     const t = new FakeTransport();

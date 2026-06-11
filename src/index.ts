@@ -78,6 +78,14 @@ export {
 } from './auth-error.js';
 export type { AuthErrorKind } from './auth-error.js';
 
+// ----- Canonical content-type mapping -----
+export {
+  contentTypeFromWireTag,
+  contentTypeToWireTag,
+  decodeContentTypeName,
+} from './content-type.js';
+export type { ContentTypeName } from './content-type.js';
+
 // ----- Auth refresh (SDK-owned coordinator) -----
 export { AuthRefreshCoordinator, SessionExpiredError } from './auth-refresh.js';
 export type {

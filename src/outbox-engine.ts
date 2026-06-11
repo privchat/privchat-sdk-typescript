@@ -31,6 +31,7 @@ import {
 } from './cache/index.js';
 import type { SendMessageRequest, SendMessageResponse } from './codec/send.js';
 import type { ConnectionState, OutboxStateChangedEvent } from './events.js';
+import { contentTypeToWireTag } from './content-type.js';
 
 // ----- Public API -----
 
@@ -427,7 +428,9 @@ export class OutboxEngine {
       channel_type: entry.channel_type,
       local_message_id: entry.local_message_id,
       from_uid: entry.from_uid,
-      message_type: String(contentTypeToWireTag(entry.content_type)),
+      // Cache rows store the word form directly; the wire tag is only
+      // materialised in buildRequest.
+      message_type: entry.content_type,
       content: new TextDecoder().decode(entry.payload),
       payload: entry.payload,
       timestamp: entry.created_at,
@@ -461,15 +464,6 @@ function identityOf(entry: OutboxEntry): {
 
 /** Application content type string → wire MessageType numeric tag.
  *  5C-1c only handles `'text'`; future content types extend this. */
-function contentTypeToWireTag(content_type: string): number {
-  switch (content_type) {
-    case 'text':
-      return 0;
-    default:
-      return 0;
-  }
-}
-
 function formatErr(e: unknown): string {
   if (e instanceof Error) return `${e.name}: ${e.message}`;
   return String(e);

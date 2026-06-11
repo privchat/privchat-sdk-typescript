@@ -13,21 +13,11 @@
 // (text) on the channel record, and the UI maps the type to a translated
 // label at render time.
 
-/** Canonical content-type discriminants, mirroring
- *  `protocol::ContentMessageType` / `MessageType::as_str()`. */
-export type PreviewContentType =
-  | 'text'
-  | 'voice'
-  | 'image'
-  | 'video'
-  | 'file'
-  | 'system'
-  | 'sticker'
-  | 'contact_card'
-  | 'location'
-  | 'link'
-  | 'forward'
-  | 'unknown';
+import { decodeContentTypeName, type ContentTypeName } from './content-type.js';
+
+/** Canonical content-type discriminants. Alias of the shared
+ *  `ContentTypeName` (kept as a named export for back-compat). */
+export type PreviewContentType = ContentTypeName;
 
 export interface MessagePreview {
   /** Resolved type. The UI shows `text` verbatim and renders a localized
@@ -38,54 +28,6 @@ export interface MessagePreview {
    *  placeholder instead, but this stays sane as a fallback and never
    *  leaks the raw JSON envelope). */
   text: string;
-}
-
-const WORD_TYPES: ReadonlySet<string> = new Set<PreviewContentType>([
-  'text',
-  'voice',
-  'image',
-  'video',
-  'file',
-  'system',
-  'sticker',
-  'contact_card',
-  'location',
-  'link',
-  'forward',
-  'unknown',
-]);
-
-/** Map a `message_type` into a `PreviewContentType`. Accepts both the wire
- *  decimal form ("0".."10", push/outbox) and the server word form
- *  ("text"/"image"/…, history/sync). Anything else → 'unknown'. */
-function toContentType(raw: string): PreviewContentType {
-  if (WORD_TYPES.has(raw)) return raw as PreviewContentType;
-  switch (raw) {
-    case '0':
-      return 'text';
-    case '1':
-      return 'voice';
-    case '2':
-      return 'image';
-    case '3':
-      return 'video';
-    case '4':
-      return 'file';
-    case '5':
-      return 'system';
-    case '6':
-      return 'sticker';
-    case '7':
-      return 'contact_card';
-    case '8':
-      return 'location';
-    case '9':
-      return 'link';
-    case '10':
-      return 'forward';
-    default:
-      return 'unknown';
-  }
 }
 
 /** When `messageType` is absent (channel-sync only carries the raw
@@ -108,7 +50,7 @@ function sniffEnvelope(
   const mt = obj.message_type;
   if (typeof mt !== 'string' && typeof mt !== 'number') return undefined;
   return {
-    type: toContentType(String(mt)),
+    type: decodeContentTypeName(String(mt)),
     inner: typeof obj.content === 'string' ? obj.content : '',
   };
 }
@@ -124,7 +66,7 @@ function sniffEnvelope(
  */
 export function derivePreview(content: string, messageType?: string): MessagePreview {
   if (messageType !== undefined) {
-    return { content_type: toContentType(messageType), text: content };
+    return { content_type: decodeContentTypeName(messageType), text: content };
   }
   const env = sniffEnvelope(content);
   if (env === undefined) return { content_type: 'text', text: content };

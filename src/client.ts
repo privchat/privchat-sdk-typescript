@@ -107,6 +107,7 @@ import {
 } from './codec/publish.js';
 import { parseRpcJson } from './codec/safe-json.js';
 import { derivePreview } from './preview.js';
+import { contentTypeFromWireTag } from './content-type.js';
 import {
   AuthRefreshCoordinator,
   SessionExpiredError,
@@ -1358,7 +1359,7 @@ export class PrivchatClient {
       channel_type: input.channel_type,
       local_message_id: localMsgId,
       from_uid: input.from_uid,
-      message_type: String(input.message_type ?? 0),
+      message_type: contentTypeFromWireTag(input.message_type ?? 0),
       content: input.content,
       payload,
       timestamp: Date.now(),
@@ -1536,7 +1537,10 @@ export class PrivchatClient {
       channel_type: input.channel_type,
       local_message_id: outbox_id,
       from_uid: input.from_uid,
-      content_type: 'text',
+      // Word form derived from the send input — media sends queued
+      // offline must NOT regress to text on outbox retry (the engine
+      // maps this back to the wire tag in buildRequest).
+      content_type: contentTypeFromWireTag(input.message_type ?? 0),
       payload,
       created_at: now,
       updated_at: now,
