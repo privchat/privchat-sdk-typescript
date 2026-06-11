@@ -228,7 +228,8 @@ export interface FileGetUrlResponse {
  * exchange.
  */
 export interface FileUploadResult {
-  file_id: number;
+  /** u64 snowflake; lossless parse → number-or-string (see safe-json). */
+  file_id: number | string;
   file_url: string;
   thumbnail_url?: string | null;
   file_size: number;
@@ -613,11 +614,14 @@ export interface ChannelReadCursorNotificationMetadata {
   /** Always literal "channel_read_cursor_updated" — the discriminator
    *  for self vs peer is the `visibility` field below, NOT this one. */
   notification_type: string;
-  channel_id: number;
+  /** u64 on the wire as a raw JSON number. Parsed losslessly: values
+   *  above 2^53 arrive as decimal strings (consumers `String(...)` it). */
+  channel_id: number | string;
   channel_type: number;
   /** Server emits this as a string (u64 to_string). */
   reader_id: string;
-  read_pts: number;
+  /** u64 counter; same lossless number-or-string contract as channel_id. */
+  read_pts: number | string;
   visibility: ReadCursorVisibility;
   updated_at: number;
 }

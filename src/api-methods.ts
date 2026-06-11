@@ -12,6 +12,7 @@
 // (so callers write `client.friendApply(...)` not `friendApply(client, ...)`).
 
 import { PrivchatClient } from './client.js';
+import { parseRpcJson } from './codec/safe-json.js';
 import { Routes } from './routes.js';
 import type {
   AccountSearchQueryRequest,
@@ -791,7 +792,10 @@ export function uploadFileViaToken(args: {
       }
       let json: { code?: number; message?: string; data?: FileUploadResult };
       try {
-        json = JSON.parse(xhr.responseText ?? '{}') as typeof json;
+        // Lossless parse — `data.file_id` is a u64 snowflake the file
+        // server emits as a raw JSON number; plain JSON.parse rounds it
+        // above 2^53 and the message would reference a wrong file.
+        json = parseRpcJson(xhr.responseText ?? '{}') as typeof json;
       } catch (e) {
         reject(new Error(`upload response not JSON: ${(e as Error).message}`));
         return;

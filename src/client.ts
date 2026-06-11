@@ -468,7 +468,11 @@ function tryDecodeReadCursorNotification(
   payload: Uint8Array,
 ): ChannelReadCursorNotification | null {
   try {
-    const json = JSON.parse(new TextDecoder().decode(payload)) as unknown;
+    // Lossless parse: `channel_id` / `read_pts` are u64s the server emits
+    // as raw JSON numbers; plain JSON.parse silently rounds anything
+    // above 2^53 (snowflake channel ids are 18 digits), which made the
+    // String(channel_id) cache lookup miss and dropped the cursor update.
+    const json = parseRpcJson<unknown>(new TextDecoder().decode(payload));
     if (typeof json !== 'object' || json === null) return null;
     const obj = json as Record<string, unknown>;
     const meta = obj['metadata'];
@@ -2725,7 +2729,10 @@ export class PrivchatClient {
       timestamp?: number;
     };
     try {
-      notif = JSON.parse(new TextDecoder().decode(envelope.payload));
+      // Lossless parse — `user_id`/`channel_id` are u64s emitted as raw
+      // JSON numbers; above 2^53 they must arrive as strings, not get
+      // rounded (the String(...) below would stringify a wrong value).
+      notif = parseRpcJson(new TextDecoder().decode(envelope.payload));
     } catch (e) {
       // eslint-disable-next-line no-console
       console.warn('[privchat] typing payload not JSON', e);

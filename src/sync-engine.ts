@@ -16,6 +16,7 @@
 //
 // Out of scope for 5B-1c: reconnect wiring (5B-1d), accounts E2E (5B-1e).
 
+import { parseRpcJson } from './codec/safe-json.js';
 import {
   clearChannelMessages as cacheClearChannelMessages,
   deleteMessageByRecordKey as cacheDeleteMessageByRecordKey,
@@ -640,7 +641,11 @@ function extractContent(value: unknown): string {
 function parseCurrentPts(data: Uint8Array | undefined): string | undefined {
   if (!data || data.length === 0) return undefined;
   try {
-    const json = JSON.parse(new TextDecoder().decode(data)) as Record<string, unknown>;
+    // Lossless parse — `current_pts` is a u64 counter; above 2^53 a plain
+    // JSON.parse would round it before the string branch below runs.
+    const json = parseRpcJson<Record<string, unknown>>(
+      new TextDecoder().decode(data),
+    );
     const cp = json['current_pts'];
     if (typeof cp === 'number') return String(cp);
     if (typeof cp === 'string') return cp;
