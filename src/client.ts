@@ -982,6 +982,15 @@ export class PrivchatClient {
     req: TransferRequest,
     opts: RequestOptions = {},
   ): Promise<TransferResponse> {
+    // Fail fast: the gateway rejects anything but exactly 3 non-empty
+    // segments (`service/module/action`, code=10100). Catch it locally so
+    // a bad route surfaces as a clear client error, not a network failure.
+    const segments = req.route.split('/');
+    if (segments.length !== 3 || segments.some((s) => s.length === 0)) {
+      throw new Error(
+        `transfer route must have exactly 3 segments "service/module/action"; got "${req.route}"`,
+      );
+    }
     const raw = await this.transport.request(encodeTransferRequest(req), {
       bizType: MessageType.TransferRequest,
       timeoutMs: opts.timeoutMs,
@@ -997,7 +1006,7 @@ export class PrivchatClient {
    * (client → server → application route handler → back).
    *
    * Primary consumer: the in-room end-to-end heartbeat
-   * (`route='game/heartbeat'`, LIFECYCLE spec §14) — a WS-level ping only
+   * (`route='game/room/heartbeat'`, LIFECYCLE spec §14) — a WS-level ping only
    * proves the gateway is alive; this proves the whole business chain.
    */
   async transferCall(
