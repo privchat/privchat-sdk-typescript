@@ -989,6 +989,36 @@ export class PrivchatClient {
     return decodeTransferResponse(raw);
   }
 
+  /**
+   * JSON convenience over `transfer()` — mirrors `rpcCall`. Body is UTF-8
+   * encoded JSON; response data decoded back to a UTF-8 string (empty data
+   * → `''`). Throws `Error` when `code !== 0` so callers can treat any
+   * resolved value as a successful end-to-end round trip
+   * (client → server → application route handler → back).
+   *
+   * Primary consumer: the in-room end-to-end heartbeat
+   * (`route='game/heartbeat'`, LIFECYCLE spec §14) — a WS-level ping only
+   * proves the gateway is alive; this proves the whole business chain.
+   */
+  async transferCall(
+    channel_id: string,
+    route: string,
+    bodyJson: string,
+    opts: RequestOptions = {},
+  ): Promise<string> {
+    const request_id = (globalThis as { crypto?: { randomUUID?: () => string } })
+      .crypto?.randomUUID?.()
+      ?? `tr-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+    const resp = await this.transfer(
+      { request_id, channel_id, route, body: new TextEncoder().encode(bodyJson) },
+      opts,
+    );
+    if (resp.code !== 0) {
+      throw new Error(`transfer ${route} failed: code=${resp.code} ${resp.message}`);
+    }
+    return resp.data && resp.data.length > 0 ? new TextDecoder().decode(resp.data) : '';
+  }
+
   async ping(
     req: PingRequest = { timestamp: Date.now() },
     opts: RequestOptions = {},
