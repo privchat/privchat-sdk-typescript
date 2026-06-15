@@ -6,6 +6,7 @@ import {
   encodeRpcResponse,
 } from '../../src/index.js';
 import { FakeTransport } from './fake-transport.js';
+import { uniqueDbName } from './unique-db.js';
 
 let client: PrivchatClient | null = null;
 
@@ -113,7 +114,7 @@ describe('cache opt-in plumbing', () => {
   it('isCacheEnabled = true when constructor opts in', () => {
     client = new PrivchatClient({
       transport: new FakeTransport(),
-      cache: { enabled: true, dbName: `test-${Date.now()}` },
+      cache: { enabled: true, dbName: uniqueDbName('test') },
     });
     expect(client.isCacheEnabled()).toBe(true);
   });
@@ -166,7 +167,7 @@ describe('bootstrapChannels', () => {
 
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `bootstrap-${Date.now()}` },
+      cache: { enabled: true, dbName: uniqueDbName('bootstrap') },
     });
     const channels = await client.bootstrapChannels();
 
@@ -234,7 +235,7 @@ describe('bootstrapChannels', () => {
 
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `peer-baseline-${Date.now()}` },
+      cache: { enabled: true, dbName: uniqueDbName('peer-baseline') },
     });
     // Pretend we authenticated as 555. The lastAuth.user_id field is
     // what the bucket-routing logic compares against.
@@ -280,7 +281,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `legacy-${Date.now()}` },
+      cache: { enabled: true, dbName: uniqueDbName('legacy') },
     });
     const channels = await client.bootstrapChannels();
     const ch = channels[0]!;
@@ -336,7 +337,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `r2a-bootstrap-${Date.now()}` },
+      cache: { enabled: true, dbName: uniqueDbName('r2a-bootstrap') },
     });
     await client.bootstrapChannels();
     // bootstrap kicks profile sync as fire-and-forget; let it settle.
@@ -375,7 +376,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `r2a-fail-${Date.now()}` },
+      cache: { enabled: true, dbName: uniqueDbName('r2a-fail') },
     });
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -430,7 +431,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `r2-1-bootstrap-${Date.now()}` },
+      cache: { enabled: true, dbName: uniqueDbName('r2-1-bootstrap') },
     });
     await client.bootstrapChannels();
     await new Promise((r) => setTimeout(r, 30));
@@ -470,7 +471,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `r2-1-tombstone-${Date.now()}` },
+      cache: { enabled: true, dbName: uniqueDbName('r2-1-tombstone') },
     });
     await client.bootstrapChannels();
     await new Promise((r) => setTimeout(r, 30));
@@ -521,7 +522,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `r2-1-fail-${Date.now()}` },
+      cache: { enabled: true, dbName: uniqueDbName('r2-1-fail') },
     });
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -544,7 +545,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `r2a-observe-${Date.now()}` },
+      cache: { enabled: true, dbName: uniqueDbName('r2a-observe') },
     });
     let userSnapshot = -1;
     let groupSnapshot = -1;
@@ -573,7 +574,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `obs-${Date.now()}` },
+      cache: { enabled: true, dbName: uniqueDbName('obs') },
     });
     let snapshot: number | null = null;
     client.observeChannelList((channels) => {
@@ -603,7 +604,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `tomb-${Date.now()}` },
+      cache: { enabled: true, dbName: uniqueDbName('tomb') },
     });
     const channels = await client.bootstrapChannels();
     expect(channels.map((c) => c.channel_id)).toEqual(['1']);
@@ -623,7 +624,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `type-${Date.now()}` },
+      cache: { enabled: true, dbName: uniqueDbName('type') },
     });
     const channels = await client.bootstrapChannels();
     expect(channels[0]!.channel_type).toBe(5);
@@ -647,7 +648,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `cached-${Date.now()}` },
+      cache: { enabled: true, dbName: uniqueDbName('cached') },
     });
     expect(client.cachedChannels()).toEqual([]);
     await client.bootstrapChannels();
