@@ -13,6 +13,7 @@
 
 import { PrivchatClient } from './client.js';
 import { parseRpcJson } from './codec/safe-json.js';
+import { encryptAttachment, decryptDownloadedAttachment } from './attachment-crypto.js';
 import { Routes } from './routes.js';
 import type {
   AccountSearchQueryRequest,
@@ -204,6 +205,13 @@ declare module './client.js' {
     /** Resolve a file_id to a fresh signed URL. Use when the embedded
      *  url in a message bubble has expired. */
     fileGetUrl(fileId: number): Promise<FileGetUrlResponse>;
+
+    /** 附件加密 v1 下载（ATTACHMENT_ENCRYPTION_SPEC §6/§7）：
+     *  `file_id`/`thumbnail_file_id -> file/get_url -> signed_url + cek` →
+     *  fetch 密文 blob → WebCrypto 解密 → 返回明文 `Blob`（带 mime）。
+     *  v0（legacy 明文）直接 fetch signed_url 返回。**CEK 不进 URL/日志。**
+     *  图片预览用 `URL.createObjectURL(blob)`，不能 `img.src = cdnUrl`（CDN 是密文）。 */
+    downloadAttachmentBlob(fileId: number): Promise<Blob>;
 
     // QR_CODE_SPEC v1.3 — user qrcode（个人名片码）
 
@@ -513,6 +521,26 @@ proto.fileGetUrl = function (fileId) {
   return this.rpcCallTyped(Routes.file.GET_URL, { file_id: fileId });
 };
 
+proto.downloadAttachmentBlob = async function (fileId: number): Promise<Blob> {
+  // file_id 优先：鉴权拿 signed_url + cek（绝不依赖消息里可能过期/明文的 url）。
+  const meta = await this.fileGetUrl(fileId);
+  if (meta.file_url === '' ) {
+    throw new Error('file/get_url returned empty file_url');
+  }
+  const resp = await fetch(meta.file_url);
+  if (!resp.ok) {
+    throw new Error(`download failed: HTTP ${resp.status} ${resp.statusText}`);
+  }
+  const cipher = new Uint8Array(await resp.arrayBuffer());
+  const plaintext = await decryptDownloadedAttachment(
+    meta.encryption_version ?? 0,
+    meta.cek,
+    cipher,
+  );
+  // 用响应里的 mime（v1 密文 fetch 的 content-type 不可信，以 file 元信息为准）。
+  return new Blob([plaintext as BlobPart], { type: meta.mime_type || 'application/octet-stream' });
+};
+
 // ---------- QR_CODE_SPEC v1.3 — user qrcode ----------
 
 proto.userQrcodeGet = function (): Promise<UserQrCodeGetResponse> {
@@ -733,7 +761,7 @@ export interface UploadProgressEvent {
  * function rather than a PrivchatClient method because it touches
  * no transport state.
  */
-export function uploadFileViaToken(args: {
+export async function uploadFileViaToken(args: {
   file: Blob;
   filename: string;
   uploadUrl: string;
@@ -747,6 +775,12 @@ export function uploadFileViaToken(args: {
    *  promise rejects with an AbortError-shaped error. */
   signal?: AbortSignal;
 }): Promise<FileUploadResult> {
+  // 附件加密 v1（ATTACHMENT_ENCRYPTION_SPEC）：整文件 AES-256-GCM 加密；上传的是密文
+  // blob = nonce||ct||tag，multipart 带 encryption_version=1 + cek(base64url)。对象存储只见
+  // 密文。CEK 经 multipart 交服务端（存 file 表），鉴权后由 file/get_url 下发；不进日志/URL。
+  const plaintext = new Uint8Array(await args.file.arrayBuffer());
+  const { blob: cipherBlob, cek } = await encryptAttachment(plaintext);
+  const encryptedFile = new Blob([cipherBlob as BlobPart], { type: 'application/octet-stream' });
   return new Promise<FileUploadResult>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', args.uploadUrl);
@@ -814,7 +848,9 @@ export function uploadFileViaToken(args: {
     };
 
     const form = new FormData();
-    form.append('file', args.file, args.filename);
+    form.append('file', encryptedFile, args.filename);
+    form.append('encryption_version', '1');
+    form.append('cek', cek);
     if (args.businessId !== undefined) form.append('business_id', args.businessId);
     xhr.send(form);
   });

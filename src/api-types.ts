@@ -220,6 +220,10 @@ export interface FileGetUrlResponse {
   expires_at: number;
   file_size: number;
   mime_type: string;
+  /** 附件加密版本：0=明文 legacy；1=AES-256-GCM。缺省按 0。 */
+  encryption_version?: number;
+  /** 内容密钥（base64url 32B）；仅鉴权后此响应携带，绝不进 URL/日志。v0 为 null。 */
+  cek?: string | null;
 }
 
 /**
