@@ -515,6 +515,17 @@ function historicalMessageToRecord(
   // delivery / read receipts (when wired through) will further promote
   // 'sent' to 'delivered' / 'read'.
   const isSelf = selfUid !== undefined && fromUid === selfUid;
+  // 媒体 metadata 必须随历史消息进入 payload，否则 Web VM 无从解码 → 历史图片/文件退化成
+  // [图片]/[文件]、缩略图/文件名/尺寸占位全丢（实时 push 带 metadata 才能显示，历史不能）。
+  // 重建与 realtime push 同形的 JSON envelope {content, metadata}，让 decodeMediaMetadata 解码。
+  const payload =
+    msg.metadata !== undefined &&
+    msg.metadata !== null &&
+    typeof msg.metadata === 'object'
+      ? new TextEncoder().encode(
+          JSON.stringify({ content: msg.content, metadata: msg.metadata }),
+        )
+      : new Uint8Array();
   return {
     channel_id,
     channel_type,
@@ -522,7 +533,7 @@ function historicalMessageToRecord(
     from_uid: fromUid,
     message_type: msg.message_type,
     content: msg.content,
-    payload: new Uint8Array(),
+    payload,
     timestamp: msg.timestamp,
     pts: msg.message_seq !== undefined ? String(msg.message_seq) : undefined,
     status: isSelf ? 'sent' : 'received',
@@ -2732,6 +2743,10 @@ export class PrivchatClient {
       this.dispatchTypingNotification(parsed);
       return;
     }
+    if (parsed.topic === 'presence_changed') {
+      this.dispatchPresenceChanged(parsed);
+      return;
+    }
     // Non-typing topics → generic `channel_publish_received` event so the
     // application layer (e.g. game module table-state fan-out) can consume
     // room broadcasts. SDK does not interpret the payload; forward topic +
@@ -2787,6 +2802,43 @@ export class PrivchatClient {
       is_typing: notif.is_typing,
       action_type: notif.action_type ?? undefined,
       timestamp: notif.timestamp ?? Math.floor(Date.now() / 1000),
+    });
+  }
+
+  /** Parse a `PresenceChangedNotification` publish payload and emit it as
+   *  an L1 `presence_changed` event. presence 是订阅态：UI 靠此事件实时更新
+   *  在线状态，不靠轮询。Wire shape mirrors server's Rust
+   *  `presence::PresenceChangedNotification` = `{user_id, version, snapshot}`. */
+  private dispatchPresenceChanged(envelope: PublishRequest): void {
+    if (envelope.payload.length === 0) return;
+    let notif: {
+      user_id?: number | string;
+      version?: number;
+      snapshot?: {
+        user_id?: number | string;
+        is_online?: boolean;
+        last_seen_at?: number;
+        device_count?: number;
+        version?: number;
+      };
+    };
+    try {
+      notif = parseRpcJson(new TextDecoder().decode(envelope.payload));
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn('[privchat] presence_changed payload not JSON', e);
+      return;
+    }
+    const snap = notif.snapshot;
+    const uid = snap?.user_id ?? notif.user_id;
+    if (uid === undefined || snap?.is_online === undefined) return;
+    this.bus.emit({
+      type: 'presence_changed',
+      user_id: String(uid),
+      is_online: snap.is_online,
+      last_seen_at: snap.last_seen_at ?? 0,
+      device_count: snap.device_count ?? 0,
+      version: snap.version ?? notif.version ?? 0,
     });
   }
 

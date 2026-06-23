@@ -67,6 +67,11 @@ export interface ImageMetadata {
 export interface FileMetadata {
   type: 'file';
   file_id: string;
+  /** 原文件名（展示用，随协议传输；不靠 file/get_url 异步查）。 */
+  file_name?: string;
+  /** 字节大小；0/缺省=未知。 */
+  file_size?: number;
+  mime_type?: string;
 }
 
 export interface VoiceMetadata {
@@ -170,12 +175,18 @@ function buildMetadata(
         m.height,
         optionalIdStringToBigint(m.thumbnail_file_id),
         thumbUrl,
+        0, // file_name: 图片不展示原名，absent
       );
       return { tag: FbMessageMetadataTag.ImageMetadata, offset: off };
     }
     case 'file': {
+      const fileName = m.file_name !== undefined ? builder.createString(m.file_name) : 0;
+      const mimeType = m.mime_type !== undefined ? builder.createString(m.mime_type) : 0;
       FbFileMetadata.startFileMetadata(builder);
       FbFileMetadata.addFileId(builder, idStringToBigint(m.file_id));
+      if (fileName) FbFileMetadata.addFileName(builder, fileName);
+      FbFileMetadata.addFileSize(builder, BigInt(m.file_size ?? 0));
+      if (mimeType) FbFileMetadata.addMimeType(builder, mimeType);
       const off = FbFileMetadata.endFileMetadata(builder);
       return { tag: FbMessageMetadataTag.FileMetadata, offset: off };
     }
@@ -184,6 +195,7 @@ function buildMetadata(
         builder,
         idStringToBigint(m.file_id),
         m.duration,
+        0, // file_name: absent
       );
       return { tag: FbMessageMetadataTag.VoiceMetadata, offset: off };
     }
@@ -200,6 +212,7 @@ function buildMetadata(
         m.thumbnail_width ?? 0,
         m.thumbnail_height ?? 0,
         videoThumbUrl,
+        0, // file_name: absent（视频作为文件发送时可填，当前 sender 未带）
       );
       return { tag: FbMessageMetadataTag.VideoMetadata, offset: off };
     }
@@ -296,7 +309,14 @@ function decodeMetadata(
     case FbMessageMetadataTag.FileMetadata: {
       const m = view.metadata(new FbFileMetadata()) as FbFileMetadata | null;
       if (!m) return undefined;
-      return { type: 'file', file_id: bigintToIdString(m.fileId()) };
+      const size = Number(m.fileSize());
+      return {
+        type: 'file',
+        file_id: bigintToIdString(m.fileId()),
+        file_name: m.fileName() ?? undefined,
+        file_size: size > 0 ? size : undefined,
+        mime_type: m.mimeType() ?? undefined,
+      };
     }
     case FbMessageMetadataTag.VoiceMetadata: {
       const m = view.metadata(new FbVoiceMetadata()) as FbVoiceMetadata | null;

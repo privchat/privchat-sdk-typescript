@@ -13,6 +13,10 @@
 
 import { PrivchatClient } from './client.js';
 import { parseRpcJson } from './codec/safe-json.js';
+import {
+  encodeMessagePayloadEnvelope,
+  type MessageMetadata,
+} from './codec/payload.js';
 import { encryptAttachment, decryptDownloadedAttachment } from './attachment-crypto.js';
 import { Routes } from './routes.js';
 import type {
@@ -627,21 +631,63 @@ export interface SendVideoMetadata {
   thumbnail_url?: string;
 }
 
-/** Build a JSON-encoded `LocalMessagePayloadEnvelope` for a media
- *  message. Server's `extractPushContent` JSON-first path picks this
- *  up; legacy FlatBuffers envelope decoding stays as a fallback for
- *  cross-version compatibility. */
+/** Build the typed FlatBuffers `MessagePayloadEnvelope` wire bytes for a
+ *  media message. Byte-compatible with the server's
+ *  `decode_message::<MessagePayloadEnvelope>` (same content.fbs), so the
+ *  typed metadata union (file_id, dims, thumbnail refs) survives the wire. */
 function encodeMediaPayload(
   contentType: 'image' | 'voice' | 'video' | 'file',
   caption: string,
-  metadata: object,
+  metadata: SendImageMetadata | SendVoiceMetadata | SendVideoMetadata | SendFileMetadata,
 ): Uint8Array {
-  const envelope = {
+  // The wire payload MUST be the typed FlatBuffers `MessagePayloadEnvelope`
+  // (server decodes via `decode_message::<MessagePayloadEnvelope>` and reads
+  // the typed metadata union). A JSON payload decodes to empty content +
+  // `metadata=None`, which fails the server's "file 需要 metadata" check.
+  const typed: MessageMetadata = ((): MessageMetadata => {
+    switch (contentType) {
+      case 'image': {
+        const m = metadata as SendImageMetadata;
+        return {
+          type: 'image',
+          file_id: m.file_id,
+          url: m.url,
+          width: m.width,
+          height: m.height,
+        };
+      }
+      case 'file': {
+        const m = metadata as SendFileMetadata;
+        return {
+          type: 'file',
+          file_id: m.file_id,
+          file_name: m.filename,
+          file_size: m.size,
+          mime_type: m.mime_type,
+        };
+      }
+      case 'voice': {
+        const m = metadata as SendVoiceMetadata;
+        return { type: 'voice', file_id: m.file_id, duration: m.duration };
+      }
+      case 'video': {
+        const m = metadata as SendVideoMetadata;
+        return {
+          type: 'video',
+          file_id: m.file_id,
+          duration: m.duration,
+          width: m.width,
+          height: m.height,
+          thumbnail_url: m.thumbnail_url,
+        };
+      }
+    }
+  })();
+  return encodeMessagePayloadEnvelope({
     content: caption,
-    metadata: { type: contentType, ...metadata },
-    mentioned_user_ids: [] as number[],
-  };
-  return new TextEncoder().encode(JSON.stringify(envelope));
+    metadata: typed,
+    mentioned_user_ids: [],
+  });
 }
 
 /** Send an image message. Caller has already gone through the

@@ -44,10 +44,16 @@ export function mergeOnPushAbsorb(
   incoming: MessageRecord,
   ctx: MergePushContext,
 ): MessageRecord {
-  if (!existing) return incoming;
-
   const isOwnMessage =
     ctx.currentUserId !== undefined && incoming.from_uid === ctx.currentUserId;
+
+  if (!existing) {
+    // Multi-device real-time fan-out: a copy of our own outgoing message
+    // arrives on this device with no local echo to merge against. It is
+    // still OUR message → land it as 'sent', not the push wire's default
+    // 'received' (which renders the bogus "received?" delivery label).
+    return isOwnMessage ? { ...incoming, status: 'sent' } : incoming;
+  }
 
   if (isOwnMessage && existing.status === 'sent') {
     // Own-message self-push: existing won. The push wire's empty

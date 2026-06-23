@@ -289,6 +289,24 @@ export interface ChannelPublishReceivedEvent {
   timestamp: number;
 }
 
+/**
+ * Inbound peer-presence change. Emitted when the SDK receives a
+ * `PublishRequest` packet with `topic="presence_changed"` for a channel
+ * the client is subscribed to. presence 是订阅态：UI 应主要靠此事件实时更新
+ * 在线状态，轮询只作低频兜底。CEK 等敏感字段不在 presence payload。
+ */
+export interface PresenceChangedReceivedEvent {
+  type: 'presence_changed';
+  /** Peer uid (decimal string). */
+  user_id: string;
+  is_online: boolean;
+  /** Last-active unix-seconds. */
+  last_seen_at: number;
+  device_count: number;
+  /** Per-user monotonic version — UI should drop out-of-order/stale frames. */
+  version: number;
+}
+
 export type SdkEvent =
   | ConnectionStateChangedEvent
   | MessageReceivedEvent
@@ -305,6 +323,7 @@ export type SdkEvent =
   | ReadCursorUpdatedEvent
   | PeerReadCursorUpdatedEvent
   | TypingReceivedEvent
+  | PresenceChangedReceivedEvent
   | ChannelPublishReceivedEvent;
 
 export interface SequencedSdkEvent {

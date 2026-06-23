@@ -470,7 +470,7 @@ export class SyncEngine {
 
     for (const commit of commits) {
       const targetKey = `s:${commit.server_msg_id}`;
-      const next = commitToMessageRecord(commit, channel_id, channel_type);
+      const next = commitToMessageRecord(commit, channel_id, channel_type, currentUserId);
 
       const ptsBig = BigInt(commit.pts);
       if (ptsBig > maxPtsSeen) maxPtsSeen = ptsBig;
@@ -598,7 +598,22 @@ export function commitToMessageRecord(
   commit: ServerCommit,
   channel_id: string,
   channel_type: number,
+  selfUid?: string,
 ): MessageRecord {
+  // Multi-device: `sync/get_difference` replays OUR own messages (sent from
+  // another device) into this client. Those must land as 'sent', not
+  // 'received' — a self row with status 'received' renders as the bogus
+  // "received?" delivery label and reads as a peer message.
+  const isOwn = selfUid !== undefined && commit.sender_id === selfUid;
+  // 媒体 metadata 必须随 sync 补洞消息进入 payload（与 realtime push / history 一致），否则
+  // 离线回来 / 断线补洞 / 历史滚动的媒体消息在 Web 退化成 [图片]/[文件]。server 已把 commit
+  // content 规范成 {content, metadata}（见 sync_commit_content_from_parsed），这里若带 metadata
+  // 就原样编码进 payload，让 decodeMediaMetadata 解码。
+  const c = commit.content;
+  const payload =
+    typeof c === 'object' && c !== null && 'metadata' in c
+      ? new TextEncoder().encode(JSON.stringify(c))
+      : new Uint8Array();
   return {
     channel_id,
     channel_type,
@@ -608,9 +623,9 @@ export function commitToMessageRecord(
     from_uid: commit.sender_id,
     message_type: commit.message_type,
     content: extractContent(commit.content),
-    payload: new Uint8Array(),
+    payload,
     timestamp: commit.server_timestamp,
-    status: 'received',
+    status: isOwn ? 'sent' : 'received',
     revoked: false,
   };
 }
