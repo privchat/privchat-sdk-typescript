@@ -62,6 +62,8 @@ import type {
   MessageReactionListResponse,
   MessageReactionRemoveResponse,
   MessageRevokeResponse,
+  MessagePinResponse,
+  MessagePinListResponse,
   PresenceBatchStatusResponse,
   TypingIndicatorResponse,
   // QR_CODE_SPEC v1.3
@@ -178,6 +180,18 @@ declare module './client.js' {
     messageReactionAdd(serverMessageId: number, emoji: string): Promise<MessageReactionAddResponse>;
     messageReactionRemove(serverMessageId: number, emoji: string): Promise<MessageReactionRemoveResponse>;
     messageReactionList(serverMessageId: number): Promise<MessageReactionListResponse>;
+
+    /** Pin / unpin a group message (owner / admin only; server enforces).
+     *  `pinned=false` unpins. `channelId` is the message's channel (equals
+     *  groupId for groups); the server cross-checks group/channel/message. */
+    messagePin(
+      groupId: number,
+      channelId: number,
+      messageId: number,
+      pinned: boolean,
+    ): Promise<MessagePinResponse>;
+    /** List a group's pinned messages (any member; newest-pinned first). */
+    messagePinList(groupId: number): Promise<MessagePinListResponse>;
 
     // presence
     sendTyping(channelId: number, isTyping: boolean, actionType?: string, channelType?: number): Promise<TypingIndicatorResponse>;
@@ -462,6 +476,19 @@ proto.messageRevoke = function (serverMessageId, channelId) {
     server_message_id: serverMessageId,
     channel_id: channelId,
   });
+};
+
+proto.messagePin = function (groupId, channelId, messageId, pinned) {
+  return this.rpcCallTyped(Routes.message.PIN, {
+    group_id: groupId,
+    channel_id: channelId,
+    message_id: messageId,
+    pinned,
+  });
+};
+
+proto.messagePinList = function (groupId) {
+  return this.rpcCallTyped(Routes.message.PIN_LIST, { group_id: groupId });
 };
 
 proto.messageReactionAdd = function (serverMessageId, emoji) {

@@ -469,6 +469,12 @@ export interface GroupSettingsPatch {
   max_members?: number;
   announcement?: string;
   description?: string;
+  /** Whether group members may add each other as friends directly. */
+  allow_member_add_friend?: boolean;
+  /** Whether the group is discoverable via search. */
+  allow_search?: boolean;
+  /** Join policy: 0 = no join, 1 = approval required, 2 = open join. */
+  join_policy?: number;
 }
 
 export interface GroupSettingsData {
@@ -478,6 +484,12 @@ export interface GroupSettingsData {
   max_members: number;
   announcement?: string;
   description?: string;
+  /** Whether group members may add each other as friends directly. */
+  allow_member_add_friend?: boolean;
+  /** Whether the group is discoverable via search. */
+  allow_search?: boolean;
+  /** Join policy: 0 = no join, 1 = approval required, 2 = open join. */
+  join_policy?: number;
   created_at: number;
   updated_at: number;
 }
@@ -523,6 +535,44 @@ export interface GroupMemberUnmuteRequest {
   user_id: number;
 }
 export type GroupMemberUnmuteResponse = boolean;
+
+// ---------- message/pin ----------
+
+/** Pin / unpin a group message (owner / admin only). `pinned=false` unpins. */
+export interface MessagePinRequest {
+  group_id: number;
+  /** Communication channel the message lives in (equals group_id for groups). */
+  channel_id: number;
+  message_id: number;
+  pinned: boolean;
+}
+
+export interface MessagePinResponse {
+  success: boolean;
+  group_id: number;
+  message_id: number;
+  pinned: boolean;
+  /** Pin time in epoch millis; null when unpinned. */
+  pinned_at?: number;
+  /** Operator who pinned; null when unpinned. */
+  pinned_by?: number;
+}
+
+export interface MessagePinListRequest {
+  group_id: number;
+}
+
+export interface PinnedMessageItem {
+  message_id: number;
+  channel_id: number;
+  pinned_by: number;
+  pinned_at: number;
+}
+
+export interface MessagePinListResponse {
+  group_id: number;
+  items: PinnedMessageItem[];
+}
 
 // ---------- message/* ----------
 

@@ -62,6 +62,8 @@ export const Routes = {
   },
   message: {
     REVOKE: 'message/revoke',
+    PIN: 'message/pin',
+    PIN_LIST: 'message/pin/list',
   },
   message_status: {
     READ_PTS: 'message/status/read_pts',
