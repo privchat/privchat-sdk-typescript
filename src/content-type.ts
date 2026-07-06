@@ -21,6 +21,8 @@ export type ContentTypeName =
   | 'location'
   | 'link'
   | 'forward'
+  | 'red_packet'
+  | 'money_transfer'
   | 'unknown';
 
 const BY_TAG: readonly ContentTypeName[] = [
@@ -35,6 +37,8 @@ const BY_TAG: readonly ContentTypeName[] = [
   'location', // 8
   'link', // 9
   'forward', // 10
+  'red_packet', // 11 — server-injected money card (RP-12)
+  'money_transfer', // 12 — server-injected money card (RP-12)
 ];
 
 const TAG_BY_NAME: ReadonlyMap<string, number> = new Map(
