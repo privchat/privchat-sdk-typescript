@@ -335,6 +335,10 @@ interface BootstrapGroupPayload {
 interface BootstrapFriendPayload {
   user_id?: number;
   uid?: number;
+  /** 关系态:1=accepted;0=pending 3=rejected 4=recalled 5=expired(请求态)。
+   *  老 server 不下发(仅同步 accepted 行,缺席按 accepted 处理)。 */
+  status?: number;
+  is_outgoing?: boolean;
   is_pinned?: boolean;
   pinned?: boolean;
   tags?: string;
@@ -401,6 +405,11 @@ function friendPayloadToRecord(
 ): FriendshipRecord | null {
   const id = payload.user_id ?? payload.uid;
   if (id === undefined) return null;
+  // 只有 accepted(status=1;老 server 缺席该字段 = 只发 accepted)才是好友。
+  // 请求态(pending/rejected/recalled/expired)绝不进 FriendshipRecord ——
+  // 好友申请由独立的 pending RPC 承载;调用方将非 accepted 行按 tombstone 处理
+  // (清掉历史上被错误入库的 pending 行,幂等)。
+  if (payload.status !== undefined && payload.status !== 1) return null;
   // alias may be undefined (no remark set) or empty string (cleared
   // remark). Both collapse to undefined locally.
   const aliasRaw = payload.user?.alias;
@@ -1964,7 +1973,14 @@ export class PrivchatClient {
         }
         if (!item.payload) continue;
         const record = friendPayloadToRecord(item.payload, item.version);
-        if (record !== null) upserted.push(record);
+        if (record !== null) {
+          upserted.push(record);
+        } else {
+          // 请求态(status != 1)—— 不是好友:按 tombstone 清理本地可能存在的
+          // 同 uid 好友行(修复旧版本把 pending 当好友入库的脏数据;拒绝/撤回同理)。
+          const uid = item.payload.user_id ?? item.payload.uid;
+          if (uid !== undefined) tombstoneIds.push(String(uid));
+        }
       }
       since = page.next_version;
       if (!page.has_more) break;
