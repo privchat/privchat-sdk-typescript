@@ -12,7 +12,7 @@
 // (so callers write `client.friendApply(...)` not `friendApply(client, ...)`).
 
 import { PrivchatClient } from './client.js';
-import { parseRpcJson } from './codec/safe-json.js';
+import { parseRpcJson, RawU64 } from './codec/safe-json.js';
 import {
   encodeMessagePayloadEnvelope,
   type MessageMetadata,
@@ -176,10 +176,10 @@ declare module './client.js' {
 
     // message
     messageHistory(channelId: number, limit?: number, beforeServerMessageId?: number): Promise<MessageHistoryResponse>;
-    messageRevoke(serverMessageId: number, channelId: number): Promise<MessageRevokeResponse>;
-    messageReactionAdd(serverMessageId: number, emoji: string): Promise<MessageReactionAddResponse>;
-    messageReactionRemove(serverMessageId: number, emoji: string): Promise<MessageReactionRemoveResponse>;
-    messageReactionList(serverMessageId: number): Promise<MessageReactionListResponse>;
+    messageRevoke(serverMessageId: number | string, channelId: number): Promise<MessageRevokeResponse>;
+    messageReactionAdd(serverMessageId: number | string, emoji: string): Promise<MessageReactionAddResponse>;
+    messageReactionRemove(serverMessageId: number | string, emoji: string): Promise<MessageReactionRemoveResponse>;
+    messageReactionList(serverMessageId: number | string): Promise<MessageReactionListResponse>;
 
     /** Pin / unpin a group message (owner / admin only; server enforces).
      *  `pinned=false` unpins. `channelId` is the message's channel (equals
@@ -187,7 +187,7 @@ declare module './client.js' {
     messagePin(
       groupId: number,
       channelId: number,
-      messageId: number,
+      messageId: number | string,
       pinned: boolean,
     ): Promise<MessagePinResponse>;
     /** List a group's pinned messages (any member; newest-pinned first). */
@@ -472,8 +472,9 @@ proto.messageHistory = function (channelId, limit, beforeServerMessageId) {
 };
 
 proto.messageRevoke = function (serverMessageId, channelId) {
+  // snowflake id 超出 Number 安全整数,必须以 RawU64 裸字面量上线
   return this.rpcCallTyped(Routes.message.REVOKE, {
-    server_message_id: serverMessageId,
+    server_message_id: new RawU64(serverMessageId),
     channel_id: channelId,
   });
 };
@@ -482,7 +483,7 @@ proto.messagePin = function (groupId, channelId, messageId, pinned) {
   return this.rpcCallTyped(Routes.message.PIN, {
     group_id: groupId,
     channel_id: channelId,
-    message_id: messageId,
+    message_id: new RawU64(messageId),
     pinned,
   });
 };
@@ -493,21 +494,21 @@ proto.messagePinList = function (groupId) {
 
 proto.messageReactionAdd = function (serverMessageId, emoji) {
   return this.rpcCallTyped(Routes.message_reaction.ADD, {
-    server_message_id: serverMessageId,
+    server_message_id: new RawU64(serverMessageId),
     emoji,
   });
 };
 
 proto.messageReactionRemove = function (serverMessageId, emoji) {
   return this.rpcCallTyped(Routes.message_reaction.REMOVE, {
-    server_message_id: serverMessageId,
+    server_message_id: new RawU64(serverMessageId),
     emoji,
   });
 };
 
 proto.messageReactionList = function (serverMessageId) {
   return this.rpcCallTyped(Routes.message_reaction.LIST, {
-    server_message_id: serverMessageId,
+    server_message_id: new RawU64(serverMessageId),
   });
 };
 

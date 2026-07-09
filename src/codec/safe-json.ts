@@ -49,3 +49,39 @@ function parseNumberSafe(value: string): number | string {
 export function parseRpcJson<T = unknown>(text: string): T {
   return losslessParse(text, null, parseNumberSafe) as T;
 }
+
+const DECIMAL_LITERAL = /^\d{1,20}$/;
+
+/** Request-side dual of `parseRpcJson`: a snowflake id held as a decimal
+ *  string (because Number would round it) that must reach the wire as a
+ *  RAW JSON number literal — Rust `u64` fields reject strings, but JSON
+ *  numbers carry arbitrary precision. Marks the value for
+ *  `stringifyWithRawIds`. Throws on non-decimal input so a corrupted id
+ *  fails loudly instead of producing invalid JSON. */
+export class RawU64 {
+  readonly literal: string;
+  constructor(value: number | string) {
+    const s = typeof value === 'number' ? String(value) : value.trim();
+    if (!DECIMAL_LITERAL.test(s)) {
+      throw new Error(`RawU64: not a decimal integer literal: ${value}`);
+    }
+    this.literal = s;
+  }
+}
+
+/** JSON.stringify that emits `RawU64` values as bare number literals.
+ *  Only fields explicitly wrapped in RawU64 are affected — string fields
+ *  that merely look numeric (e.g. search_session_id) stay strings. */
+export function stringifyWithRawIds(value: unknown): string {
+  // 占位符必须是普通 ASCII——控制字符会被 JSON.stringify 转义成
+  // `\\u0000` 文本,替换正则就永远匹配不上(生产实际踩过)。
+  const tokens: string[] = [];
+  const json = JSON.stringify(value, (_key, v) => {
+    if (v instanceof RawU64) {
+      tokens.push(v.literal);
+      return `__RAWU64_${tokens.length - 1}__`;
+    }
+    return v;
+  });
+  return json.replace(/"__RAWU64_(\d+)__"/g, (_, i: string) => tokens[Number(i)] ?? 'null');
+}

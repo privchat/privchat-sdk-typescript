@@ -105,7 +105,7 @@ import {
   decodePublishRequest,
   type PublishRequest,
 } from './codec/publish.js';
-import { parseRpcJson } from './codec/safe-json.js';
+import { parseRpcJson, stringifyWithRawIds } from './codec/safe-json.js';
 import { derivePreview } from './preview.js';
 import { contentTypeFromWireTag } from './content-type.js';
 import {
@@ -1334,7 +1334,10 @@ export class PrivchatClient {
     req: Req,
     opts: RequestOptions = {},
   ): Promise<Resp> {
-    const raw = await this.rpcCall(route, JSON.stringify(req), opts);
+    // stringifyWithRawIds: request fields wrapped in RawU64 go out as
+    // bare number literals (Rust u64 rejects strings; JSON numbers carry
+    // arbitrary precision). Plain values serialize exactly as before.
+    const raw = await this.rpcCall(route, stringifyWithRawIds(req), opts);
     // Use precision-preserving parse: snowflake-sized u64 fields come
     // back as strings instead of being silently rounded by JSON.parse.
     // Safe-int values still come back as `number`, so existing call
