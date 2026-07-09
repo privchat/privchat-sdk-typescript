@@ -669,6 +669,10 @@ export class PrivchatClient {
   private disposed = false;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** In-flight coalescing for `bootstrapChannels()` — hosts commonly fire it
+   * from several paths at once (reconnect handler + window focus + mount);
+   * one full sweep serves all concurrent callers. */
+  private bootstrapChannelsInflight: Promise<ChannelRecord[]> | null = null;
   /** Resolved heartbeat options (defaults applied). */
   private readonly heartbeatOpts: Required<HeartbeatOptions>;
   /** Idle-heartbeat timer; non-null when armed. */
@@ -1648,6 +1652,24 @@ export class PrivchatClient {
    * and, in Phase 5+, by the sync engine.
    */
   async bootstrapChannels(opts: BootstrapChannelsOptions = {}): Promise<ChannelRecord[]> {
+    // Coalesce concurrent callers into one sweep (reconnect-storm control:
+    // the Rust SDK dedupes resume rounds per connection epoch; the browser
+    // equivalent is hosts triggering bootstrap from multiple events at once).
+    // Callers inside the coalescing window share the first caller's `opts` —
+    // acceptable because since-versions come from the same cache state.
+    if (this.bootstrapChannelsInflight) {
+      return this.bootstrapChannelsInflight;
+    }
+    const run = this.bootstrapChannelsImpl(opts).finally(() => {
+      this.bootstrapChannelsInflight = null;
+    });
+    this.bootstrapChannelsInflight = run;
+    return run;
+  }
+
+  private async bootstrapChannelsImpl(
+    opts: BootstrapChannelsOptions = {},
+  ): Promise<ChannelRecord[]> {
     const { db, store } = this.requireCache();
     const sinceChannel = opts.sinceChannelVersion ?? 0;
     const sinceCursor = opts.sinceCursorVersion ?? 0;
@@ -3316,16 +3338,26 @@ export class PrivchatClient {
   }
 
   private scheduleReconnect(): void {
+    // Idempotent: a transient-auth retry and the transport close handler can
+    // both request scheduling for the same drop — keep exactly one timer.
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.reconnectAttempt >= this.reconnectOpts.maxAttempts) {
       this.setState('disconnected', 'reconnect attempts exhausted');
       this.reconnectAttempt = 0;
       return;
     }
     const attempt = this.reconnectAttempt++;
-    const delay = Math.min(
+    const base = Math.min(
       this.reconnectOpts.maxDelayMs,
       this.reconnectOpts.initialDelayMs * Math.pow(this.reconnectOpts.multiplier, attempt),
     );
+    // ±30% jitter (mirrors the Rust SDK): without it a server restart makes
+    // every browser tab redial in the same second — a reconnect storm the
+    // server then amplifies through auth + resume sync.
+    const delay = Math.round(base * (0.7 + Math.random() * 0.6));
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       void this.attemptReconnect();
@@ -3352,15 +3384,27 @@ export class PrivchatClient {
       await this.authenticate(user_id, access_token, device_id);
     } catch (e) {
       // authenticate() already emitted auth_expired / session_expired and
-      // adjusted state. Stop the reconnect cycle — a terminal failure (incl.
-      // a failed refresh → SessionExpiredError) means the host must re-login.
+      // adjusted state. A terminal failure (incl. a failed refresh →
+      // SessionExpiredError) means the host must re-login — stop the cycle.
       if (
         (e instanceof AuthorizationError && e.errorKind === 'terminal') ||
         e instanceof SessionExpiredError
       ) {
         this.lastAuth = null;
+        this.cancelReconnect();
+        return;
       }
-      this.cancelReconnect();
+      // Transient authenticate failure (server just restarted and isn't ready,
+      // overloaded, momentary network flap): keep the backoff cycle alive
+      // instead of abandoning reconnect with a live-but-unauthenticated
+      // socket. Tear the transport down so the next attempt starts clean.
+      try {
+        await this.transport.disconnect();
+      } catch {
+        /* best-effort teardown */
+      }
+      this.setState('reconnecting', 'authenticate failed; retrying');
+      this.scheduleReconnect();
       return;
     }
     // Auth succeeded → replay subscriptions (best-effort; surface failures via events).

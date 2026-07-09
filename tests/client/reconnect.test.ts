@@ -506,3 +506,73 @@ describe('reconnect → flushOutboxOnReconnect', () => {
     expect(client.connectionState()).toBe('authenticated');
   });
 });
+
+describe('reconnect storm control (P0-12 parity with the Rust SDK)', () => {
+  it('applies ±30% jitter to the backoff delay', async () => {
+    const t = new FakeTransport();
+    let authCount = 0;
+    t.responder = () => {
+      authCount++;
+      return encodeAuthorizationResponse({ success: true });
+    };
+    const client = new PrivchatClient({
+      transport: t,
+      reconnect: { enabled: true, initialDelayMs: 100, maxDelayMs: 100, multiplier: 1 },
+    });
+    await client.connect();
+    await client.authenticate('1', 't', 'd');
+
+    // random=0 → factor 0.7 → 70ms delay.
+    const rand = vi.spyOn(Math, 'random').mockReturnValue(0);
+    t.fireClose();
+    await advance(69);
+    expect(authCount).toBe(1); // not fired yet
+    await advance(2);
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    expect(authCount).toBe(2);
+    expect(client.connectionState()).toBe('authenticated');
+
+    // random≈1 → factor ~1.3 → ~130ms delay: 100ms (the old fixed value)
+    // must NOT be enough.
+    rand.mockReturnValue(0.9999);
+    t.fireClose();
+    await advance(110);
+    expect(authCount).toBe(2); // still waiting
+    await advance(25);
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    expect(authCount).toBe(3);
+    rand.mockRestore();
+  });
+
+  it('keeps the backoff cycle alive after a transient authenticate failure', async () => {
+    const t = new FakeTransport();
+    let authCount = 0;
+    t.responder = () => {
+      authCount++;
+      // 2nd auth (first reconnect attempt) fails transiently; 3rd succeeds.
+      return encodeAuthorizationResponse({
+        success: authCount !== 2,
+        error_code: authCount === 2 ? 50000 : 0,
+        error_message: authCount === 2 ? 'server busy' : undefined,
+      });
+    };
+    const client = new PrivchatClient({
+      transport: t,
+      reconnect: { enabled: true, initialDelayMs: 50, maxDelayMs: 50, multiplier: 1 },
+    });
+    await client.connect();
+    await client.authenticate('1', 't', 'd');
+
+    t.fireClose();
+    await advance(80);
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    expect(authCount).toBe(2);
+    // Old behaviour: cancelReconnect() → stuck. New behaviour: still cycling.
+    expect(client.connectionState()).toBe('reconnecting');
+
+    await advance(120);
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    expect(authCount).toBe(3);
+    expect(client.connectionState()).toBe('authenticated');
+  });
+});

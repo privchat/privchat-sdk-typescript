@@ -656,3 +656,52 @@ describe('bootstrapChannels', () => {
     expect(client.cachedChannels().map((c) => c.channel_id)).toEqual(['2', '1']);
   });
 });
+
+describe('bootstrapChannels in-flight coalescing (P0-12 storm control)', () => {
+  it('concurrent callers share one sweep; a later call runs fresh', async () => {
+    const t = entitySyncFake({
+      channelItems: [
+        {
+          entity_id: '12345',
+          version: 1,
+          payload: {
+            channel_id: 12345,
+            channel_type: 1,
+            channel_name: 'Alice',
+            unread_count: 0,
+            last_msg_content: 'hi',
+            last_msg_timestamp: 1_700,
+          },
+        },
+      ],
+      cursorItems: [],
+    });
+    // Count channel-entity sweeps through the fake.
+    let channelSweeps = 0;
+    const inner = t.responder!;
+    t.responder = (pkt) => {
+      const req = decodeRpcRequest(pkt.payload);
+      if (req.route === 'entity/sync_entities') {
+        const body = JSON.parse(new TextDecoder().decode(req.body)) as { entity_type: string };
+        if (body.entity_type === 'channel') channelSweeps++;
+      }
+      return inner(pkt);
+    };
+
+    client = new PrivchatClient({
+      transport: t,
+      cache: { enabled: true, dbName: uniqueDbName('coalesce') },
+    });
+    await client.connect();
+
+    const [a, b] = await Promise.all([
+      client.bootstrapChannels(),
+      client.bootstrapChannels(),
+    ]);
+    expect(channelSweeps).toBe(1);
+    expect(b).toEqual(a);
+
+    await client.bootstrapChannels();
+    expect(channelSweeps).toBe(2);
+  });
+});
