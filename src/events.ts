@@ -287,6 +287,9 @@ export interface ChannelPublishReceivedEvent {
   publisher: string;
   /** Server unix-seconds timestamp at publish time. */
   timestamp: number;
+  /** Monotonic server message id (decimal string) when present. Ordering /
+   *  dedup key for room broadcasts; undefined for id-less system pushes. */
+  server_message_id?: string;
 }
 
 /**

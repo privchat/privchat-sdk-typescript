@@ -673,6 +673,12 @@ export class PrivchatClient {
    * from several paths at once (reconnect handler + window focus + mount);
    * one full sweep serves all concurrent callers. */
   private bootstrapChannelsInflight: Promise<ChannelRecord[]> | null = null;
+  /** P1-05: room broadcast dedup by (channel_id, server_message_id). On
+   *  subscribe the server replays history that overlaps the live stream, so
+   *  the same frame can arrive twice. Bounded FIFO per channel (256); frames
+   *  without a server_message_id are never deduped (can't key them). */
+  private readonly roomSeenMsgIds = new Map<string, Set<string>>();
+  private readonly roomSeenOrder = new Map<string, string[]>();
   /** Resolved heartbeat options (defaults applied). */
   private readonly heartbeatOpts: Required<HeartbeatOptions>;
   /** Idle-heartbeat timer; non-null when armed. */
@@ -2792,6 +2798,10 @@ export class PrivchatClient {
     // application layer (e.g. game module table-state fan-out) can consume
     // room broadcasts. SDK does not interpret the payload; forward topic +
     // UTF-8-decoded payload text (game server publishes JSON).
+    // P1-05: drop replay/live overlap duplicates by server_message_id.
+    if (this.isDuplicateRoomMessage(parsed.channel_id, parsed.server_message_id)) {
+      return;
+    }
     let payloadText = '';
     if (parsed.payload.length > 0) {
       try {
@@ -2807,7 +2817,31 @@ export class PrivchatClient {
       payload_text: payloadText,
       publisher: parsed.publisher,
       timestamp: parsed.timestamp,
+      server_message_id: parsed.server_message_id,
     });
+  }
+
+  /** P1-05: true when this (channel_id, server_message_id) was seen recently.
+   *  Undefined id → never a duplicate (nothing to key on). */
+  private isDuplicateRoomMessage(channelId: string, serverMessageId?: string): boolean {
+    if (serverMessageId === undefined) return false;
+    const ROOM_DEDUP_WINDOW = 256;
+    let seen = this.roomSeenMsgIds.get(channelId);
+    let order = this.roomSeenOrder.get(channelId);
+    if (!seen || !order) {
+      seen = new Set();
+      order = [];
+      this.roomSeenMsgIds.set(channelId, seen);
+      this.roomSeenOrder.set(channelId, order);
+    }
+    if (seen.has(serverMessageId)) return true;
+    seen.add(serverMessageId);
+    order.push(serverMessageId);
+    if (order.length > ROOM_DEDUP_WINDOW) {
+      const evicted = order.shift();
+      if (evicted !== undefined) seen.delete(evicted);
+    }
+    return false;
   }
 
   /** Parse a TypingStatusNotification JSON payload and emit it as an
