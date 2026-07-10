@@ -16,6 +16,7 @@ import { phase14_outbox } from './phase14-outbox.js';
 import { phase15_read_cursor_events } from './phase15-read-cursor-events.js';
 import { phase16_profile_cache } from './phase16-profile-cache.js';
 import { phase17_friendship_cache } from './phase17-friendship-cache.js';
+import { phase18_history_search_jump } from './phase18-history-search-jump.js';
 
 export const phases: PhaseFn[] = [
   phase01_auth_and_bootstrap,
@@ -35,4 +36,5 @@ export const phases: PhaseFn[] = [
   phase15_read_cursor_events,
   phase16_profile_cache,
   phase17_friendship_cache,
+  phase18_history_search_jump,
 ];
