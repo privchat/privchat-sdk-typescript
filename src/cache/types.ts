@@ -119,6 +119,11 @@ export interface ChannelRecord {
   channel_id: IdString;
   channel_type: number;
   title?: string;
+  /** Direct-channel peer's uid (from the channel entity sync). Undefined
+   *  for group channels or when the server didn't emit it. UI seeds the
+   *  peer avatar and detects the system account by this uid so colors /
+   *  labels match the group-collage member cells (which key off uid). */
+  peer_user_id?: IdString;
   /** Latest known per-channel pts. Lifted by inbound push (push.message_seq),
    *  send-ACK on own messages, and the sync engine. NOT lifted by
    *  openConversation/scrollHistory (history wire has no pts) and NOT

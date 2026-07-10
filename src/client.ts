@@ -283,6 +283,10 @@ interface BootstrapChannelPayload {
   type?: number;
   channel_name?: string;
   name?: string;
+  /** Direct-channel peer's uid (server emits it in the channel entity
+   *  sync; commit 0e1bb18). Lets the UI seed avatars / detect the system
+   *  account by uid instead of the resolved display name. */
+  peer_user_id?: number;
   unread_count?: number;
   last_msg_content?: string;
   last_msg_timestamp?: number;
@@ -1787,6 +1791,10 @@ export class PrivchatClient {
         channel_id,
         channel_type,
         title: payload.channel_name ?? payload.name,
+        peer_user_id:
+          payload.peer_user_id !== undefined && payload.peer_user_id !== 0
+            ? String(payload.peer_user_id)
+            : undefined,
         // Phase 4: latest_pts is populated by inbound push, not bootstrap.
         latest_pts: '0',
         read_pts: selfPts !== undefined ? String(selfPts) : '0',
