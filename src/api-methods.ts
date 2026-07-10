@@ -73,6 +73,8 @@ import type {
   UserQrCodeGetResponse,
   UserQrCodeRefreshResponse,
   UserQrCodeResolveResponse,
+  MessageHistorySearchResponse,
+  MessageHistoryAroundResponse,
 } from './api-types.js';
 
 // ----- Public method declarations (declaration merge into PrivchatClient) -----
@@ -176,6 +178,24 @@ declare module './client.js' {
 
     // message
     messageHistory(channelId: number, limit?: number, beforeServerMessageId?: number): Promise<MessageHistoryResponse>;
+    /** Cloud history search over the caller's visible channels (spec §4).
+     *  scope is derived: channelId given → CHANNEL, omitted → GLOBAL.
+     *  Server rate-limits to one search per 300ms per user — callers MUST
+     *  debounce input by 300–500ms, drop stale in-flight results, and skip
+     *  queries shorter than 2 chars. Hits are snippet projections: do NOT
+     *  write them into the message cache. */
+    messageHistorySearch(
+      query: string,
+      opts?: { channelId?: number; cursor?: string; limit?: number },
+    ): Promise<MessageHistorySearchResponse>;
+    /** jump-to-message context (spec §5). Full messages; prefer the client
+     *  wrapper `jumpToMessageContext` which also backfills the cache. */
+    messageHistoryAround(
+      channelId: number,
+      messageId: number | string,
+      beforeLimit?: number,
+      afterLimit?: number,
+    ): Promise<MessageHistoryAroundResponse>;
     messageRevoke(serverMessageId: number | string, channelId: number): Promise<MessageRevokeResponse>;
     messageReactionAdd(serverMessageId: number | string, emoji: string): Promise<MessageReactionAddResponse>;
     messageReactionRemove(serverMessageId: number | string, emoji: string): Promise<MessageReactionRemoveResponse>;
@@ -468,6 +488,26 @@ proto.messageHistory = function (channelId, limit, beforeServerMessageId) {
     channel_id: channelId,
     limit,
     before_server_message_id: beforeServerMessageId,
+  });
+};
+
+proto.messageHistorySearch = function (query, opts = {}) {
+  return this.rpcCallTyped(Routes.message_history.SEARCH, {
+    query,
+    scope: opts.channelId !== undefined ? 'CHANNEL' : 'GLOBAL',
+    channel_id: opts.channelId,
+    cursor: opts.cursor,
+    limit: opts.limit,
+  });
+};
+
+proto.messageHistoryAround = function (channelId, messageId, beforeLimit, afterLimit) {
+  // snowflake id 超出 Number 安全整数,必须以 RawU64 裸字面量上线
+  return this.rpcCallTyped(Routes.message_history.AROUND, {
+    channel_id: channelId,
+    message_id: new RawU64(messageId),
+    before_limit: beforeLimit,
+    after_limit: afterLimit,
   });
 };
 

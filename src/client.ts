@@ -2260,6 +2260,55 @@ export class PrivchatClient {
   }
 
   /**
+   * jump-to-message（MESSAGE_HISTORY spec §5/§6）：search 命中后点击调用。
+   * 拉 anchor 前后完整上下文并**回填缓存**（IndexedDB + 内存 buffer），随后
+   * UI 应从本地 store 渲染并定位/高亮 anchor。search 的 snippet 命中本身
+   * 绝不落 message 表——这是 spec §0.1-4 的硬边界。
+   *
+   * anchor 不可见（不存在/撤回/删除/无权限）时服务端统一 not_found，此处
+   * 原样抛出，调用方给"消息已失效"占位。
+   */
+  async jumpToMessageContext(
+    channel_id: string,
+    channel_type: number,
+    message_id: number | string,
+    opts: { beforeLimit?: number; afterLimit?: number } = {},
+  ): Promise<{
+    records: MessageRecord[];
+    anchor: MessageRecord;
+    has_more_before: boolean;
+    has_more_after: boolean;
+  }> {
+    const { db, store } = this.requireCache();
+    const resp = await this.messageHistoryAround(
+      Number(channel_id),
+      message_id,
+      opts.beforeLimit,
+      opts.afterLimit,
+    );
+
+    const selfUid = this.lastAuth?.user_id;
+    const toRecord = (m: HistoricalMessage) =>
+      historicalMessageToRecord(m, channel_id, channel_type, selfUid);
+    const anchor = toRecord(resp.anchor_message);
+    const records = [
+      ...resp.before_messages.map(toRecord),
+      anchor,
+      ...resp.after_messages.map(toRecord),
+    ];
+
+    await cacheUpsertMessages(db, records);
+    store.upsertMessages(channel_id, channel_type, records, true);
+
+    return {
+      records,
+      anchor,
+      has_more_before: resp.has_more_before,
+      has_more_after: resp.has_more_after,
+    };
+  }
+
+  /**
    * Mark messages in a channel as read up to `read_pts`. Exposed as a
    * first-class SDK primitive (the Rust SDK doesn't expose mark-read
    * outbound — it only consumes the inbound `peer_read_pts_updated` push).

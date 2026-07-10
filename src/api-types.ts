@@ -611,6 +611,37 @@ export interface HistoricalMessage {
   revoked_by?: number;
 }
 
+/** One cloud-search hit — a snippet projection, NOT a full message.
+ *  Must never be written into the local message store; click-through goes
+ *  via `message/history/around` for full context (spec §4/§5/§6). */
+export interface MessageHistorySearchHit {
+  channel_id: number;
+  message_id: number;
+  sender_user_id: number;
+  /** epoch millis */
+  created_at: number;
+  message_type: string;
+  snippet: string;
+  /** char-offset [start, end) ranges within `snippet` for highlighting */
+  highlight_ranges: [number, number][];
+}
+
+export interface MessageHistorySearchResponse {
+  hits: MessageHistorySearchHit[];
+  /** keyset cursor; null/undefined = exhausted. Opaque — echo back verbatim. */
+  next_cursor?: string | null;
+}
+
+/** jump-to-message context — full messages (same shape as history/get rows);
+ *  the SDK backfills them into the local cache before returning. */
+export interface MessageHistoryAroundResponse {
+  before_messages: HistoricalMessage[];
+  anchor_message: HistoricalMessage;
+  after_messages: HistoricalMessage[];
+  has_more_before: boolean;
+  has_more_after: boolean;
+}
+
 export interface MessageHistoryResponse {
   messages: HistoricalMessage[];
   total: number;

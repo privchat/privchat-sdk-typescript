@@ -70,6 +70,10 @@ export const Routes = {
   },
   message_history: {
     GET: 'message/history/get',
+    /** 云端历史搜索（用户可见范围，MESSAGE_HISTORY spec §4） */
+    SEARCH: 'message/history/search',
+    /** jump-to-message 上下文（spec §5） */
+    AROUND: 'message/history/around',
   },
   message_reaction: {
     ADD: 'message/reaction/add',
