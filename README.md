@@ -724,11 +724,29 @@ npm run example:accounts
 
 ```bash
 npm install
-npm run typecheck
-npm test          # 353 unit tests
-npm run build     # → dist/
+npm run typecheck    # tsc --noEmit
+npm test             # vitest run — 353 unit tests
+npm run build        # prebuild(codegen) + tsc -p tsconfig.build.json → dist/
 npm run example:accounts   # requires a running privchat-server
 ```
+
+Use **npm** — both `package-lock.json` and `pnpm-lock.yaml` are checked in, but
+every script and doc here is npm-based.
+
+### Build & package
+
+`npm run build` compiles **ESM only** (`import`, no CJS `require`) with type
+declarations, driven by plain `tsc` (`tsconfig.build.json`) — no bundler:
+
+- output: `dist/index.js` (`main`), `dist/index.d.ts` (`types`), plus source maps
+- `prebuild` regenerates FlatBuffers first (see below), so `dist/` always tracks the wire format
+- the npm tarball ships only `["dist", "README.md", "LICENSE"]` (`files` field)
+
+> **Not yet published.** `package.json` is `"private": true` with no
+> `prepublishOnly`/`publishConfig` — publishing is intentionally disabled while
+> the API stabilizes. The first external release will go to npm on a **beta**
+> tag (scoped public package `@privchat/sdk`); until then, consume it via a
+> `file:`/workspace link to a sibling clone.
 
 FlatBuffers codegen runs automatically via `prebuild` (`scripts/codegen.mjs`). The generator reads `.fbs` files **directly from a sibling clone of `privchat-protocol`** — there is no vendored schema copy in this package, so the wire format is single-sourced and any drift surfaces immediately as a compile error.
 
