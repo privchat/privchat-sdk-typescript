@@ -264,3 +264,26 @@ export type {
   VideoMetadata,
   VoiceMetadata,
 } from './codec/payload.js';
+
+// ---- P4.2 runtime alignment layer (CLIENT_GLOBAL_STATE §17; canonical = KMP app) ----
+export { userDisplayName, isSystemUser, USER_TYPE_SYSTEM } from './runtime/user-display.js';
+export type { UserDisplayInput } from './runtime/user-display.js';
+export { resolveAvatarModel } from './runtime/avatar-model.js';
+export type { AvatarModel, AvatarFreshness, ResolveAvatarInput } from './runtime/avatar-model.js';
+export {
+  ensureUserAvatarCached,
+  lookupCachedAvatar,
+  clearAvatarObjectUrls,
+} from './runtime/avatar-cache.js';
+export type { AvatarCacheHit } from './runtime/avatar-cache.js';
+export { createClientRuntime, resolveRuntimeBanner, isServerBusySignal } from './runtime/client-runtime.js';
+export type {
+  ClientRuntime,
+  ClientRuntimeError,
+  ConnectivityRuntimeState,
+  SyncRuntimeState,
+  SendQueueRuntimeState,
+  RuntimeBannerKind,
+  RuntimeSlice,
+  RuntimeClientLike,
+} from './runtime/client-runtime.js';
