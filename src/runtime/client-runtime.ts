@@ -188,6 +188,13 @@ export interface ClientRuntime {
   connectivity: RuntimeSlice<ConnectivityRuntimeState>;
   sync: RuntimeSlice<SyncRuntimeState>;
   send: RuntimeSlice<SendQueueRuntimeState>;
+  /**
+   * Seed connectivity/sync from the CURRENT connection state — for consumers
+   * that construct the runtime AFTER the client already reached a stable state
+   * (e.g. a chat page mounting post auto-login, which never sees the
+   * `authenticated` transition event). Idempotent; safe to call with any state.
+   */
+  seedConnectionState(state: ConnectionState): void;
   /** Integration-layer feeds (TS SDK has no resume-sync events; see module doc). */
   markSyncStarted(): void;
   markSyncCompleted(): void;
@@ -218,12 +225,16 @@ export function createClientRuntime(client: RuntimeClientLike): ClientRuntime {
     );
   };
 
-  // ---- connectivity ← connection_state_changed ----
-  unsubs.push(
-    client.onConnectionStateChanged(({ state }) => {
-      const now = Date.now();
-      connectivity.update((c) => {
-        switch (state) {
+  // Connectivity/sync mapping for one connection state. Extracted so it can
+  // be driven both by live `connection_state_changed` events AND by an initial
+  // seed (`seedConnectionState`) — a component that mounts AFTER the client is
+  // already `authenticated` never receives the transition event, so without a
+  // seed the connectivity slice would stay `authenticated:false` and the banner
+  // would wrongly show "offline/已断开" over a fully working connection.
+  const applyConnectionState = (state: ConnectionState): void => {
+    const now = Date.now();
+    connectivity.update((c) => {
+      switch (state) {
           case 'authenticated':
             hadSession = true;
             return {
@@ -275,8 +286,10 @@ export function createClientRuntime(client: RuntimeClientLike): ClientRuntime {
           s.initialSyncCompleted ? s : { ...s, initialSyncCompleted: true, lastSyncAt: Date.now() },
         );
       }
-    }),
-  );
+  };
+
+  // ---- connectivity ← connection_state_changed ----
+  unsubs.push(client.onConnectionStateChanged(({ state }) => applyConnectionState(state)));
 
   // ---- connectivity ← auth_expired ----
   if (client.onAuthExpired) {
@@ -334,6 +347,7 @@ export function createClientRuntime(client: RuntimeClientLike): ClientRuntime {
     connectivity,
     sync,
     send,
+    seedConnectionState: applyConnectionState,
     markSyncStarted(): void {
       sync.update((s) => ({ ...s, resumeSyncRunning: true, globalError: null }));
     },
