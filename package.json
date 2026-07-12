@@ -25,6 +25,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "example:accounts": "npm run codegen && tsx examples/accounts/src/main.ts",
+    "example:reconnect": "npm run build && node examples/reconnect-resume/rc2-resume-sync.mjs",
     "example:transfer": "npm run codegen && tsx examples/transfer/src/main.ts"
   },
   "dependencies": {
