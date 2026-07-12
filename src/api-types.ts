@@ -516,6 +516,53 @@ export interface GroupMuteAllResponse {
   updated_at: number;
 }
 
+// ── 群审批（P6-3）：入群申请审批 ──
+// method 是 server serde 枚举，形如 { MemberInvite: { inviter_id } } | { QRCode: { qr_code_id } }。
+export interface GroupApprovalMethod {
+  MemberInvite?: { inviter_id: string };
+  QRCode?: { qr_code_id: string };
+}
+
+export interface GroupApprovalItem {
+  /** server UUID；handle 用它 */
+  request_id: string;
+  user_id: number;
+  method: GroupApprovalMethod;
+  message?: string | null;
+  created_at: number;
+  expires_at?: number | null;
+}
+
+export interface GroupApprovalListRequest {
+  group_id: number;
+  operator_id: number;
+}
+
+export interface GroupApprovalListResponse {
+  group_id: string;
+  requests: GroupApprovalItem[];
+  total: number;
+}
+
+export interface GroupApprovalHandleRequest {
+  request_id: string;
+  operator_id: number;
+  /** "approve" | "reject" */
+  action: string;
+  reject_reason?: string | null;
+}
+
+export interface GroupApprovalHandleResponse {
+  success: boolean;
+  request_id: string;
+  action: string;
+  group_id: number;
+  user_id: number;
+  reject_reason?: string | null;
+  message: string;
+  handled_at: number;
+}
+
 export interface GroupMemberRemoveRequest {
   group_id: number;
   user_id: number;

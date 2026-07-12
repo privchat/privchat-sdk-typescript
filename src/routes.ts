@@ -60,6 +60,10 @@ export const Routes = {
     UPDATE: 'group/settings/update',
     MUTE_ALL: 'group/settings/mute_all',
   },
+  group_approval: {
+    LIST: 'group/approval/list',
+    HANDLE: 'group/approval/handle',
+  },
   message: {
     REVOKE: 'message/revoke',
     PIN: 'message/pin',

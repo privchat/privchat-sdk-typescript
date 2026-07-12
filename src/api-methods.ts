@@ -51,6 +51,8 @@ import type {
   GroupMemberRemoveResponse,
   GroupMemberUnmuteResponse,
   GroupMuteAllResponse,
+  GroupApprovalListResponse,
+  GroupApprovalHandleResponse,
   GroupRoleSetResponse,
   GroupRoleSetValue,
   GroupSettingsGetResponse,
@@ -175,6 +177,17 @@ declare module './client.js' {
       operatorId: number,
       muted: boolean,
     ): Promise<GroupMuteAllResponse>;
+
+    /** 群入群申请审批列表（P6-3；仅群主/管理员，server 鉴权）。operator 取当前登录用户。 */
+    groupApprovalList(groupId: number): Promise<GroupApprovalListResponse>;
+
+    /** 处理群入群申请（P6-3）。`requestId` 是 server UUID（来自 groupApprovalList）；
+     *  `approve=true` 通过（申请人入群）/`false` 拒绝。operator 取当前登录用户。 */
+    groupApprovalHandle(
+      requestId: string,
+      approve: boolean,
+      reason?: string,
+    ): Promise<GroupApprovalHandleResponse>;
 
     // message
     messageHistory(channelId: number, limit?: number, beforeServerMessageId?: number): Promise<MessageHistoryResponse>;
@@ -478,6 +491,27 @@ proto.groupMuteAll = function (groupId, operatorId, muted) {
     group_id: groupId,
     operator_id: operatorId,
     muted,
+  });
+};
+
+// P6-3 群审批：operator 取当前登录用户（与 Kotlin SDK 内部 requireCurrentUserId 语义一致），
+// 调用方（react/h5/web）不需传 operatorId。handle 直接 WS route 透传 UUID request_id（无 FFI 岔路）。
+proto.groupApprovalList = function (groupId) {
+  const uid = this.currentUserId();
+  return this.rpcCallTyped(Routes.group_approval.LIST, {
+    group_id: groupId,
+    // snowflake operator id 无损透传（Number 会丢精度）
+    operator_id: uid != null ? new RawU64(uid) : 0,
+  });
+};
+
+proto.groupApprovalHandle = function (requestId, approve, reason) {
+  const uid = this.currentUserId();
+  return this.rpcCallTyped(Routes.group_approval.HANDLE, {
+    request_id: requestId,
+    operator_id: uid != null ? new RawU64(uid) : 0,
+    action: approve ? 'approve' : 'reject',
+    ...(reason != null ? { reject_reason: reason } : {}),
   });
 };
 

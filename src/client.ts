@@ -930,6 +930,15 @@ export class PrivchatClient {
     return this.lastAuth?.access_token ?? null;
   }
 
+  /**
+   * Authenticated user id as a lossless string, or undefined when not logged in.
+   * Public accessor so api-methods (prototype augmentation) can auto-fill
+   * `operator_id`/self-uid without reaching into the private `lastAuth`.
+   */
+  currentUserId(): string | undefined {
+    return this.lastAuth?.user_id;
+  }
+
   // ----- Layer 1: Protocol facade -----
 
   async authorize(
