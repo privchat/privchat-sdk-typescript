@@ -125,6 +125,7 @@ import {
   type SendMessageRequest,
   type SendMessageResponse,
 } from './codec/send.js';
+import { encodeMessagePayloadEnvelope } from './codec/payload.js';
 import {
   decodeSubscribeResponse,
   encodeSubscribeRequest,
@@ -1408,13 +1409,14 @@ export class PrivchatClient {
    * in memory + IndexedDB; a process restart loses pending records.
    */
   async sendTextMessage(input: SendTextInput): Promise<SendTextOperationResult> {
-    // Media variants pre-encode their JSON envelope and pass it via
-    // `input.payload`. Reply / mention need an envelope too — auto
-    // build one when `reply_to_message_id` / `mentioned_user_ids` are
-    // present and the caller didn't provide a custom payload. Default
-    // path stays raw text bytes for plain text, preserving the
-    // pre-existing wire shape across clients that don't yet do
-    // JSON-first decode.
+    // Media variants pre-encode their FlatBuffers `MessagePayloadEnvelope`
+    // and pass it via `input.payload`. Reply / mention need an envelope
+    // too — the server ONLY decodes the typed FlatBuffers envelope
+    // (`decode_message::<MessagePayloadEnvelope>`), falling back to raw
+    // UTF-8 text otherwise; a JSON envelope would fail that decode, so the
+    // reply_to reference is dropped and the JSON blob is stored as content.
+    // Encode reply_to / mentions into the SAME FlatBuffers envelope media
+    // uses. Plain text stays raw UTF-8 bytes (server's text fallback).
     let payload: Uint8Array;
     if (input.payload !== undefined) {
       payload = input.payload;
@@ -1423,15 +1425,11 @@ export class PrivchatClient {
       (input.mentioned_user_ids !== undefined &&
         input.mentioned_user_ids.length > 0)
     ) {
-      const envelope: Record<string, unknown> = {
+      payload = encodeMessagePayloadEnvelope({
         content: input.content,
-        mentioned_user_ids:
-          input.mentioned_user_ids?.map((u) => Number(u)) ?? [],
-      };
-      if (input.reply_to_message_id !== undefined) {
-        envelope.reply_to_message_id = input.reply_to_message_id;
-      }
-      payload = new TextEncoder().encode(JSON.stringify(envelope));
+        mentioned_user_ids: input.mentioned_user_ids ?? [],
+        reply_to_message_id: input.reply_to_message_id,
+      });
     } else {
       payload = new TextEncoder().encode(input.content);
     }
