@@ -564,10 +564,12 @@ proto.messageHistoryAround = function (channelId, messageId, beforeLimit, afterL
 };
 
 proto.messageRevoke = function (serverMessageId, channelId) {
-  // snowflake id 超出 Number 安全整数,必须以 RawU64 裸字面量上线
+  // snowflake id 超出 Number 安全整数,必须以 RawU64 裸字面量上线。
+  // channel_id 服务端 MessageRevokeRequest 也是 u64 —— 同样走 RawU64,
+  // 否则 serde 收到 JSON string 会报 "invalid type: string, expected u64"。
   return this.rpcCallTyped(Routes.message.REVOKE, {
     server_message_id: new RawU64(serverMessageId),
-    channel_id: channelId,
+    channel_id: new RawU64(channelId),
   });
 };
 
