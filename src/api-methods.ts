@@ -311,7 +311,10 @@ proto.accountSearch = function (query, page = 1, pageSize = 20) {
   return this.rpcCallTyped<AccountSearchQueryRequest, AccountSearchResponse>(
     Routes.account_search.QUERY,
     { query, page, page_size: pageSize, from_user_id: 0 },
-  );
+  ).then((resp) => {
+    this.ingestUserProfiles(resp.users ?? []);
+    return resp;
+  });
 };
 
 // Bot ----------
@@ -344,7 +347,14 @@ proto.friendAccept = function (fromUserId, message) {
 };
 
 proto.friendPending = function () {
-  return this.rpcCallTyped(Routes.friend.PENDING, { user_id: 0 });
+  return this.rpcCallTyped<{ user_id: number }, FriendPendingResponse>(
+    Routes.friend.PENDING,
+    { user_id: 0 },
+  ).then((resp) => {
+    // Requesters are usually strangers not yet in any cache — hydrate them.
+    this.ingestUserProfiles((resp.requests ?? []).map((r) => r.user));
+    return resp;
+  });
 };
 
 proto.friendCheck = function (friendId) {
@@ -428,7 +438,15 @@ proto.groupMemberAdd = function (groupId, userId, role) {
 };
 
 proto.groupMemberList = function (groupId) {
-  return this.rpcCallTyped(Routes.group_member.LIST, { group_id: groupId });
+  return this.rpcCallTyped<{ group_id: number }, GroupMemberListResponse>(
+    Routes.group_member.LIST,
+    { group_id: groupId },
+  ).then((resp) => {
+    // Single write-path: hydrate the user cache from member profiles so
+    // clicking a (non-friend, un-synced) member's avatar resolves.
+    this.ingestUserProfiles(resp.members ?? []);
+    return resp;
+  });
 };
 
 proto.groupMemberLeave = function (groupId) {

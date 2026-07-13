@@ -358,6 +358,30 @@ interface BootstrapFriendPayload {
   };
 }
 
+/**
+ * Loose shape accepted by {@link PrivchatClient.ingestUserProfiles}. Covers the
+ * common profile-bearing rows the server returns from non-bootstrap surfaces
+ * (group members, search hits, friend requests, message senders). All fields
+ * optional except an id — the ingest merges only what's present.
+ */
+export interface IngestableUserProfile {
+  user_id?: number | string;
+  uid?: number | string;
+  username?: string;
+  nickname?: string;
+  avatar?: string;
+  avatar_url?: string;
+  user_type?: number;
+}
+
+/** First non-empty string among the candidates, else `undefined`. */
+function pickNonEmpty(...vals: Array<string | undefined>): string | undefined {
+  for (const v of vals) {
+    if (v !== undefined && v !== '') return v;
+  }
+  return undefined;
+}
+
 function userPayloadToRecord(
   payload: BootstrapUserPayload,
   version: number,
@@ -2072,6 +2096,63 @@ export class PrivchatClient {
   observeUserList(cb: (users: UserRecord[]) => void): Unsubscribe {
     if (this.userStore === null) throw new CacheDisabledError();
     return this.userStore.observe(cb);
+  }
+
+  /**
+   * Single write-path for user profiles that arrive OUTSIDE the entity-sync
+   * bootstrap — group member lists, friend requests, search results, message
+   * senders, etc. Historically the UserStore was hydrated ONLY by the bootstrap
+   * pager, so any uid first seen through one of those side channels stayed
+   * unresolved forever (`cachedUser` miss → UI stuck on a placeholder). Routing
+   * every profile-bearing response through here closes that class of bug.
+   *
+   * Merge policy (fill-only, non-destructive):
+   *   - never overwrites a present field with an empty one;
+   *   - preserves `is_friend` (friendship truth comes from the friend sync);
+   *   - keeps the existing `sync_version` (0 for ad-hoc rows) so it never
+   *     advances the bootstrap cursor and re-sync still refreshes authoritatively;
+   *   - skips rows that add nothing (no needless notify / IDB churn).
+   *
+   * No-op when the cache is disabled. Best-effort IDB persist (survives restart).
+   */
+  ingestUserProfiles(profiles: ReadonlyArray<IngestableUserProfile>): void {
+    const store = this.userStore;
+    if (store === null || profiles.length === 0) return;
+    const toWrite: UserRecord[] = [];
+    for (const p of profiles) {
+      if (p === undefined || p === null) continue;
+      const id = String(p.user_id ?? p.uid ?? '');
+      if (id === '' || id === '0') continue;
+      const existing = store.get(id);
+      const username = pickNonEmpty(p.username, existing?.username) ?? '';
+      const nickname = pickNonEmpty(p.nickname, existing?.nickname);
+      const avatar_url = pickNonEmpty(p.avatar_url, p.avatar, existing?.avatar_url);
+      if (
+        existing !== undefined &&
+        existing.username === username &&
+        existing.nickname === nickname &&
+        existing.avatar_url === avatar_url
+      ) {
+        continue; // nothing new
+      }
+      toWrite.push({
+        user_id: id,
+        username,
+        nickname,
+        avatar_url,
+        user_type: p.user_type ?? existing?.user_type ?? 0,
+        is_friend: existing?.is_friend ?? false,
+        sync_version: existing?.sync_version ?? 0,
+      });
+    }
+    if (toWrite.length === 0) return;
+    store.upsertMany(toWrite);
+    const db = this.cacheDb;
+    if (db !== null) {
+      void cacheUpsertUsers(db, toWrite).catch(() => {
+        /* best-effort persist; in-memory store is already updated */
+      });
+    }
   }
 
   // ----- R2A: Group profile cache -----
