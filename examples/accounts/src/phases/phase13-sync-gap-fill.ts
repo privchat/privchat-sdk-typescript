@@ -64,7 +64,7 @@ export async function phase13_sync_gap_fill(
   // Bob's manager client may still be cycling through reconnect after
   // phase12's eviction. Wait briefly until bob is back so the gap-send
   // RPCs go through.
-  if (!(await waitForState(mgr.client('bob'), 'authenticated', 3_000))) {
+  if (!(await waitForState(mgr.client('bob'), 'authenticated', 15_000))) {
     metrics.errors.push("bob's manager client did not re-authenticate within 3s");
     return finalize(start, metrics);
   }

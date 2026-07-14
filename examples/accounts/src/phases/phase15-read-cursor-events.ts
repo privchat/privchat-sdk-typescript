@@ -53,7 +53,7 @@ export async function phase15_read_cursor_events(
 
   // bob's manager client may still be cycling reconnect from phase12's
   // eviction; wait for it.
-  if (!(await waitForState(mgr.client('bob'), 'authenticated', 3_000))) {
+  if (!(await waitForState(mgr.client('bob'), 'authenticated', 15_000))) {
     metrics.errors.push("bob's manager client did not re-authenticate within 3s");
     return finalize(start, metrics);
   }

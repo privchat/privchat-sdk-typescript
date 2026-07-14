@@ -47,8 +47,11 @@ export async function phase08_message_history(
 
   // Per-message field shape — Phase 4 maps these into MessageRecord
   for (const m of resp.messages) {
-    if (typeof m.message_id !== 'number') {
-      metrics.errors.push(`message.message_id expected number, got ${typeof m.message_id}`);
+    // server message_id is a u64 (snowflake) — it MUST be a string end to end (a JS number would
+    // silently lose precision above 2^53). Runtime correctly returns a string; the SDK api-types
+    // declaration (message_id: number) is a latent typing bug tracked separately.
+    if (typeof m.message_id !== 'string') {
+      metrics.errors.push(`message.message_id expected string (u64), got ${typeof m.message_id}`);
     }
     if (typeof m.channel_id !== 'number') {
       metrics.errors.push(`message.channel_id expected number, got ${typeof m.channel_id}`);
@@ -77,8 +80,9 @@ export async function phase08_message_history(
     const oldest = resp.messages[0]!;
     const before = await mgr.client('alice').messageHistory(channelId, 10, oldest.message_id);
     metrics.rpc_calls += 1;
-    // Pagination contract: every returned message_id < before_server_message_id
-    const violators = before.messages.filter((m) => m.message_id >= oldest.message_id);
+    // Pagination contract: every returned message_id < before_server_message_id. Compare as BigInt
+    // — message_id is a u64 string, so a plain >= would do a lexicographic (wrong) comparison.
+    const violators = before.messages.filter((m) => BigInt(m.message_id) >= BigInt(oldest.message_id));
     if (violators.length === 0) {
       metrics.rpc_successes += 1;
     } else {

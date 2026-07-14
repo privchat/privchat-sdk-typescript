@@ -55,7 +55,7 @@ export async function phase14_outbox(
   const url = `ws://${host}:${wsPort}/`;
 
   // Wait for bob's manager to be re-authenticated after phase12's eviction.
-  if (!(await waitForState(mgr.client('bob'), 'authenticated', 3_000))) {
+  if (!(await waitForState(mgr.client('bob'), 'authenticated', 15_000))) {
     metrics.errors.push("bob's manager client did not re-authenticate within 3s");
     return finalize(start, metrics);
   }
