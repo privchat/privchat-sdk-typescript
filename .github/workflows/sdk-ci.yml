@@ -1,0 +1,48 @@
+# PrivChat TS SDK CI — PR fast gate.
+#
+# Layered RC-harness CI (RC Harness → CI, GPT plan):
+#   PR fast gate (this file)  typecheck + vitest unit tests — runs on every PR/push, minutes.
+#   nightly full RC           rc-sweep.mjs + example:accounts/reconnect against a spun-up server —
+#                             see privchat-docs RELEASE_GATE §CI (needs the full stack; the money
+#                             harnesses need the macos-only app kexe, so they stay on a mac runner).
+#   release                   release-gate-smoke.sh — release binary vs an isolated migrated DB.
+#
+# This job is deliberately DB-less / server-less so it stays fast and green on every PR.
+name: sdk-ci
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout SDK
+        uses: actions/checkout@v4
+        with:
+          path: privchat-sdk-typescript
+      # codegen consumes the canonical FlatBuffers schemas from the sibling privchat-protocol repo.
+      # Adjust `repository:`/`ref:` if the protocol repo lives elsewhere.
+      - name: Checkout protocol schemas (sibling)
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: ${{ github.repository_owner }}/privchat-protocol
+          path: privchat-protocol
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install flatc (for codegen)
+        run: sudo apt-get update && sudo apt-get install -y flatbuffers-compiler
+      - name: Install deps
+        working-directory: privchat-sdk-typescript
+        run: npm install
+      - name: Codegen (flatc → src/generated)
+        working-directory: privchat-sdk-typescript
+        run: npm run codegen
+      - name: Typecheck
+        working-directory: privchat-sdk-typescript
+        run: npm run typecheck
+      - name: Unit tests
+        working-directory: privchat-sdk-typescript
+        run: npm test
