@@ -13,6 +13,7 @@ import { describe, expect, it } from 'vitest';
 import {
   decodeAuthorizationRequest,
   decodeAuthorizationResponse,
+  decodeCanonicalTimelineEvent,
   decodeMessagePayloadEnvelope,
   decodePingRequest,
   decodePongResponse,
@@ -24,6 +25,7 @@ import {
   decodeSubscribeResponse,
   encodeAuthorizationRequest,
   encodeAuthorizationResponse,
+  encodeCanonicalTimelineEvent,
   encodeMessagePayloadEnvelope,
   encodePingRequest,
   encodePongResponse,
@@ -35,6 +37,7 @@ import {
   encodeSubscribeResponse,
   type AuthorizationRequest,
   type AuthorizationResponse,
+  type CanonicalTimelineEvent,
   type MessagePayloadEnvelope,
   type PushBatchRequest,
   type PushMessageRequest,
@@ -318,6 +321,37 @@ const CANON = {
     },
     mentioned_user_ids: [],
   } satisfies MessagePayloadEnvelope,
+
+  timeline_new_message: {
+    type: 'new_message',
+    message_type: 2,
+    payload: {
+      content: '',
+      metadata: {
+        type: 'image',
+        file_id: '9007199254740993',
+        width: 1920,
+        height: 1080,
+        file_name: 'large-id.jpg',
+      },
+      mentioned_user_ids: ['9007199254740995'],
+    },
+  } satisfies CanonicalTimelineEvent,
+
+  timeline_revoke: {
+    type: 'revoke',
+    target_server_message_id: '9007199254740997',
+    revoked_by: '9007199254740999',
+    revoked_at: 1_714_680_000_000,
+  } satisfies CanonicalTimelineEvent,
+
+  timeline_reaction: {
+    type: 'reaction_change',
+    target_server_message_id: '9007199254741001',
+    actor_id: '9007199254741003',
+    emoji: 'thumbs-up',
+    operation: 'remove',
+  } satisfies CanonicalTimelineEvent,
 };
 
 // ------------------------------------------------------------------
@@ -400,5 +434,14 @@ describe.skipIf(!HAS_RUST_FIXTURES)('cross-language fixtures', () => {
   ])('%s', (name, expected) => {
     expect(decodeMessagePayloadEnvelope(readBin(name))).toEqual(expected);
     writeBin(name, encodeMessagePayloadEnvelope(expected));
+  });
+
+  it.each([
+    ['timeline_new_message', CANON.timeline_new_message],
+    ['timeline_revoke', CANON.timeline_revoke],
+    ['timeline_reaction', CANON.timeline_reaction],
+  ])('%s', (name, expected) => {
+    expect(decodeCanonicalTimelineEvent(readBin(name))).toEqual(expected);
+    writeBin(name, encodeCanonicalTimelineEvent(expected));
   });
 });

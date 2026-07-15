@@ -17,6 +17,9 @@
 // Out of scope for 5B-1c: reconnect wiring (5B-1d), accounts E2E (5B-1e).
 
 import { parseRpcJson } from './codec/safe-json.js';
+import { encodeMessagePayloadEnvelope } from './codec/payload.js';
+import { resolveCanonicalTimelineEvent } from './codec/timeline.js';
+import { contentTypeFromWireTag } from './content-type.js';
 import {
   clearChannelMessages as cacheClearChannelMessages,
   deleteMessageByRecordKey as cacheDeleteMessageByRecordKey,
@@ -600,6 +603,11 @@ export function commitToMessageRecord(
   channel_type: number,
   selfUid?: string,
 ): MessageRecord {
+  const resolved = resolveCanonicalTimelineEvent(commit);
+  const canonical =
+    resolved.source === 'canonical' && resolved.event?.type === 'new_message'
+      ? resolved.event
+      : undefined;
   // Multi-device: `sync/get_difference` replays OUR own messages (sent from
   // another device) into this client. Those must land as 'sent', not
   // 'received' — a self row with status 'received' renders as the bogus
@@ -610,8 +618,9 @@ export function commitToMessageRecord(
   // content 规范成 {content, metadata}（见 sync_commit_content_from_parsed），这里若带 metadata
   // 就原样编码进 payload，让 decodeMediaMetadata 解码。
   const c = commit.content;
-  const payload =
-    typeof c === 'object' && c !== null && 'metadata' in c
+  const payload = canonical
+    ? encodeMessagePayloadEnvelope(canonical.payload)
+    : typeof c === 'object' && c !== null && 'metadata' in c
       ? new TextEncoder().encode(JSON.stringify(c))
       : new Uint8Array();
   return {
@@ -621,8 +630,10 @@ export function commitToMessageRecord(
     local_message_id: commit.local_message_id,
     pts: commit.pts,
     from_uid: commit.sender_id,
-    message_type: commit.message_type,
-    content: extractContent(commit.content),
+    message_type: canonical
+      ? contentTypeFromWireTag(canonical.message_type)
+      : commit.message_type,
+    content: canonical?.payload.content ?? extractContent(commit.content),
     payload,
     timestamp: commit.server_timestamp,
     status: isOwn ? 'sent' : 'received',

@@ -423,9 +423,10 @@ function decodeMetadata(
 
 // ----- Public encode / decode -----
 
-export function encodeMessagePayloadEnvelope(env: MessagePayloadEnvelope): Uint8Array {
-  const builder = new flatbuffers.Builder(512);
-
+export function buildMessagePayloadEnvelopeTable(
+  builder: flatbuffers.Builder,
+  env: MessagePayloadEnvelope,
+): flatbuffers.Offset {
   const contentOff = builder.createString(env.content);
   const meta = env.metadata ? buildMetadata(builder, env.metadata) : null;
   const mentionsVec = FbMessagePayloadEnvelope.createMentionedUserIdsVector(
@@ -446,7 +447,12 @@ export function encodeMessagePayloadEnvelope(env: MessagePayloadEnvelope): Uint8
   );
   FbMessagePayloadEnvelope.addMentionedUserIds(builder, mentionsVec);
   if (sourceOff) FbMessagePayloadEnvelope.addMessageSource(builder, sourceOff);
-  const offset = FbMessagePayloadEnvelope.endMessagePayloadEnvelope(builder);
+  return FbMessagePayloadEnvelope.endMessagePayloadEnvelope(builder);
+}
+
+export function encodeMessagePayloadEnvelope(env: MessagePayloadEnvelope): Uint8Array {
+  const builder = new flatbuffers.Builder(512);
+  const offset = buildMessagePayloadEnvelopeTable(builder, env);
   builder.finish(offset);
   return builder.asUint8Array();
 }
@@ -455,6 +461,12 @@ export function decodeMessagePayloadEnvelope(bytes: Uint8Array): MessagePayloadE
   const view = FbMessagePayloadEnvelope.getRootAsMessagePayloadEnvelope(
     new flatbuffers.ByteBuffer(bytes),
   );
+  return decodeMessagePayloadEnvelopeTable(view);
+}
+
+export function decodeMessagePayloadEnvelopeTable(
+  view: FbMessagePayloadEnvelope,
+): MessagePayloadEnvelope {
   const metadata = decodeMetadata(view.metadataType(), view);
 
   const mentioned_user_ids: string[] = [];

@@ -249,6 +249,19 @@ export {
   decodeMessagePayloadEnvelope,
   encodeMessagePayloadEnvelope,
 } from './codec/payload.js';
+
+export {
+  CANONICAL_TIMELINE_EVENT_SCHEMA_V1,
+  canonicalEventMetricSnapshot,
+  decodeCanonicalTimelineEvent,
+  encodeCanonicalTimelineEvent,
+  resolveCanonicalTimelineEvent,
+} from './codec/timeline.js';
+export type {
+  CanonicalEventResolution,
+  CanonicalEventSource,
+  CanonicalTimelineEvent,
+} from './codec/timeline.js';
 export type {
   ContactCardMetadata,
   FileMetadata,

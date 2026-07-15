@@ -828,6 +828,8 @@ export interface GetDifferenceResponse {
 }
 
 export interface ServerCommit {
+  /** commit_log identity, absent on legacy servers. */
+  event_id?: string;
   /** Per-channel ordering key (decimal string). */
   pts: string;
   /** Server-assigned message identity (snowflake) as a decimal string. */
@@ -850,6 +852,9 @@ export interface ServerCommit {
   /** Optional sender metadata; deliberately NOT persisted in 5B-1
    *  (per PHASE5B_SYNC_ENGINE_PLAN.md decision #2). */
   sender_info?: unknown;
+  /** Version and FlatBuffers payload for the additive canonical event. */
+  event_schema_version?: number;
+  canonical_event?: string;
 }
 
 // ---------- presence/* ----------
