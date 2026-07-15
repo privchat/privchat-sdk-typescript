@@ -213,10 +213,36 @@ const CANON = {
       url: 'https://cdn.example/img.jpg',
       width: 1920,
       height: 1080,
+      thumbnail_file_id: '500110002',
+      thumbnail_url: 'https://cdn.example/img-thumb.jpg',
+      file_name: 'photo.jpg',
     },
     reply_to_message_id: '700110001',
     mentioned_user_ids: ['1001', '1002'],
     message_source: { source_type: 'group', source_id: 'g-42' },
+  } satisfies MessagePayloadEnvelope,
+
+  payload_file: {
+    content: '',
+    metadata: {
+      type: 'file',
+      file_id: '500110003',
+      file_name: 'report.pdf',
+      file_size: 1_048_576,
+      mime_type: 'application/pdf',
+    },
+    mentioned_user_ids: [],
+  } satisfies MessagePayloadEnvelope,
+
+  payload_voice: {
+    content: '',
+    metadata: {
+      type: 'voice',
+      file_id: '500110004',
+      duration: 7,
+      file_name: 'voice.m4a',
+    },
+    mentioned_user_ids: [],
   } satisfies MessagePayloadEnvelope,
 
   payload_video: {
@@ -230,6 +256,40 @@ const CANON = {
       thumbnail_file_id: '500110006',
       thumbnail_width: 640,
       thumbnail_height: 360,
+      thumbnail_url: 'https://cdn.example/video-thumb.jpg',
+      file_name: 'clip.mp4',
+    },
+    mentioned_user_ids: [],
+  } satisfies MessagePayloadEnvelope,
+
+  payload_location: {
+    content: '',
+    metadata: {
+      type: 'location',
+      latitude: 31.240018,
+      longitude: 121.490317,
+      coordinate_system: 'gcj02',
+      name: 'The Bund',
+      address: 'Zhongshan East 1st Road, Shanghai',
+      poi_id: 'amap-poi-001',
+      poi_source: 'amap',
+      thumbnail_file_id: '500110007',
+    },
+    mentioned_user_ids: [],
+  } satisfies MessagePayloadEnvelope,
+
+  payload_contact: {
+    content: '',
+    metadata: { type: 'contact_card', user_id: '900710002' },
+    mentioned_user_ids: [],
+  } satisfies MessagePayloadEnvelope,
+
+  payload_sticker: {
+    content: '',
+    metadata: {
+      type: 'sticker',
+      sticker_id: 'pack-1/sticker-3',
+      image_url: 'https://cdn.example/s.png',
     },
     mentioned_user_ids: [],
   } satisfies MessagePayloadEnvelope,
@@ -329,7 +389,12 @@ describe.skipIf(!HAS_RUST_FIXTURES)('cross-language fixtures', () => {
   it.each([
     ['payload_text', CANON.payload_text],
     ['payload_image', CANON.payload_image],
+    ['payload_file', CANON.payload_file],
+    ['payload_voice', CANON.payload_voice],
     ['payload_video', CANON.payload_video],
+    ['payload_location', CANON.payload_location],
+    ['payload_contact', CANON.payload_contact],
+    ['payload_sticker', CANON.payload_sticker],
     ['payload_forward', CANON.payload_forward],
     ['payload_link', CANON.payload_link],
   ])('%s', (name, expected) => {

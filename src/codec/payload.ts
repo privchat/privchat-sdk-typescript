@@ -62,6 +62,7 @@ export interface ImageMetadata {
   thumbnail_file_id?: string;
   /** legacy 明文缩略图 url；v1 加密无此字段。 */
   thumbnail_url?: string;
+  file_name?: string;
 }
 
 export interface FileMetadata {
@@ -79,6 +80,7 @@ export interface VoiceMetadata {
   file_id: string;
   /** Duration in seconds; clients round sub-1s up to 1. */
   duration: number;
+  file_name?: string;
 }
 
 export interface VideoMetadata {
@@ -91,12 +93,19 @@ export interface VideoMetadata {
   thumbnail_width?: number;
   thumbnail_height?: number;
   thumbnail_url?: string;
+  file_name?: string;
 }
 
 export interface LocationMetadata {
   type: 'location';
   latitude: number;
   longitude: number;
+  coordinate_system?: string;
+  name?: string;
+  address?: string;
+  poi_id?: string;
+  poi_source?: string;
+  thumbnail_file_id?: string;
 }
 
 export interface ContactCardMetadata {
@@ -167,6 +176,7 @@ function buildMetadata(
       const url = m.url !== undefined ? builder.createString(m.url) : 0;
       const thumbUrl =
         m.thumbnail_url !== undefined ? builder.createString(m.thumbnail_url) : 0;
+      const fileName = m.file_name !== undefined ? builder.createString(m.file_name) : 0;
       const off = FbImageMetadata.createImageMetadata(
         builder,
         idStringToBigint(m.file_id),
@@ -175,7 +185,7 @@ function buildMetadata(
         m.height,
         optionalIdStringToBigint(m.thumbnail_file_id),
         thumbUrl,
-        0, // file_name: 图片不展示原名，absent
+        fileName,
       );
       return { tag: FbMessageMetadataTag.ImageMetadata, offset: off };
     }
@@ -191,17 +201,19 @@ function buildMetadata(
       return { tag: FbMessageMetadataTag.FileMetadata, offset: off };
     }
     case 'voice': {
+      const fileName = m.file_name !== undefined ? builder.createString(m.file_name) : 0;
       const off = FbVoiceMetadata.createVoiceMetadata(
         builder,
         idStringToBigint(m.file_id),
         m.duration,
-        0, // file_name: absent
+        fileName,
       );
       return { tag: FbMessageMetadataTag.VoiceMetadata, offset: off };
     }
     case 'video': {
       const videoThumbUrl =
         m.thumbnail_url !== undefined ? builder.createString(m.thumbnail_url) : 0;
+      const fileName = m.file_name !== undefined ? builder.createString(m.file_name) : 0;
       const off = FbVideoMetadata.createVideoMetadata(
         builder,
         idStringToBigint(m.file_id),
@@ -212,23 +224,27 @@ function buildMetadata(
         m.thumbnail_width ?? 0,
         m.thumbnail_height ?? 0,
         videoThumbUrl,
-        0, // file_name: absent（视频作为文件发送时可填，当前 sender 未带）
+        fileName,
       );
       return { tag: FbMessageMetadataTag.VideoMetadata, offset: off };
     }
     case 'location': {
-      // LocationMetadata 的 POI 字段（coordinate_system/name/address/poi_*/thumbnail_file_id）
-      // 当前 TS 类型未携带，传 0/0n 表示 absent（与最小 location 类型一致）。
+      const coordinateSystem =
+        m.coordinate_system !== undefined ? builder.createString(m.coordinate_system) : 0;
+      const name = m.name !== undefined ? builder.createString(m.name) : 0;
+      const address = m.address !== undefined ? builder.createString(m.address) : 0;
+      const poiId = m.poi_id !== undefined ? builder.createString(m.poi_id) : 0;
+      const poiSource = m.poi_source !== undefined ? builder.createString(m.poi_source) : 0;
       const off = FbLocationMetadata.createLocationMetadata(
         builder,
         m.latitude,
         m.longitude,
-        0,
-        0,
-        0,
-        0,
-        0,
-        BigInt(0),
+        coordinateSystem,
+        name,
+        address,
+        poiId,
+        poiSource,
+        optionalIdStringToBigint(m.thumbnail_file_id),
       );
       return { tag: FbMessageMetadataTag.LocationMetadata, offset: off };
     }
@@ -304,6 +320,7 @@ function decodeMetadata(
         height: m.height(),
         thumbnail_file_id: bigintToOptionalIdString(m.thumbnailFileId()),
         thumbnail_url: m.thumbnailUrl() ?? undefined,
+        file_name: m.fileName() ?? undefined,
       };
     }
     case FbMessageMetadataTag.FileMetadata: {
@@ -325,6 +342,7 @@ function decodeMetadata(
         type: 'voice',
         file_id: bigintToIdString(m.fileId()),
         duration: m.duration(),
+        file_name: m.fileName() ?? undefined,
       };
     }
     case FbMessageMetadataTag.VideoMetadata: {
@@ -340,12 +358,23 @@ function decodeMetadata(
         thumbnail_width: m.thumbnailWidth() === 0 ? undefined : m.thumbnailWidth(),
         thumbnail_height: m.thumbnailHeight() === 0 ? undefined : m.thumbnailHeight(),
         thumbnail_url: m.thumbnailUrl() ?? undefined,
+        file_name: m.fileName() ?? undefined,
       };
     }
     case FbMessageMetadataTag.LocationMetadata: {
       const m = view.metadata(new FbLocationMetadata()) as FbLocationMetadata | null;
       if (!m) return undefined;
-      return { type: 'location', latitude: m.latitude(), longitude: m.longitude() };
+      return {
+        type: 'location',
+        latitude: m.latitude(),
+        longitude: m.longitude(),
+        coordinate_system: m.coordinateSystem() ?? undefined,
+        name: m.name() ?? undefined,
+        address: m.address() ?? undefined,
+        poi_id: m.poiId() ?? undefined,
+        poi_source: m.poiSource() ?? undefined,
+        thumbnail_file_id: bigintToOptionalIdString(m.thumbnailFileId()),
+      };
     }
     case FbMessageMetadataTag.ContactCardMetadata: {
       const m = view.metadata(new FbContactCardMetadata()) as FbContactCardMetadata | null;

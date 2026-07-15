@@ -34,7 +34,16 @@ describe('MessagePayloadEnvelope metadata variants', () => {
   it('image with all fields', () => {
     const env = wrap({
       content: '',
-      metadata: { type: 'image', file_id: '500110001', url: 'https://cdn.example/img.jpg', width: 1920, height: 1080 },
+      metadata: {
+        type: 'image',
+        file_id: '500110001',
+        url: 'https://cdn.example/img.jpg',
+        width: 1920,
+        height: 1080,
+        thumbnail_file_id: '500110002',
+        thumbnail_url: 'https://cdn.example/img-thumb.jpg',
+        file_name: 'photo.jpg',
+      },
     });
     const got = decodeMessagePayloadEnvelope(encodeMessagePayloadEnvelope(env));
     expect(got).toEqual(env);
@@ -50,7 +59,13 @@ describe('MessagePayloadEnvelope metadata variants', () => {
 
   it('file', () => {
     const env = wrap({
-      metadata: { type: 'file', file_id: '500110003' },
+      metadata: {
+        type: 'file',
+        file_id: '500110003',
+        file_name: 'report.pdf',
+        file_size: 1_048_576,
+        mime_type: 'application/pdf',
+      },
     });
     const got = decodeMessagePayloadEnvelope(encodeMessagePayloadEnvelope(env));
     expect(got).toEqual(env);
@@ -58,7 +73,7 @@ describe('MessagePayloadEnvelope metadata variants', () => {
 
   it('voice', () => {
     const env = wrap({
-      metadata: { type: 'voice', file_id: '500110004', duration: 7 },
+      metadata: { type: 'voice', file_id: '500110004', duration: 7, file_name: 'voice.m4a' },
     });
     const got = decodeMessagePayloadEnvelope(encodeMessagePayloadEnvelope(env));
     expect(got).toEqual(env);
@@ -75,6 +90,8 @@ describe('MessagePayloadEnvelope metadata variants', () => {
         thumbnail_file_id: '500110006',
         thumbnail_width: 640,
         thumbnail_height: 360,
+        thumbnail_url: 'https://cdn.example/video-thumb.jpg',
+        file_name: 'clip.mp4',
       },
     });
     const got = decodeMessagePayloadEnvelope(encodeMessagePayloadEnvelope(env));
@@ -91,7 +108,17 @@ describe('MessagePayloadEnvelope metadata variants', () => {
 
   it('location', () => {
     const env = wrap({
-      metadata: { type: 'location', latitude: 37.7749, longitude: -122.4194 },
+      metadata: {
+        type: 'location',
+        latitude: 31.240018,
+        longitude: 121.490317,
+        coordinate_system: 'gcj02',
+        name: 'The Bund',
+        address: 'Zhongshan East 1st Road, Shanghai',
+        poi_id: 'amap-poi-001',
+        poi_source: 'amap',
+        thumbnail_file_id: '500110007',
+      },
     });
     const got = decodeMessagePayloadEnvelope(encodeMessagePayloadEnvelope(env));
     expect(got).toEqual(env);
