@@ -6,6 +6,7 @@ import { ReactionOperation as FbReactionOperation } from '../generated/privchat/
 import { RevokeEvent as FbRevokeEvent } from '../generated/privchat/protocol/revoke-event.js';
 import { TimelineEventPayload as FbTimelineEventPayload } from '../generated/privchat/protocol/timeline-event-payload.js';
 import { contentTypeFromWireTag, contentTypeToWireTag, decodeContentTypeName } from '../content-type.js';
+import { decodeLegacyMessageEnvelope } from '../message-content.js';
 import {
   buildMessagePayloadEnvelopeTable,
   decodeMessagePayloadEnvelopeTable,
@@ -223,9 +224,12 @@ function canonicalFromLegacy(commit: CanonicalEventCommit): CanonicalTimelineEve
 
   const name = decodeContentTypeName(commit.message_type);
   if (name === 'unknown') return undefined;
-  const content = asObject(commit.content);
+  const decodedEnvelope = decodeLegacyMessageEnvelope(commit.content);
+  const content = decodedEnvelope?.raw ?? asObject(commit.content);
   const display =
-    typeof commit.content === 'string'
+    decodedEnvelope !== undefined
+      ? decodedEnvelope.content
+      : typeof commit.content === 'string'
       ? commit.content
       : typeof content.text === 'string'
         ? content.text

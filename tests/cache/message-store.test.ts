@@ -114,6 +114,21 @@ describe('replaceWindow', () => {
 });
 
 describe('upsertMessage', () => {
+  it('normalizes legacy envelopes before exposing cached records', () => {
+    const s = new MessageStore();
+    s.upsertMessage(
+      msg('1', {
+        content: JSON.stringify({
+          content: 'display text',
+          mentioned_user_ids: [],
+          reply_to_message_id: '600997771041832960',
+        }),
+      }),
+      true,
+    );
+    expect(s.getMessages('12345')[0]?.content).toBe('display text');
+  });
+
   it('inserts a new message and emits a single-record patch', () => {
     const s = new MessageStore();
     const patches: ConversationPatch[] = [];

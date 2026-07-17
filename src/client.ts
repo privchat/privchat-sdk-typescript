@@ -106,6 +106,7 @@ import {
   type PublishRequest,
 } from './codec/publish.js';
 import { parseRpcJson, stringifyWithRawIds } from './codec/safe-json.js';
+import { decodeLegacyMessageEnvelope, normalizeMessageDisplayContent } from './message-content.js';
 import { derivePreview } from './preview.js';
 import { contentTypeFromWireTag } from './content-type.js';
 import {
@@ -553,24 +554,41 @@ function historicalMessageToRecord(
   // delivery / read receipts (when wired through) will further promote
   // 'sent' to 'delivered' / 'read'.
   const isSelf = selfUid !== undefined && fromUid === selfUid;
+  const legacyEnvelope = decodeLegacyMessageEnvelope(msg.content);
+  const normalizedContent = normalizeMessageDisplayContent(msg.content);
+  const legacy = legacyEnvelope?.raw;
+  const metadata = msg.metadata ?? legacy?.metadata;
+  const replyTo = msg.reply_to_message_id ?? legacy?.reply_to_message_id;
+  const mentionedUserIds = legacy?.mentioned_user_ids;
+  const messageSource = legacy?.message_source;
   // 媒体 metadata 必须随历史消息进入 payload，否则 Web VM 无从解码 → 历史图片/文件退化成
   // [图片]/[文件]、缩略图/文件名/尺寸占位全丢（实时 push 带 metadata 才能显示，历史不能）。
   // 重建与 realtime push 同形的 JSON envelope {content, metadata}，让 decodeMediaMetadata 解码。
-  const payload =
-    msg.metadata !== undefined &&
-    msg.metadata !== null &&
-    typeof msg.metadata === 'object'
-      ? new TextEncoder().encode(
-          JSON.stringify({ content: msg.content, metadata: msg.metadata }),
-        )
-      : new Uint8Array();
+  const hasEnvelopeData =
+    (metadata !== undefined && metadata !== null) ||
+    replyTo !== undefined ||
+    Array.isArray(mentionedUserIds) ||
+    messageSource !== undefined;
+  const payload = hasEnvelopeData
+    ? new TextEncoder().encode(
+        JSON.stringify({
+          content: normalizedContent,
+          ...(metadata !== undefined ? { metadata } : {}),
+          ...(replyTo !== undefined ? { reply_to_message_id: replyTo } : {}),
+          ...(Array.isArray(mentionedUserIds)
+            ? { mentioned_user_ids: mentionedUserIds }
+            : {}),
+          ...(messageSource !== undefined ? { message_source: messageSource } : {}),
+        }),
+      )
+    : new Uint8Array();
   return {
     channel_id,
     channel_type,
     server_message_id: String(msg.message_id),
     from_uid: fromUid,
     message_type: msg.message_type,
-    content: msg.content,
+    content: normalizedContent,
     payload,
     timestamp: msg.timestamp,
     pts: msg.message_seq !== undefined ? String(msg.message_seq) : undefined,
@@ -1409,6 +1427,19 @@ export class PrivchatClient {
    * in memory + IndexedDB; a process restart loses pending records.
    */
   async sendTextMessage(input: SendTextInput): Promise<SendTextOperationResult> {
+    const embeddedEnvelope = decodeLegacyMessageEnvelope(input.content);
+    if (embeddedEnvelope !== undefined) {
+      const embeddedReply = embeddedEnvelope.raw.reply_to_message_id;
+      const embeddedMentions = embeddedEnvelope.raw.mentioned_user_ids;
+      input = {
+        ...input,
+        content: normalizeMessageDisplayContent(input.content),
+        reply_to_message_id:
+          input.reply_to_message_id ?? protocolIdString(embeddedReply),
+        mentioned_user_ids:
+          input.mentioned_user_ids ?? protocolIdList(embeddedMentions),
+      };
+    }
     // Media variants pre-encode their FlatBuffers `MessagePayloadEnvelope`
     // and pass it via `input.payload`. Reply / mention need an envelope
     // too — the server ONLY decodes the typed FlatBuffers envelope
@@ -1421,6 +1452,7 @@ export class PrivchatClient {
     if (input.payload !== undefined) {
       payload = input.payload;
     } else if (
+      embeddedEnvelope !== undefined ||
       input.reply_to_message_id !== undefined ||
       (input.mentioned_user_ids !== undefined &&
         input.mentioned_user_ids.length > 0)
@@ -3670,6 +3702,19 @@ export class PrivchatClient {
   }
 }
 
+function protocolIdString(value: unknown): string | undefined {
+  if (typeof value === 'string' && /^\d+$/.test(value)) return value;
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) {
+    return String(value);
+  }
+  return undefined;
+}
+
+function protocolIdList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.map(protocolIdString).filter((id): id is string => id !== undefined);
+}
+
 // ----- Errors -----
 
 export class AuthorizationError extends Error {
@@ -3806,4 +3851,3 @@ function formatTransientError(e: unknown): string {
   if (e instanceof Error) return `transient: ${e.name}: ${e.message}`;
   return `transient: ${String(e)}`;
 }
-

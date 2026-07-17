@@ -12,6 +12,7 @@
 import { decodeMessagePayloadEnvelope } from '../codec/payload.js';
 import type { PushMessageRequest } from '../codec/push.js';
 import { contentTypeFromWireTag } from '../content-type.js';
+import { normalizeMessageDisplayContent } from '../message-content.js';
 
 /** All u64-grade ids stay as decimal strings at the public boundary —
  *  snowflake IDs exceed `Number.MAX_SAFE_INTEGER` in production. */
@@ -421,7 +422,9 @@ function extractPushContent(push: PushMessageRequest): string {
     if (push.payload[0] === 0x7b /* '{' */) {
       const text = new TextDecoder().decode(push.payload);
       const obj = JSON.parse(text) as { content?: unknown };
-      if (typeof obj.content === 'string') return obj.content;
+      if (typeof obj.content === 'string') {
+        return normalizeMessageDisplayContent(obj.content);
+      }
     }
   } catch {
     // Not JSON — fall through to FlatBuffers attempt.
@@ -429,7 +432,7 @@ function extractPushContent(push: PushMessageRequest): string {
 
   try {
     const envelope = decodeMessagePayloadEnvelope(push.payload);
-    return envelope.content;
+    return normalizeMessageDisplayContent(envelope.content);
   } catch (e) {
     console.warn(
       `[privchat] failed to decode push payload for server_message_id=` +

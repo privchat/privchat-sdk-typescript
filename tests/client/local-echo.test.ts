@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   PrivchatClient,
   decodeRpcRequest,
+  decodeMessagePayloadEnvelope,
   decodeSendMessageRequest,
   encodeAuthorizationResponse,
   encodeRpcResponse,
@@ -63,6 +64,39 @@ async function newAuthedClient(transport: FakeTransport, dbName: string): Promis
 }
 
 describe('sendTextMessage — cache-enabled, online happy path', () => {
+  it('normalizes a legacy envelope before local echo and wire encoding', async () => {
+    let wireContent = '';
+    let wireReply: string | undefined;
+    const t = authPlusSendFake((decoded) => {
+      const envelope = decodeMessagePayloadEnvelope(decoded.payload);
+      wireContent = envelope.content;
+      wireReply = envelope.reply_to_message_id;
+      return encodeSendMessageResponse({
+        client_seq: decoded.client_seq,
+        server_message_id: '700110000',
+        message_seq: 99,
+        reason_code: 0,
+      });
+    });
+    client = await newAuthedClient(t, `legacy-envelope-${++dbCounter}`);
+
+    await client.sendTextMessage({
+      channel_id: '12345',
+      channel_type: 1,
+      from_uid: '999',
+      content: JSON.stringify({
+        content: '正文',
+        mentioned_user_ids: [],
+        reply_to_message_id: '600997771041832960',
+      }),
+      local_message_id: '9007199254740991',
+    });
+
+    expect(wireContent).toBe('正文');
+    expect(wireReply).toBe('600997771041832960');
+    expect(client.getCachedMessages('12345', 1)[0]?.content).toBe('正文');
+  });
+
   it('emits pending immediately, returns sent, replaces local-echo with ACK', async () => {
     const t = authPlusSendFake((decoded) =>
       encodeSendMessageResponse({

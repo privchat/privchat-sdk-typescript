@@ -81,6 +81,24 @@ export type { AuthErrorKind } from './auth-error.js';
 // ----- Lossless JSON (u64-safe) -----
 export { parseRpcJson } from './codec/safe-json.js';
 
+// ----- Message content normalization -----
+export {
+  decodeLegacyMessageEnvelope,
+  messageContentText,
+  normalizeMessageDisplayContent,
+  projectMessageContent,
+  scanMessageTextEntities,
+} from './message-content.js';
+export type {
+  LegacyMessageEnvelope,
+  MessageContent,
+  MessageTextEntity,
+  MessageTextEntityType,
+  MoneyMessageSnapshot,
+  ProjectMessageContentInput,
+  SystemMessageRef,
+} from './message-content.js';
+
 // ----- Canonical content-type mapping -----
 export {
   contentTypeFromWireTag,

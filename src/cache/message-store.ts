@@ -17,6 +17,12 @@ import {
   type ConversationSnapshot,
   type MessageRecord,
 } from './types.js';
+import { normalizeMessageDisplayContent } from '../message-content.js';
+
+function normalizeRecord(record: MessageRecord): MessageRecord {
+  const content = normalizeMessageDisplayContent(record.content);
+  return content === record.content ? record : { ...record, content };
+}
 
 // Conversation identity is the channel_id alone. `channel_type` is an
 // attribute of the channel (used by UI to pick "direct settings vs group
@@ -120,7 +126,7 @@ export class MessageStore {
     is_remote: boolean,
   ): void {
     const k = channelKey(channel_id);
-    const sorted = [...records].sort(compareTimestamp);
+    const sorted = records.map(normalizeRecord).sort(compareTimestamp);
     const existing = this.buffers.get(k) ?? [];
 
     if (sorted.length === 0) {
@@ -163,7 +169,8 @@ export class MessageStore {
     const existing = this.buffers.get(k) ?? [];
     const byKey = new Map(existing.map((m) => [messageRecordKey(m), m]));
     const upserted: MessageRecord[] = [];
-    for (const r of records) {
+    for (const input of records) {
+      const r = normalizeRecord(input);
       const key = messageRecordKey(r);
       const prev = byKey.get(key);
       byKey.set(key, r);
@@ -191,6 +198,7 @@ export class MessageStore {
   ): void {
     const k = channelKey(channel_id);
     const existing = this.buffers.get(k) ?? [];
+    next = normalizeRecord(next);
     const newKey = messageRecordKey(next);
     // Filter both keys: drop the pending row (oldRecordKey) AND any row
     // that already carries the new identity (newKey). The latter handles
