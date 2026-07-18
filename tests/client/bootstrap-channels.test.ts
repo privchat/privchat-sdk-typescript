@@ -7,6 +7,7 @@ import {
 } from '../../src/index.js';
 import { FakeTransport } from './fake-transport.js';
 import { uniqueDbName } from './unique-db.js';
+import { CacheDB, upsertChannels } from '../../src/cache/index.js';
 
 let client: PrivchatClient | null = null;
 
@@ -121,6 +122,38 @@ describe('cache opt-in plumbing', () => {
 });
 
 describe('bootstrapChannels', () => {
+  it('restores persisted unread badges before a failed network refresh', async () => {
+    const dbName = uniqueDbName('cold-unread');
+    const db = new CacheDB(dbName);
+    await upsertChannels(db, [
+      {
+        channel_id: '12345',
+        channel_type: 1,
+        title: 'Alice',
+        latest_pts: '9',
+        read_pts: '4',
+        unread_count: 5,
+        updated_at: 1_700,
+        sync_version: 7,
+      },
+    ]);
+    db.close();
+
+    const offline = new FakeTransport();
+    offline.responder = () => {
+      throw new Error('offline');
+    };
+    client = new PrivchatClient({
+      transport: offline,
+      cache: { enabled: true, dbName },
+    });
+
+    await expect(client.bootstrapChannels()).rejects.toThrow('offline');
+    expect(client.cachedChannels()).toMatchObject([
+      { channel_id: '12345', unread_count: 5, read_pts: '4' },
+    ]);
+  });
+
   it('joins channel + channel_read_cursor and writes ChannelRecord rows', async () => {
     const t = entitySyncFake({
       channelItems: [

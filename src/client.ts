@@ -29,6 +29,7 @@ import {
   getMessageWindow as cacheGetMessageWindow,
   getOutboxEntry as cacheGetOutboxEntry,
   getSyncState as cacheGetSyncState,
+  listChannels as cacheListChannels,
   listFriendships as cacheListFriendships,
   listGroups as cacheListGroups,
   listOutboxEntries as cacheListOutboxEntries,
@@ -1747,6 +1748,16 @@ export class PrivchatClient {
     opts: BootstrapChannelsOptions = {},
   ): Promise<ChannelRecord[]> {
     const { db, store } = this.requireCache();
+
+    // Cold-start from the durable browser cache before waiting for network
+    // entity sync. This keeps unread badges visible across refreshes and while
+    // offline; the server response below remains authoritative and replaces
+    // these cached projections once available.
+    if (store.listChannels().length === 0) {
+      const cached = await cacheListChannels(db);
+      store.upsertChannels(cached);
+    }
+
     const sinceChannel = opts.sinceChannelVersion ?? 0;
     const sinceCursor = opts.sinceCursorVersion ?? 0;
     const limit = opts.limit ?? 100;
