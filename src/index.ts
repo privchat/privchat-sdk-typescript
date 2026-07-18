@@ -245,6 +245,19 @@ export type {
   PushMessageResponse,
 } from './codec/push.js';
 
+// ----- Generic entity invalidation control plane -----
+export {
+  decodeEntityInvalidationBatch,
+  encodeEntityInvalidationBatch,
+  ENTITY_INVALIDATION_MAX_ITEMS_V1,
+  ENTITY_INVALIDATION_PUSH_TOPIC_V1,
+} from './codec/entity-invalidation.js';
+export type {
+  EntityInvalidation,
+  EntityInvalidationBatch,
+  EntityMutationHint,
+} from './codec/entity-invalidation.js';
+
 // ----- Authorization -----
 export {
   decodeAuthorizationRequest,

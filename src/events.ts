@@ -310,6 +310,18 @@ export interface PresenceChangedReceivedEvent {
   version: number;
 }
 
+/** Emitted only after invalidation-driven entity sync has updated the SDK's
+ * canonical local store. This is not the raw wire hint. */
+export interface EntityChangedEvent {
+  type: 'entity_changed';
+  entity_type: string;
+  entity_id?: string;
+  scope?: string;
+  /** Decimal string to preserve the protocol's u64 version range. */
+  version: string;
+  mutation_hint: 'unknown' | 'upsert' | 'delete';
+}
+
 export type SdkEvent =
   | ConnectionStateChangedEvent
   | MessageReceivedEvent
@@ -327,6 +339,7 @@ export type SdkEvent =
   | PeerReadCursorUpdatedEvent
   | TypingReceivedEvent
   | PresenceChangedReceivedEvent
+  | EntityChangedEvent
   | ChannelPublishReceivedEvent;
 
 export interface SequencedSdkEvent {

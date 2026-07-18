@@ -89,6 +89,11 @@ import {
   type DeviceInfo,
 } from './codec/auth.js';
 import {
+  decodeEntityInvalidationBatch,
+  ENTITY_INVALIDATION_PUSH_TOPIC_V1,
+  type EntityInvalidation,
+} from './codec/entity-invalidation.js';
+import {
   decodePongResponse,
   encodePingRequest,
   type PingRequest,
@@ -721,6 +726,18 @@ export class PrivchatClient {
    * from several paths at once (reconnect handler + window focus + mount);
    * one full sweep serves all concurrent callers. */
   private bootstrapChannelsInflight: Promise<ChannelRecord[]> | null = null;
+  /** Coalesced control-plane invalidations. Wire hints never reach UI or
+   * unread/message stores; only the post-sync `entity_changed` event does. */
+  private readonly pendingEntityInvalidations = new Map<string, {
+    entity_type: string;
+    scope?: string;
+    target_version: string;
+    attempts: number;
+  }>();
+  private entityInvalidationTimer: ReturnType<typeof setTimeout> | null = null;
+  private entityInvalidationFlushRunning = false;
+  private readonly seenEntityInvalidationIds = new Set<string>();
+  private readonly seenEntityInvalidationOrder: string[] = [];
   /** P1-05: room broadcast dedup by (channel_id, server_message_id). On
    *  subscribe the server replays history that overlaps the live stream, so
    *  the same frame can arrive twice. Bounded FIFO per channel (256); frames
@@ -834,6 +851,11 @@ export class PrivchatClient {
 
   async connect(): Promise<void> {
     this.cancelReconnect();
+    if (this.entityInvalidationTimer !== null) {
+      clearTimeout(this.entityInvalidationTimer);
+      this.entityInvalidationTimer = null;
+    }
+    this.pendingEntityInvalidations.clear();
     this.userInitiatedDisconnect = false;
     this.setState('connecting');
     try {
@@ -891,6 +913,11 @@ export class PrivchatClient {
     this.disposed = true;
 
     this.cancelReconnect();
+    if (this.entityInvalidationTimer !== null) {
+      clearTimeout(this.entityInvalidationTimer);
+      this.entityInvalidationTimer = null;
+    }
+    this.pendingEntityInvalidations.clear();
 
     // Close the transport if still open. Reuse `disconnect()`'s state
     // machine when the user hasn't already invoked it; otherwise the
@@ -2923,6 +2950,7 @@ export class PrivchatClient {
         // signals, not user messages, and must not surface via
         // onPushMessage / cache / unread_count.
         if (this.maybeConsumeReadCursorPush(message)) return;
+        if (this.maybeConsumeEntityInvalidationPush(message)) return;
         this.bus.emit({ type: 'message_received', message });
         this.absorbPushIntoCache(message);
         return;
@@ -2950,6 +2978,136 @@ export class PrivchatClient {
         // Unknown bizType — ignore. Application-layer logging belongs in
         // a future observability hook, not the protocol facade.
         return;
+    }
+  }
+
+  private maybeConsumeEntityInvalidationPush(message: PushMessageRequest): boolean {
+    if (message.topic !== ENTITY_INVALIDATION_PUSH_TOPIC_V1) return false;
+    try {
+      const batch = decodeEntityInvalidationBatch(message.payload);
+      if (batch.schema_version !== 1) {
+        // eslint-disable-next-line no-console
+        console.warn('[privchat:entity-sync] unsupported invalidation schema', {
+          schema_version: batch.schema_version,
+        });
+        return true;
+      }
+      if (this.seenEntityInvalidationIds.has(batch.notification_id)) return true;
+      this.seenEntityInvalidationIds.add(batch.notification_id);
+      this.seenEntityInvalidationOrder.push(batch.notification_id);
+      if (this.seenEntityInvalidationOrder.length > 256) {
+        const evicted = this.seenEntityInvalidationOrder.shift();
+        if (evicted !== undefined) this.seenEntityInvalidationIds.delete(evicted);
+      }
+      for (const item of batch.items) this.queueEntityInvalidation(item);
+    } catch (error) {
+      // eslint-disable-next-line no-console
+      console.warn('[privchat:entity-sync] invalid invalidation payload', error);
+    }
+    return true;
+  }
+
+  private queueEntityInvalidation(item: EntityInvalidation): void {
+    const key = `${item.entity_type}\u0000${item.scope ?? ''}`;
+    let pending = this.pendingEntityInvalidations.get(key);
+    if (pending === undefined) {
+      pending = {
+        entity_type: item.entity_type,
+        ...(item.scope === undefined ? {} : { scope: item.scope }),
+        target_version: item.target_version,
+        attempts: 0,
+      };
+      this.pendingEntityInvalidations.set(key, pending);
+    } else if (BigInt(item.target_version) > BigInt(pending.target_version)) {
+      pending.target_version = item.target_version;
+    }
+    this.scheduleEntityInvalidationFlush();
+  }
+
+  private scheduleEntityInvalidationFlush(delayMs = 80): void {
+    if (this.entityInvalidationTimer !== null || this.entityInvalidationFlushRunning) return;
+    this.entityInvalidationTimer = setTimeout(() => {
+      this.entityInvalidationTimer = null;
+      void this.flushEntityInvalidations();
+    }, delayMs);
+  }
+
+  private async flushEntityInvalidations(): Promise<void> {
+    if (this.entityInvalidationFlushRunning || this.disposed) return;
+    this.entityInvalidationFlushRunning = true;
+    const batch = [...this.pendingEntityInvalidations.values()];
+    this.pendingEntityInvalidations.clear();
+    let retryDelayMs = 80;
+    try {
+      await Promise.all(batch.map(async (pending) => {
+        try {
+          const localVersion = await this.syncInvalidatedEntity(pending.entity_type);
+          if (localVersion === undefined) return;
+          this.bus.emit({
+            type: 'entity_changed',
+            entity_type: pending.entity_type,
+            ...(pending.scope === undefined ? {} : { scope: pending.scope }),
+            version: localVersion,
+            mutation_hint: 'unknown',
+          });
+        } catch (error) {
+          // eslint-disable-next-line no-console
+          console.warn('[privchat:entity-sync] invalidation sync failed', {
+            entity_type: pending.entity_type,
+            scope: pending.scope,
+            error,
+          });
+          pending.attempts += 1;
+          if (pending.attempts <= 5 && !this.disposed) {
+            const key = `${pending.entity_type}\u0000${pending.scope ?? ''}`;
+            const newer = this.pendingEntityInvalidations.get(key);
+            if (newer === undefined) {
+              this.pendingEntityInvalidations.set(key, pending);
+            } else {
+              if (BigInt(pending.target_version) > BigInt(newer.target_version)) {
+                newer.target_version = pending.target_version;
+              }
+              newer.attempts = Math.max(newer.attempts, pending.attempts);
+            }
+            retryDelayMs = Math.max(retryDelayMs, 250 * (2 ** (pending.attempts - 1)));
+          }
+        }
+      }));
+    } finally {
+      this.entityInvalidationFlushRunning = false;
+      if (this.pendingEntityInvalidations.size > 0) {
+        this.scheduleEntityInvalidationFlush(Math.min(retryDelayMs, 4_000));
+      }
+    }
+  }
+
+  private async syncInvalidatedEntity(entityType: string): Promise<string | undefined> {
+    const db = this.cacheDb;
+    if (db === null) return undefined;
+    switch (entityType) {
+      case 'friend':
+        if (this.friendshipStore === null) return undefined;
+        await this.bootstrapFriendships(db, this.friendshipStore, 100);
+        return String(this.friendshipStore.maxSyncVersion());
+      case 'user':
+        if (this.userStore === null) return undefined;
+        await this.bootstrapUsers(db, this.userStore, 100);
+        return String(this.userStore.maxSyncVersion());
+      case 'group':
+        if (this.groupStore === null) return undefined;
+        await this.bootstrapGroups(db, this.groupStore, 100);
+        return String(this.groupStore.maxSyncVersion());
+      case 'channel':
+      case 'channel_read_cursor':
+        await this.bootstrapChannels();
+        return String(this.cachedChannels().reduce(
+          (max, channel) => Math.max(max, channel.sync_version),
+          0,
+        ));
+      default:
+        // eslint-disable-next-line no-console
+        console.warn('[privchat:entity-sync] unsupported entity type', entityType);
+        return undefined;
     }
   }
 
