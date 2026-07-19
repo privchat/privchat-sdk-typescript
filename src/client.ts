@@ -297,7 +297,6 @@ interface BootstrapChannelPayload {
   peer_user_id?: number;
   unread_count?: number;
   last_msg_content?: string;
-  last_msg_type?: string;
   last_msg_timestamp?: number;
 }
 
@@ -1882,13 +1881,14 @@ export class PrivchatClient {
       const bucket = cursorByChannel.get(channel_id);
       const selfPts = bucket?.self?.last_read_pts;
       const peerPts = bucket?.peer?.last_read_pts;
-      // New servers send `last_msg_type`, which is required for media with an
-      // empty caption. The content-only envelope sniff remains for rolling
-      // compatibility with older servers.
-      const preview =
-        payload.last_msg_content !== undefined
-          ? derivePreview(payload.last_msg_content, payload.last_msg_type)
-          : undefined;
+      const serverUpdatedAt = payload.last_msg_timestamp ?? 0;
+      const existing = store.getChannel(channel_id, channel_type);
+      // Preview content is derived from locally loaded messages. Preserve it
+      // only while it still describes the server's latest timestamp; a newer
+      // server timestamp invalidates stale local preview text until history is
+      // loaded for that conversation.
+      const localPreviewIsCurrent =
+        existing !== undefined && existing.updated_at >= serverUpdatedAt;
       return {
         channel_id,
         channel_type,
@@ -1902,9 +1902,13 @@ export class PrivchatClient {
         read_pts: selfPts !== undefined ? String(selfPts) : '0',
         peer_read_pts: peerPts !== undefined ? String(peerPts) : undefined,
         unread_count: payload.unread_count ?? 0,
-        last_message_preview: preview?.text,
-        last_message_type: preview?.content_type,
-        updated_at: payload.last_msg_timestamp ?? 0,
+        last_message_preview: localPreviewIsCurrent
+          ? existing.last_message_preview
+          : undefined,
+        last_message_type: localPreviewIsCurrent
+          ? existing.last_message_type
+          : undefined,
+        updated_at: serverUpdatedAt,
         sync_version: item.version,
       };
     });
@@ -2332,6 +2336,7 @@ export class PrivchatClient {
     const cached = await cacheGetMessageWindow(db, channel_id, channel_type, limit);
     if (cached.length > 0) {
       store.replaceWindow(channel_id, channel_type, cached, false);
+      this.refreshChannelPreviewFromLocalMessages(channel_id, channel_type);
     }
 
     // 2. Fetch remote latest window.
@@ -2346,6 +2351,7 @@ export class PrivchatClient {
       //    records (local echoes for messages just sent).
       await cacheUpsertMessages(db, records);
       store.replaceWindow(channel_id, channel_type, records, true);
+      this.refreshChannelPreviewFromLocalMessages(channel_id, channel_type);
 
       // 4. Update sync_state window bounds (timestamp-based).
       const timestamps = records.map((r) => r.timestamp);
@@ -2361,6 +2367,31 @@ export class PrivchatClient {
     }
 
     return store.getMessages(channel_id, channel_type);
+  }
+
+  /** Project the conversation-list preview from the newest locally loaded row. */
+  private refreshChannelPreviewFromLocalMessages(
+    channel_id: string,
+    channel_type: number,
+  ): void {
+    if (this.cacheStore === null || this.cacheDb === null) return;
+    const channel = this.cacheStore.getChannel(channel_id, channel_type);
+    const messages = this.cacheStore.getMessages(channel_id, channel_type);
+    const latest = messages[messages.length - 1];
+    if (channel === undefined || latest === undefined) return;
+    // Cached history older than the authoritative server timestamp must not
+    // replace a newer (not-yet-loaded) preview.
+    if (channel.updated_at > 0 && latest.timestamp < channel.updated_at) return;
+
+    const preview = derivePreview(latest.content, latest.message_type);
+    const next: ChannelRecord = {
+      ...channel,
+      last_message_preview: preview.text,
+      last_message_type: preview.content_type,
+      last_message_revoked: latest.revoked === true,
+    };
+    this.cacheStore.upsertChannel(next);
+    void this.cacheDb.channels.put(next).catch(() => {});
   }
 
   /**

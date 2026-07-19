@@ -210,7 +210,7 @@ describe('bootstrapChannels', () => {
     expect(direct.title).toBe('Alice');
     expect(direct.read_pts).toBe('100');
     expect(direct.unread_count).toBe(3);
-    expect(direct.last_message_preview).toBe('hi');
+    expect(direct.last_message_preview).toBeUndefined();
     expect(direct.sync_version).toBe(1);
 
     const group = channels.find((c) => c.channel_id === '67890')!;
@@ -221,7 +221,7 @@ describe('bootstrapChannels', () => {
     expect(group.unread_count).toBe(0);
   });
 
-  it('keeps the last media type when its caption is empty', async () => {
+  it('derives the preview from loaded history instead of channel sync content', async () => {
     const t = entitySyncFake({
       channelItems: [
         {
@@ -232,22 +232,47 @@ describe('bootstrapChannels', () => {
             channel_type: 1,
             channel_name: 'Alice',
             unread_count: 0,
-            last_msg_content: '',
-            last_msg_type: 'image',
+            // Legacy servers may still send this field. It is not a preview
+            // source because it has no reliable typed/localized semantics.
+            last_msg_content: 'stale server preview',
             last_msg_timestamp: 1_700,
           },
         },
       ],
       cursorItems: [],
     });
+    const entityResponder = t.responder;
+    t.responder = (packet) => {
+      const req = decodeRpcRequest(packet.payload);
+      if (req.route === 'message/history/get') {
+        return okJson({
+          messages: [
+            {
+              message_id: 99,
+              channel_id: 12345,
+              sender_id: 7,
+              content: '',
+              message_type: 'image',
+              timestamp: 1_700,
+            },
+          ],
+          total: 1,
+          has_more: false,
+        });
+      }
+      return entityResponder?.(packet);
+    };
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: uniqueDbName('media-preview') },
+      cache: { enabled: true, dbName: uniqueDbName('local-preview') },
     });
 
     const channels = await client.bootstrapChannels();
+    expect(channels[0]?.last_message_preview).toBeUndefined();
 
-    expect(channels[0]).toMatchObject({
+    await client.openConversation('12345', 1);
+
+    expect(client.cachedChannels()[0]).toMatchObject({
       last_message_preview: '',
       last_message_type: 'image',
     });
