@@ -2016,21 +2016,28 @@ export class PrivchatClient {
     db: CacheDB,
     store: UserStore,
     limit: number,
+    scope?: string,
   ): Promise<void> {
     // Start from the highest sync_version we already know locally so
     // re-bootstrap on auto-login is cheap. The server returns rows
     // strictly greater than this cursor.
-    let since = Math.max(store.maxSyncVersion(), await cacheMaxUserSyncVersion(db));
+    // A scoped invalidation is a targeted authoritative refresh, not an
+    // advancement of the collection-wide cursor. Start at zero so a newer
+    // unrelated entity cannot hide this user behind a higher global version.
+    let since = scope === undefined
+      ? Math.max(store.maxSyncVersion(), await cacheMaxUserSyncVersion(db))
+      : 0;
     const aggregated: UserRecord[] = [];
     let safety = 0;
     while (safety++ < 1000) {
       const page = await this.rpcCallTyped<
-        { entity_type: string; since_version: number; limit: number },
+        { entity_type: string; since_version: number; limit: number; scope?: string },
         BootstrapEntityResponse<BootstrapUserPayload>
       >(ENTITY_SYNC_ROUTE, {
         entity_type: 'user',
         since_version: since,
         limit,
+        ...(scope === undefined ? {} : { scope }),
       });
       for (const item of page.items) {
         if (item.deleted || !item.payload) continue;
@@ -3071,7 +3078,10 @@ export class PrivchatClient {
     try {
       await Promise.all(batch.map(async (pending) => {
         try {
-          const localVersion = await this.syncInvalidatedEntity(pending.entity_type);
+          const localVersion = await this.syncInvalidatedEntity(
+            pending.entity_type,
+            pending.scope,
+          );
           if (localVersion === undefined) return;
           this.bus.emit({
             type: 'entity_changed',
@@ -3111,7 +3121,10 @@ export class PrivchatClient {
     }
   }
 
-  private async syncInvalidatedEntity(entityType: string): Promise<string | undefined> {
+  private async syncInvalidatedEntity(
+    entityType: string,
+    scope?: string,
+  ): Promise<string | undefined> {
     const db = this.cacheDb;
     if (db === null) return undefined;
     switch (entityType) {
@@ -3121,7 +3134,7 @@ export class PrivchatClient {
         return String(this.friendshipStore.maxSyncVersion());
       case 'user':
         if (this.userStore === null) return undefined;
-        await this.bootstrapUsers(db, this.userStore, 100);
+        await this.bootstrapUsers(db, this.userStore, 100, scope);
         return String(this.userStore.maxSyncVersion());
       case 'group':
         if (this.groupStore === null) return undefined;

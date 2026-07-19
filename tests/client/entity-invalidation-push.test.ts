@@ -52,7 +52,7 @@ const fireInvalidation = (transport: FakeTransport): void => {
 
 const replaceEntitySync = (
   client: PrivchatClient,
-  sync: (entityType: string) => Promise<string | undefined>,
+  sync: (entityType: string, scope?: string) => Promise<string | undefined>,
 ): void => {
   Object.defineProperty(client, 'syncInvalidatedEntity', { value: sync });
 };
@@ -81,6 +81,35 @@ describe('entity invalidation control push', () => {
       version: '42',
       mutation_hint: 'unknown',
     });
+  });
+
+  it('preserves a user scope for targeted incremental sync', async () => {
+    const transport = new FakeTransport();
+    const client = new PrivchatClient({ transport });
+    const sync = vi.fn().mockResolvedValue('44');
+    replaceEntitySync(client, sync);
+    const push = invalidationPush();
+    push.payload = encodeEntityInvalidationBatch({
+      schema_version: 1,
+      notification_id: '9007199254740994',
+      committed_at_ms: 1_780_000_000_124,
+      items: [{
+        entity_type: 'user',
+        entity_id: '100000023',
+        scope: '100000023',
+        target_version: '0',
+        mutation_hint: 'upsert',
+      }],
+    });
+
+    transport.fireMessage(new Packet({
+      packetType: PacketType.OneWay,
+      messageId: 0,
+      bizType: MessageType.PushMessageRequest,
+      payload: encodePushMessageRequest(push),
+    }));
+
+    await vi.waitFor(() => expect(sync).toHaveBeenCalledWith('user', '100000023'));
   });
 
   it('retries a transient sync failure and emits only after success', async () => {
