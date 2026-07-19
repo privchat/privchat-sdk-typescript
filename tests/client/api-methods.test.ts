@@ -21,13 +21,15 @@ const captureRpc = () => {
   const t = new FakeTransport();
   let route = '';
   let body: unknown = null;
+  let rawBody = '';
   t.responder = (pkt) => {
     const decoded = decodeRpcRequest(pkt.payload);
     route = decoded.route;
-    body = JSON.parse(new TextDecoder().decode(decoded.body));
+    rawBody = new TextDecoder().decode(decoded.body);
+    body = JSON.parse(rawBody);
     return ok(true);
   };
-  return { t, get: () => ({ route, body }) };
+  return { t, get: () => ({ route, body, rawBody }) };
 };
 
 describe('account', () => {
@@ -132,6 +134,13 @@ describe('channel', () => {
     await fn(c);
     expect(cap.get().route).toBe(expectedRoute);
   });
+
+  it('channelPin preserves a snowflake channel id above 2^53', async () => {
+    const cap = captureRpc();
+    const c = new PrivchatClient({ transport: cap.t });
+    await c.channelPin('9007199254740993', true);
+    expect(cap.get().rawBody).toContain('"channel_id":9007199254740993');
+  });
 });
 
 describe('group', () => {
@@ -179,6 +188,16 @@ describe('message', () => {
     const c = new PrivchatClient({ transport: cap.t });
     await fn(c);
     expect(cap.get().route).toBe(expectedRoute);
+  });
+
+  it('messageHistory preserves channel and cursor snowflakes above 2^53', async () => {
+    const cap = captureRpc();
+    const c = new PrivchatClient({ transport: cap.t });
+    await c.messageHistory('9007199254740993', 50, '9007199254740995');
+    expect(cap.get().rawBody).toContain('"channel_id":9007199254740993');
+    expect(cap.get().rawBody).toContain(
+      '"before_server_message_id":9007199254740995',
+    );
   });
 });
 

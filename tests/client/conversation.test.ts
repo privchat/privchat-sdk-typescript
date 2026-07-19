@@ -147,6 +147,23 @@ describe('openConversation', () => {
 });
 
 describe('scrollHistory', () => {
+  it('preserves snowflake channel and cursor ids above 2^53', async () => {
+    const t = new FakeTransport();
+    let rawBody = '';
+    t.responder = (pkt) => {
+      const req = decodeRpcRequest(pkt.payload);
+      if (req.route !== 'message/history/get') return undefined;
+      rawBody = new TextDecoder().decode(req.body);
+      return okJson({ messages: [], total: 0, has_more: false });
+    };
+    const c = newClient(t);
+    await c.scrollHistory('9007199254740993', 1, {
+      beforeServerMessageId: '9007199254740995',
+    });
+    expect(rawBody).toContain('"channel_id":9007199254740993');
+    expect(rawBody).toContain('"before_server_message_id":9007199254740995');
+  });
+
   it('paginates older messages by before_server_message_id', async () => {
     const t = buildHistoryFake({
       pages: new Map([

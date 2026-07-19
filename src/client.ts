@@ -2334,7 +2334,7 @@ export class PrivchatClient {
     }
 
     // 2. Fetch remote latest window.
-    const remote = await this.messageHistory(Number(channel_id), limit);
+    const remote = await this.messageHistory(channel_id, limit);
     const selfUid = this.lastAuth?.user_id;
     const records = remote.messages.map((m) =>
       historicalMessageToRecord(m, channel_id, channel_type, selfUid),
@@ -2377,19 +2377,17 @@ export class PrivchatClient {
     const { db, store } = this.requireCache();
     const limit = opts.limit ?? DEFAULT_OPEN_LIMIT;
 
-    let beforeId: number | undefined = opts.beforeServerMessageId !== undefined
-      ? Number(opts.beforeServerMessageId)
-      : undefined;
+    let beforeId: string | number | undefined = opts.beforeServerMessageId;
     if (beforeId === undefined) {
       const inMem = store.getMessages(channel_id, channel_type);
       // Find the oldest record with a server_message_id (skip pending rows).
       const oldestServerSide = inMem.find((m) => m.server_message_id !== undefined);
       if (oldestServerSide?.server_message_id !== undefined) {
-        beforeId = Number(oldestServerSide.server_message_id);
+        beforeId = oldestServerSide.server_message_id;
       }
     }
 
-    const remote = await this.messageHistory(Number(channel_id), limit, beforeId);
+    const remote = await this.messageHistory(channel_id, limit, beforeId);
     if (remote.messages.length === 0) return [];
 
     const selfUid = this.lastAuth?.user_id;

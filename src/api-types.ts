@@ -624,9 +624,9 @@ export interface MessagePinListResponse {
 // ---------- message/* ----------
 
 export interface MessageHistoryGetRequest {
-  channel_id: number;
+  channel_id: number | string;
   limit?: number;
-  before_server_message_id?: number;
+  before_server_message_id?: number | string;
 }
 
 export interface HistoricalMessage {

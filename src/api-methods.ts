@@ -110,7 +110,7 @@ declare module './client.js' {
 
     // channel
     channelDirectGetOrCreate(targetUserId: number, source?: string, sourceId?: string): Promise<GetOrCreateDirectChannelResponse>;
-    channelPin(channelId: number, pinned: boolean): Promise<ChannelPinResponse>;
+    channelPin(channelId: number | string, pinned: boolean): Promise<ChannelPinResponse>;
     channelHide(channelId: number): Promise<ChannelHideResponse>;
     channelMute(channelId: number, muted: boolean): Promise<ChannelMuteResponse>;
 
@@ -190,7 +190,11 @@ declare module './client.js' {
     ): Promise<GroupApprovalHandleResponse>;
 
     // message
-    messageHistory(channelId: number, limit?: number, beforeServerMessageId?: number): Promise<MessageHistoryResponse>;
+    messageHistory(
+      channelId: number | string,
+      limit?: number,
+      beforeServerMessageId?: number | string,
+    ): Promise<MessageHistoryResponse>;
     /** Cloud history search over the caller's visible channels (spec §4).
      *  scope is derived: channelId given → CHANNEL, omitted → GLOBAL.
      *  Server rate-limits to one search per 300ms per user — callers MUST
@@ -408,7 +412,10 @@ proto.channelDirectGetOrCreate = function (targetUserId, source, sourceId) {
 };
 
 proto.channelPin = function (channelId, pinned) {
-  return this.rpcCallTyped(Routes.channel.PIN, { channel_id: channelId, pinned });
+  return this.rpcCallTyped(Routes.channel.PIN, {
+    channel_id: new RawU64(channelId),
+    pinned,
+  });
 };
 
 proto.channelHide = function (channelId) {
@@ -537,9 +544,10 @@ proto.groupApprovalHandle = function (requestId, approve, reason) {
 
 proto.messageHistory = function (channelId, limit, beforeServerMessageId) {
   return this.rpcCallTyped(Routes.message_history.GET, {
-    channel_id: channelId,
+    channel_id: new RawU64(channelId),
     limit,
-    before_server_message_id: beforeServerMessageId,
+    before_server_message_id:
+      beforeServerMessageId === undefined ? undefined : new RawU64(beforeServerMessageId),
   });
 };
 
