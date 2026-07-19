@@ -4,6 +4,8 @@ import {
   clearAll,
   deleteMessageByRecordKey,
   deleteMessageByServerId,
+  ensureCacheOwner,
+  getCacheOwner,
   getChannel,
   getMessageWindow,
   getMessagesBefore,
@@ -201,5 +203,28 @@ describe('clearAll', () => {
     expect(await listChannels(db)).toEqual([]);
     expect(await getMessageWindow(db, '12345', 1, 10)).toEqual([]);
     expect(await getSyncState(db, '12345', 1)).toBeUndefined();
+  });
+});
+
+describe('cache account ownership', () => {
+  it('clears an unowned legacy cache before binding it', async () => {
+    await upsertChannels(db, [sampleChannel({ channel_id: 'foreign-31' })]);
+
+    await expect(ensureCacheOwner(db, '100000028')).resolves.toBe(true);
+
+    expect(await getCacheOwner(db)).toBe('100000028');
+    expect(await listChannels(db)).toEqual([]);
+  });
+
+  it('preserves rows for the same owner and clears them on owner mismatch', async () => {
+    await ensureCacheOwner(db, '100000031');
+    await upsertChannels(db, [sampleChannel({ channel_id: 'owned-by-31' })]);
+
+    await expect(ensureCacheOwner(db, '100000031')).resolves.toBe(false);
+    expect(await listChannels(db)).toHaveLength(1);
+
+    await expect(ensureCacheOwner(db, '100000028')).resolves.toBe(true);
+    expect(await getCacheOwner(db)).toBe('100000028');
+    expect(await listChannels(db)).toEqual([]);
   });
 });

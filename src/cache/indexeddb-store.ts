@@ -40,6 +40,13 @@ interface StoredMessage extends MessageRecord {
   record_key: string;
 }
 
+interface CacheMetadataRecord {
+  key: string;
+  value: string;
+}
+
+const CACHE_OWNER_KEY = 'owner_user_id';
+
 export class CacheDB extends Dexie {
   channels!: Table<ChannelRecord, string>;
   messages!: Table<StoredMessage, [string, string]>;
@@ -54,6 +61,10 @@ export class CacheDB extends Dexie {
    *  filter excludes pending/blocked rows; tombstones cause local
    *  delete). Primary key is the friend's `user_id`. */
   friendships!: Table<FriendshipRecord, string>;
+  /** Account-isolation guard. Every populated cache belongs to exactly one
+   * authenticated user; hosts must never be able to hydrate another user's
+   * rows merely by reusing a database name. */
+  cache_metadata!: Table<CacheMetadataRecord, string>;
 
   constructor(dbName: string) {
     super(dbName);
@@ -148,7 +159,66 @@ export class CacheDB extends Dexie {
           if (row.hidden === undefined) row.hidden = false;
         });
       });
+
+    // v8: persist the authenticated owner of this database. Existing v7
+    // databases intentionally start unowned; the first successful
+    // authenticate performs a one-time wipe before claiming ownership.
+    // This repairs caches contaminated by the legacy shared-DB migration.
+    this.version(8).stores({
+      cache_metadata: '&key',
+    });
   }
+}
+
+/**
+ * Bind a cache database to one authenticated user.
+ *
+ * Returns true when persisted rows were reset. Missing ownership is treated
+ * as unsafe rather than implicitly trusted: old releases could copy a shared
+ * legacy database into more than one account database, so its rows cannot be
+ * attributed reliably. The reset and owner write are one IndexedDB
+ * transaction, preventing a partially-cleared database from being claimed.
+ */
+export async function ensureCacheOwner(
+  db: CacheDB,
+  userId: string,
+): Promise<boolean> {
+  if (userId.length === 0) {
+    throw new Error('cache owner user id must not be empty');
+  }
+
+  return db.transaction(
+    'rw',
+    [
+      db.channels,
+      db.messages,
+      db.sync_state,
+      db.outbox,
+      db.users,
+      db.groups,
+      db.friendships,
+      db.cache_metadata,
+    ],
+    async () => {
+      const current = await db.cache_metadata.get(CACHE_OWNER_KEY);
+      if (current?.value === userId) return false;
+
+      await db.channels.clear();
+      await db.messages.clear();
+      await db.sync_state.clear();
+      await db.outbox.clear();
+      await db.users.clear();
+      await db.groups.clear();
+      await db.friendships.clear();
+      await db.cache_metadata.clear();
+      await db.cache_metadata.put({ key: CACHE_OWNER_KEY, value: userId });
+      return true;
+    },
+  );
+}
+
+export async function getCacheOwner(db: CacheDB): Promise<string | undefined> {
+  return (await db.cache_metadata.get(CACHE_OWNER_KEY))?.value;
 }
 
 // ----- Channel ops -----
@@ -365,6 +435,7 @@ export async function clearAll(db: CacheDB): Promise<void> {
       db.users,
       db.groups,
       db.friendships,
+      db.cache_metadata,
     ],
     async () => {
       await db.channels.clear();
@@ -374,6 +445,7 @@ export async function clearAll(db: CacheDB): Promise<void> {
       await db.users.clear();
       await db.groups.clear();
       await db.friendships.clear();
+      await db.cache_metadata.clear();
     },
   );
 }

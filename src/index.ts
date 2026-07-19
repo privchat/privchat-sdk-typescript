@@ -6,8 +6,10 @@
 
 // ----- Client (Phase 2) -----
 export {
+  AuthIdentityMismatchError,
   AuthorizationError,
   CacheDisabledError,
+  CacheOwnershipError,
   MarkReadValidationError,
   PrivchatClient,
   RefreshTokenError,

@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  AuthIdentityMismatchError,
   AuthorizationError,
   MessageType,
   PrivchatClient,
@@ -18,6 +19,13 @@ import {
   encodeSubscribeResponse,
 } from '../../src/index.js';
 import { FakeTransport } from './fake-transport.js';
+import {
+  CacheDB,
+  ensureCacheOwner,
+  getCacheOwner,
+  upsertChannels,
+} from '../../src/cache/index.js';
+import { uniqueDbName } from './unique-db.js';
 
 describe('authenticate', () => {
   it('builds AuthorizationRequest with default client/device info and properties', async () => {
@@ -63,6 +71,23 @@ describe('authenticate', () => {
     });
   });
 
+  it('rejects a token authenticated as a different account', async () => {
+    const t = new FakeTransport();
+    t.responder = () =>
+      encodeAuthorizationResponse({
+        success: true,
+        user_id: '100000031',
+        session_id: 'sess-31',
+      });
+    const mismatched = new PrivchatClient({ transport: t });
+
+    await expect(
+      mismatched.authenticate('100000028', 'token-for-31', 'dev'),
+    ).rejects.toBeInstanceOf(AuthIdentityMismatchError);
+    expect(mismatched.connectionState()).toBe('connected');
+    expect(mismatched.currentUserId()).toBeUndefined();
+  });
+
   it('respects defaultClientInfo / defaultDeviceInfo overrides', async () => {
     const t = new FakeTransport();
     let observed: ReturnType<typeof decodeAuthorizationRequest> | null = null;
@@ -92,6 +117,44 @@ describe('authenticate', () => {
     expect(observed!.device_info.app_id).toBe('override-app');
     expect(observed!.device_info.device_id).toBe('d1');
     expect(observed!.device_info.device_type).toBe('linux');
+  });
+
+  it('resets a cache owned by another account before authentication completes', async () => {
+    const dbName = uniqueDbName('account-owner');
+    const seed = new CacheDB(dbName);
+    await ensureCacheOwner(seed, '100000031');
+    await upsertChannels(seed, [{
+      channel_id: '256',
+      channel_type: 1,
+      title: 'foreign conversation',
+      latest_pts: '1',
+      read_pts: '0',
+      unread_count: 1,
+      updated_at: 1,
+      sync_version: 1,
+    }]);
+    seed.close();
+
+    const t = new FakeTransport();
+    t.responder = () => encodeAuthorizationResponse({
+      success: true,
+      user_id: '100000028',
+      session_id: 'sess-28',
+    });
+    const ownedClient = new PrivchatClient({
+      transport: t,
+      cache: { enabled: true, dbName },
+    });
+
+    await ownedClient.authenticate('100000028', 'tok-28', 'dev-28');
+
+    expect(ownedClient.cachedChannels()).toEqual([]);
+    const verify = new CacheDB(dbName);
+    expect(await getCacheOwner(verify)).toBe('100000028');
+    expect(await verify.channels.count()).toBe(0);
+    verify.close();
+    await ownedClient.dispose();
+    await new CacheDB(dbName).delete();
   });
 });
 

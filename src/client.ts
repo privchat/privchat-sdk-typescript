@@ -23,6 +23,7 @@ import {
   GroupStore,
   MessageStore,
   UserStore,
+  ensureCacheOwner,
   deleteFriendships as cacheDeleteFriendships,
   deleteMessageByRecordKey as cacheDeleteMessageByRecordKey,
   deleteOutboxEntry as cacheDeleteOutboxEntry,
@@ -1246,6 +1247,36 @@ export class PrivchatClient {
         this.emitSessionExpired(err.errorCode, resp.error_message);
       }
       throw err;
+    }
+
+    // The token/session is authoritative. A host may accidentally pair a
+    // persisted account id with another account's token; accepting that
+    // response would bind user B's server data to user A's database name.
+    // Legacy servers may omit user_id, but a present value must match.
+    if (resp.user_id !== undefined && String(resp.user_id) !== user_id) {
+      this.setState('connected', 'authenticated user mismatch');
+      throw new AuthIdentityMismatchError(user_id, String(resp.user_id));
+    }
+
+    // Account isolation is a cache invariant, not a host-app convention.
+    // Validate ownership only after the server authenticates the identity,
+    // but before exposing `authenticated` or allowing any cache hydration.
+    // Old/unowned databases are reset once because their rows may have come
+    // from the pre-multi-account shared database.
+    if (this.cacheDb !== null) {
+      try {
+        const reset = await ensureCacheOwner(this.cacheDb, user_id);
+        if (reset) {
+          this.cacheStore?.clear();
+          this.userStore?.clear();
+          this.groupStore?.clear();
+          this.friendshipStore?.clear();
+          this.outboxLastNonEmpty = false;
+        }
+      } catch (error) {
+        this.setState('connected', 'cache ownership verification failed');
+        throw new CacheOwnershipError(user_id, error);
+      }
     }
     this.lastAuth = { user_id, access_token: token, device_id };
     this.setState('authenticated');
@@ -4036,6 +4067,38 @@ export class CacheDisabledError extends Error {
       'Cache is disabled. Pass `cache: { enabled: true }` to the PrivchatClient constructor to use cache APIs.',
     );
     this.name = 'CacheDisabledError';
+  }
+}
+
+/** Authentication succeeded remotely, but the local cache could not be
+ * verified/reset for that identity. Fail closed so foreign account rows are
+ * never exposed as a degraded fallback. */
+export class CacheOwnershipError extends Error {
+  readonly userId: string;
+  override readonly cause: unknown;
+
+  constructor(userId: string, cause: unknown) {
+    super(`cache ownership verification failed for user ${userId}`);
+    this.name = 'CacheOwnershipError';
+    this.userId = userId;
+    this.cause = cause;
+  }
+}
+
+/** The persisted/requested account identity does not match the identity
+ * authenticated by the server token. Continuing would cross account and
+ * cache boundaries, so authentication fails closed. */
+export class AuthIdentityMismatchError extends Error {
+  readonly requestedUserId: string;
+  readonly authenticatedUserId: string;
+
+  constructor(requestedUserId: string, authenticatedUserId: string) {
+    super(
+      `authenticated user mismatch: requested ${requestedUserId}, server returned ${authenticatedUserId}`,
+    );
+    this.name = 'AuthIdentityMismatchError';
+    this.requestedUserId = requestedUserId;
+    this.authenticatedUserId = authenticatedUserId;
   }
 }
 

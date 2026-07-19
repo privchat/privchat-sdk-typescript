@@ -216,8 +216,9 @@ describe('outbox_state_changed event', () => {
   });
 
   it('fires `sending` then `sent` on a successful flush', async () => {
-    // Step 1: enqueue offline (no connect / authenticate yet → queued).
-    // Step 2: authenticate, then flushOutbox → engine sends and ACKs.
+    // Claim the fresh DB for this account once, then go offline and enqueue.
+    // Unowned pre-auth rows are intentionally discarded by the account
+    // isolation guard because they cannot be attributed safely.
     // Sequence: pending (enqueue) → sending → sent.
     const { client } = newAuthedClient({
       build: (decoded) =>
@@ -232,6 +233,9 @@ describe('outbox_state_changed event', () => {
     client.observeEvents((env) => {
       if (env.event.type === 'outbox_state_changed') events.push(env.event);
     });
+
+    await authenticate(client);
+    await client.disconnect();
 
     const queued = await client.sendTextMessage({
       ...SAMPLE_INPUT,
@@ -274,6 +278,10 @@ describe('outbox_state_changed event', () => {
       if (env.event.type === 'outbox_state_changed') events.push(env.event);
     });
 
+    await client.connect();
+    await client.authenticate('1', 'tok', 'dev');
+    await client.disconnect();
+
     await client.sendTextMessage({
       ...SAMPLE_INPUT,
       local_message_id: '9007199254740401',
@@ -313,7 +321,10 @@ describe('outbox_drained event', () => {
     const events: SdkEvent[] = [];
     client.observeEvents((env) => events.push(env.event));
 
-    // Enqueue offline.
+    // Bind ownership, then enqueue while offline.
+    await client.connect();
+    await client.authenticate('1', 'tok', 'dev');
+    await client.disconnect();
     await client.sendTextMessage({
       ...SAMPLE_INPUT,
       local_message_id: '9007199254740501',
