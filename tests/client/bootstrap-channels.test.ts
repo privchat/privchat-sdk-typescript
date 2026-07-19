@@ -221,6 +221,38 @@ describe('bootstrapChannels', () => {
     expect(group.unread_count).toBe(0);
   });
 
+  it('keeps the last media type when its caption is empty', async () => {
+    const t = entitySyncFake({
+      channelItems: [
+        {
+          entity_id: '12345',
+          version: 1,
+          payload: {
+            channel_id: 12345,
+            channel_type: 1,
+            channel_name: 'Alice',
+            unread_count: 0,
+            last_msg_content: '',
+            last_msg_type: 'image',
+            last_msg_timestamp: 1_700,
+          },
+        },
+      ],
+      cursorItems: [],
+    });
+    client = new PrivchatClient({
+      transport: t,
+      cache: { enabled: true, dbName: uniqueDbName('media-preview') },
+    });
+
+    const channels = await client.bootstrapChannels();
+
+    expect(channels[0]).toMatchObject({
+      last_message_preview: '',
+      last_message_type: 'image',
+    });
+  });
+
   it('routes self vs peer cursor rows by reader_id and hydrates ChannelRecord.peer_read_pts (B-step)', async () => {
     // Server (post-B-step) returns BOTH self and peer cursor rows in the
     // same channel_read_cursor entity stream. Client must:

@@ -297,6 +297,7 @@ interface BootstrapChannelPayload {
   peer_user_id?: number;
   unread_count?: number;
   last_msg_content?: string;
+  last_msg_type?: string;
   last_msg_timestamp?: number;
 }
 
@@ -1881,12 +1882,12 @@ export class PrivchatClient {
       const bucket = cursorByChannel.get(channel_id);
       const selfPts = bucket?.self?.last_read_pts;
       const peerPts = bucket?.peer?.last_read_pts;
-      // Server only sends `last_msg_content` (no type); for non-text rows
-      // it is the raw message JSON envelope. `derivePreview` sniffs the
-      // type out of it so the UI can render a placeholder instead of JSON.
+      // New servers send `last_msg_type`, which is required for media with an
+      // empty caption. The content-only envelope sniff remains for rolling
+      // compatibility with older servers.
       const preview =
         payload.last_msg_content !== undefined
-          ? derivePreview(payload.last_msg_content)
+          ? derivePreview(payload.last_msg_content, payload.last_msg_type)
           : undefined;
       return {
         channel_id,
