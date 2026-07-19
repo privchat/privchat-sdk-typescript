@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { pushToMessageRecord } from '../../src/cache/types.js';
-import type { PushMessageRequest } from '../../src/index.js';
+import {
+  encodeMessagePayloadEnvelope,
+  type PushMessageRequest,
+} from '../../src/index.js';
 
 const samplePush = (overrides: Partial<PushMessageRequest> = {}): PushMessageRequest => ({
   setting: { need_receipt: false, signal: 0 },
@@ -51,5 +54,22 @@ describe('pushToMessageRecord', () => {
     const payload = new Uint8Array([1, 2, 3, 4, 5]);
     const rec = pushToMessageRecord(samplePush({ payload }));
     expect(rec.payload).toEqual(payload);
+  });
+
+  it('decodes a raw UTF-8 text push instead of misreading it as FlatBuffers', () => {
+    const rec = pushToMessageRecord(samplePush({
+      payload: new TextEncoder().encode('刚发出的消息'),
+    }));
+    expect(rec.content).toBe('刚发出的消息');
+  });
+
+  it('still decodes a typed FlatBuffers envelope', () => {
+    const payload = encodeMessagePayloadEnvelope({
+      content: '带回复的消息',
+      reply_to_message_id: '700110000',
+      mentioned_user_ids: [],
+    });
+    const rec = pushToMessageRecord(samplePush({ payload }));
+    expect(rec.content).toBe('带回复的消息');
   });
 });

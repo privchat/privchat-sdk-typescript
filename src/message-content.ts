@@ -119,7 +119,14 @@ export function normalizeMessageDisplayContent(value: unknown): string {
 export function projectMessageContent(input: ProjectMessageContentInput): MessageContent {
   const legacy = decodeLegacyMessageEnvelope(input.content);
   const raw = legacy?.raw;
-  const text = normalizeMessageDisplayContent(input.envelope?.content ?? input.content);
+  // MessageRecord.content is the SDK-normalized display body. The payload
+  // envelope enriches it with reply/mention/metadata fields, but must never
+  // overwrite it: raw UTF-8 text can be misread as a structurally plausible
+  // empty FlatBuffers table by generated readers. History has no raw payload,
+  // which is why the old bug disappeared after reopening a conversation.
+  const text = normalizeMessageDisplayContent(
+    typeof input.content === 'string' ? input.content : input.envelope?.content,
+  );
   const mentionedUserIds = uniqueStrings(
     input.envelope?.mentioned_user_ids ??
       input.mentioned_user_ids ??

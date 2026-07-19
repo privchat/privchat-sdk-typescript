@@ -11,10 +11,9 @@
 // to land — push or ACK — clobbers the first.
 //
 // The fix is local-trumps-self-push, applied at the absorption seam:
-//   - same `record_key` AND `from_uid === currentUserId` AND existing
-//     row already has `status: 'sent'` → preserve content / status /
-//     payload from existing; merge incoming `pts` / `revoked` if they
-//     enrich the row.
+//   - same logical message AND `from_uid === currentUserId` → preserve
+//     local content / payload. A self-push also promotes a pending local
+//     echo to sent because it proves that the server committed it.
 //   - All other cases — remote push, no prior row, prior row in any
 //     other status — accept the incoming record verbatim. This
 //     deliberately keeps the policy narrow; broader merge rules
@@ -35,8 +34,8 @@ export interface MergePushContext {
  * `record_key` as an existing cache row.
  *
  * - `existing === undefined`: trivially return `incoming`.
- * - own-message + existing.status === 'sent': preserve `existing`,
- *   merging only `pts` and `revoked` when the incoming carries them.
+ * - own-message + existing pending/sent: preserve local display fields,
+ *   merge server identity / pts / revoke state, and promote to `sent`.
  * - any other case: return `incoming` (current behaviour).
  */
 export function mergeOnPushAbsorb(
@@ -55,14 +54,21 @@ export function mergeOnPushAbsorb(
     return isOwnMessage ? { ...incoming, status: 'sent' } : incoming;
   }
 
-  if (isOwnMessage && existing.status === 'sent') {
-    // Own-message self-push: existing won. The push wire's empty
-    // content + 'received' status would silently regress the row, so
-    // we ONLY pull in whichever optional fields the existing row
-    // doesn't have yet.
+  if (
+    isOwnMessage &&
+    (existing.status === 'pending' || existing.status === 'sent')
+  ) {
+    // Local display data wins, while the push is authoritative proof that
+    // the server committed the message. This closes the push-before-ACK
+    // race without exposing an empty server-keyed row.
     return {
       ...existing,
-      pts: existing.pts ?? incoming.pts,
+      server_message_id:
+        existing.server_message_id ?? incoming.server_message_id,
+      local_message_id:
+        existing.local_message_id ?? incoming.local_message_id,
+      pts: incoming.pts ?? existing.pts,
+      status: 'sent',
       revoked:
         existing.revoked === true || incoming.revoked === true
           ? true

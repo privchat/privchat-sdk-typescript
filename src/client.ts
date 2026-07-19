@@ -3537,13 +3537,30 @@ export class PrivchatClient {
     const incomingKey = messageRecordKey(incoming);
     const existing = this.cacheStore
       .getMessages(incoming.channel_id, incoming.channel_type)
-      .find((m) => messageRecordKey(m) === incomingKey);
+      .find(
+        (m) =>
+          messageRecordKey(m) === incomingKey ||
+          (incoming.local_message_id !== undefined &&
+            m.local_message_id === incoming.local_message_id),
+      );
     const record = mergeOnPushAbsorb(existing, incoming, {
       currentUserId: this.lastAuth?.user_id,
     });
 
     // 1. Memory: synchronous emit to observers.
-    this.cacheStore.upsertMessage(record, true);
+    const existingKey = existing !== undefined ? messageRecordKey(existing) : undefined;
+    const recordKey = messageRecordKey(record);
+    if (existingKey !== undefined && existingKey !== recordKey) {
+      this.cacheStore.replaceMessage(
+        record.channel_id,
+        record.channel_type,
+        existingKey,
+        record,
+        true,
+      );
+    } else {
+      this.cacheStore.upsertMessage(record, true);
+    }
 
     // 2. Channel-side bookkeeping: latest_pts + last_message_preview + unread.
     const channel = this.cacheStore.getChannel(record.channel_id, record.channel_type);
@@ -3618,7 +3635,21 @@ export class PrivchatClient {
     }
 
     // 3. IndexedDB: async, fire-and-forget. UI never waits.
-    void cacheUpsertMessage(this.cacheDb, record).catch(() => {});
+    if (existingKey !== undefined && existingKey !== recordKey) {
+      void this.cacheDb
+        .transaction('rw', this.cacheDb.messages, async () => {
+          await cacheDeleteMessageByRecordKey(
+            this.cacheDb!,
+            record.channel_id,
+            record.channel_type,
+            existingKey,
+          );
+          await cacheUpsertMessage(this.cacheDb!, record);
+        })
+        .catch(() => {});
+    } else {
+      void cacheUpsertMessage(this.cacheDb, record).catch(() => {});
+    }
   }
 
   // ----- Internal: state + reconnect -----

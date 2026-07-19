@@ -427,7 +427,18 @@ function extractPushContent(push: PushMessageRequest): string {
       }
     }
   } catch {
-    // Not JSON — fall through to FlatBuffers attempt.
+    // Not a protocol JSON envelope. Plain text is allowed to begin with
+    // "{" too, so continue with the raw-text discriminator below.
+  }
+
+  // Plain text sends carry raw UTF-8 payload bytes. Do this before the
+  // FlatBuffers decoder: generated FlatBuffers readers do not validate an
+  // arbitrary byte slice and may return a plausible empty table instead of
+  // throwing. That previously turned real-time text pushes into empty
+  // bubbles until history was reloaded.
+  const rawText = decodePlainTextPayload(push.payload);
+  if (rawText !== undefined) {
+    return normalizeMessageDisplayContent(rawText);
   }
 
   try {
@@ -442,4 +453,24 @@ function extractPushContent(push: PushMessageRequest): string {
     );
     return '';
   }
+}
+
+function decodePlainTextPayload(payload: Uint8Array): string | undefined {
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(payload);
+  } catch {
+    return undefined;
+  }
+
+  // FlatBuffers headers/tables contain NUL and other C0 control bytes.
+  // Preserve the controls users can legitimately type in chat, but reject
+  // binary-looking payloads so typed envelopes continue to the FB decoder.
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    if (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) {
+      return undefined;
+    }
+  }
+  return text;
 }

@@ -108,4 +108,12 @@ describe('message content normalization', () => {
       content: '{"content":"literal user JSON"}',
     })).toMatchObject({ kind: 'text', text: '{"content":"literal user JSON"}' });
   });
+
+  it('keeps normalized record content authoritative over a malformed envelope', () => {
+    expect(projectMessageContent({
+      content_type: 'text',
+      content: '刚发送即可见',
+      envelope: { content: '', mentioned_user_ids: [] },
+    })).toMatchObject({ kind: 'text', text: '刚发送即可见' });
+  });
 });

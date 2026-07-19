@@ -64,6 +64,36 @@ describe('mergeOnPushAbsorb', () => {
     expect(result.pts).toBe('42');
   });
 
+  it('promotes a pending local echo when self-push wins the ACK race', () => {
+    const existing = rec({
+      server_message_id: undefined,
+      local_message_id: 'L-10',
+      from_uid: SELF_UID,
+      content: '不能变空',
+      payload: new TextEncoder().encode('不能变空'),
+      status: 'pending',
+      pts: undefined,
+    });
+    const incoming = rec({
+      server_message_id: 's-10',
+      local_message_id: 'L-10',
+      from_uid: SELF_UID,
+      content: '',
+      payload: new Uint8Array(),
+      status: 'received',
+      pts: '43',
+    });
+    const result = mergeOnPushAbsorb(existing, incoming, { currentUserId: SELF_UID });
+    expect(result).toMatchObject({
+      server_message_id: 's-10',
+      local_message_id: 'L-10',
+      content: '不能变空',
+      status: 'sent',
+      pts: '43',
+    });
+    expect(result.payload).toEqual(existing.payload);
+  });
+
   it('promotes revoked from incoming when existing was non-revoked', () => {
     const existing = rec({ from_uid: SELF_UID, status: 'sent', revoked: false });
     const incoming = rec({ from_uid: SELF_UID, content: '', status: 'received', revoked: true });

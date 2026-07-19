@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { Packet, PacketType } from '@msgtrans/client';
 import {
+  MessageType,
   PrivchatClient,
   decodeRpcRequest,
   decodeMessagePayloadEnvelope,
   decodeSendMessageRequest,
   encodeAuthorizationResponse,
   encodeRpcResponse,
+  encodePushMessageRequest,
   encodeSendMessageResponse,
   type ConversationPatch,
 } from '../../src/index.js';
@@ -170,6 +173,82 @@ describe('sendTextMessage — cache-enabled, online happy path', () => {
     expect(result.local_message_id).toMatch(/^\d+$/);
     expect(result.local_message_id).not.toBe('0');
     expect(patches[0]!.upserted[0]!.local_message_id).toBe(result.local_message_id);
+  });
+
+  it('keeps local text visible when self-push arrives before send ACK', async () => {
+    let sentLocalId = '';
+    const t = authPlusSendFake((decoded) => {
+      sentLocalId = decoded.local_message_id;
+      return undefined; // hold the ACK so self-push wins the race
+    });
+    client = await newAuthedClient(t, `push-before-ack-${++dbCounter}`);
+
+    const snapshots: string[][] = [];
+    client.observeConversation('12345', 1, (snapshot) => {
+      snapshots.push(snapshot.messages.map((m) => m.content));
+    });
+
+    const sendPromise = client.sendTextMessage({
+      channel_id: '12345',
+      channel_type: 1,
+      from_uid: '1',
+      content: '发送后立即可见',
+      local_message_id: '9007199254740993',
+    });
+    expect(snapshots.at(-1)).toEqual(['发送后立即可见']);
+
+    t.fireMessage(new Packet({
+      packetType: PacketType.OneWay,
+      messageId: 0,
+      bizType: MessageType.PushMessageRequest,
+      payload: encodePushMessageRequest({
+        setting: { need_receipt: false, signal: 0 },
+        msg_key: 'self-push',
+        server_message_id: '700110003',
+        message_seq: 102,
+        local_message_id: sentLocalId,
+        stream_no: '',
+        stream_seq: 0,
+        stream_flag: 0,
+        timestamp: Math.floor(Date.now() / 1000),
+        channel_id: '12345',
+        channel_type: 1,
+        message_type: 0,
+        expire: 0,
+        topic: '',
+        from_uid: '1',
+        payload: new Uint8Array(),
+        deleted: false,
+      }),
+    }));
+
+    const afterPush = client.getCachedMessages('12345', 1);
+    expect(afterPush).toHaveLength(1);
+    expect(afterPush[0]).toMatchObject({
+      server_message_id: '700110003',
+      local_message_id: '9007199254740993',
+      content: '发送后立即可见',
+      status: 'sent',
+    });
+    expect(snapshots.at(-1)).toEqual(['发送后立即可见']);
+
+    const request = [...t.sent].reverse().find((pkt) => pkt.bizType === 5)!;
+    t.fireMessage(new Packet({
+      packetType: PacketType.Response,
+      messageId: request.messageId,
+      bizType: 5,
+      payload: encodeSendMessageResponse({
+        client_seq: 0,
+        server_message_id: '700110003',
+        message_seq: 102,
+        reason_code: 0,
+      }),
+    }));
+    await sendPromise;
+
+    expect(client.getCachedMessages('12345', 1)).toHaveLength(1);
+    expect(client.getCachedMessages('12345', 1)[0]!.content).toBe('发送后立即可见');
+    expect(snapshots.every((items) => items.every((text) => text !== ''))).toBe(true);
   });
 });
 
