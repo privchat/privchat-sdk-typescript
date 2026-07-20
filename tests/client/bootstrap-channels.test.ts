@@ -334,6 +334,85 @@ describe('bootstrapChannels', () => {
     });
   });
 
+  it('consumes server top/mute flags into ChannelRecord.pinned/muted', async () => {
+    // Regression (privchat-web 置顶不好使): the server has always emitted
+    // `top`/`mute` (0|1) in the channel entity sync, but the bootstrap join
+    // dropped them, so pinning never survived a refresh.
+    const t = entitySyncFake({
+      channelItems: [
+        {
+          entity_id: '12345',
+          version: 1,
+          payload: {
+            channel_id: 12345,
+            channel_type: 1,
+            channel_name: 'Alice',
+            top: 1,
+            mute: 1,
+          },
+        },
+        {
+          entity_id: '67890',
+          version: 2,
+          payload: { channel_id: 67890, channel_type: 2, name: 'Group', top: 0, mute: 0 },
+        },
+      ],
+      cursorItems: [],
+    });
+    client = new PrivchatClient({
+      transport: t,
+      cache: { enabled: true, dbName: uniqueDbName('flags-consume') },
+    });
+    const channels = await client.bootstrapChannels();
+    expect(channels.find((c) => c.channel_id === '12345')).toMatchObject({
+      pinned: true,
+      muted: true,
+    });
+    expect(channels.find((c) => c.channel_id === '67890')).toMatchObject({
+      pinned: false,
+      muted: false,
+    });
+  });
+
+  it('keeps locally mirrored pinned/muted/hidden when the wire omits the flags', async () => {
+    // Regression: applyChannelFlags mirrors a successful channel/pin RPC into
+    // the cache, then the UI immediately calls refresh() → bootstrap. A legacy
+    // server response without top/mute must NOT clobber the local flags.
+    const dbName = uniqueDbName('flags-keep');
+    const db = new CacheDB(dbName);
+    await upsertChannels(db, [
+      {
+        channel_id: '12345',
+        channel_type: 1,
+        title: 'Alice',
+        latest_pts: '9',
+        read_pts: '4',
+        unread_count: 0,
+        pinned: true,
+        muted: true,
+        hidden: false,
+        updated_at: 1_700,
+        sync_version: 7,
+      },
+    ]);
+    db.close();
+
+    const t = entitySyncFake({
+      channelItems: [
+        {
+          entity_id: '12345',
+          version: 8,
+          // legacy payload: no top/mute fields at all
+          payload: { channel_id: 12345, channel_type: 1, channel_name: 'Alice' },
+        },
+      ],
+      cursorItems: [],
+    });
+    client = new PrivchatClient({ transport: t, cache: { enabled: true, dbName } });
+    const channels = await client.bootstrapChannels();
+    expect(channels[0]).toMatchObject({ pinned: true, muted: true, hidden: false });
+  });
+
   it('realtime replay fills an empty preview even when the timestamp does not advance', async () => {
     // Regression (privchat-web blank previews after reload): bootstrap sets
     // updated_at from the server's last_msg_timestamp, then the reconnect

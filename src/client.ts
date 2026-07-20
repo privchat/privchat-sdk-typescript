@@ -303,6 +303,11 @@ interface BootstrapChannelPayload {
   unread_count?: number;
   last_msg_content?: string;
   last_msg_timestamp?: number;
+  /** Pin flag — server emits `top: 0|1` in the channel entity sync
+   *  (`ChannelSyncPayload.top`, backed by `user_channels.is_pinned`). */
+  top?: number;
+  /** Mute flag — server emits `mute: 0|1` (`user_channels.is_muted`). */
+  mute?: number;
 }
 
 interface BootstrapCursorPayload {
@@ -1998,6 +2003,14 @@ export class PrivchatClient {
         last_message_preview: existing?.last_message_preview,
         last_message_type: existing?.last_message_type,
         last_message_revoked: existing?.last_message_revoked,
+        // pinned/muted are server-authoritative (`top`/`mute` 0|1); when the
+        // wire omits them keep the local flag instead of clobbering the
+        // `applyChannelFlags` mirror back to undefined on every bootstrap.
+        // `hidden` is local-only state (server excludes hidden rows from the
+        // sync page entirely), so it must always survive the rebuild.
+        pinned: payload.top !== undefined ? payload.top === 1 : existing?.pinned,
+        muted: payload.mute !== undefined ? payload.mute === 1 : existing?.muted,
+        hidden: existing?.hidden,
         updated_at: serverUpdatedAt,
         sync_version: item.version,
       };
