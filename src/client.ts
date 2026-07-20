@@ -1914,12 +1914,11 @@ export class PrivchatClient {
       const peerPts = bucket?.peer?.last_read_pts;
       const serverUpdatedAt = payload.last_msg_timestamp ?? 0;
       const existing = store.getChannel(channel_id, channel_type);
-      // Preview content is derived from locally loaded messages. Preserve it
-      // only while it still describes the server's latest timestamp; a newer
-      // server timestamp invalidates stale local preview text until history is
-      // loaded for that conversation.
-      const localPreviewIsCurrent =
-        existing !== undefined && existing.updated_at >= serverUpdatedAt;
+      // Preview content is derived from locally loaded messages, so channel
+      // sync must NEVER blank it: an older-but-real last-message line beats an
+      // empty row (the previous "invalidate until history loads" rule left
+      // every unopened conversation blank after each page load). Newer content
+      // overwrites it the moment it lands (realtime ingest / open / backfill).
       return {
         channel_id,
         channel_type,
@@ -1933,12 +1932,9 @@ export class PrivchatClient {
         read_pts: selfPts !== undefined ? String(selfPts) : '0',
         peer_read_pts: peerPts !== undefined ? String(peerPts) : undefined,
         unread_count: payload.unread_count ?? 0,
-        last_message_preview: localPreviewIsCurrent
-          ? existing.last_message_preview
-          : undefined,
-        last_message_type: localPreviewIsCurrent
-          ? existing.last_message_type
-          : undefined,
+        last_message_preview: existing?.last_message_preview,
+        last_message_type: existing?.last_message_type,
+        last_message_revoked: existing?.last_message_revoked,
         updated_at: serverUpdatedAt,
         sync_version: item.version,
       };
@@ -2418,8 +2414,12 @@ export class PrivchatClient {
     const latest = messages[messages.length - 1];
     if (channel === undefined || latest === undefined) return;
     // Cached history older than the authoritative server timestamp must not
-    // replace a newer (not-yet-loaded) preview.
-    if (channel.updated_at > 0 && latest.timestamp < channel.updated_at) return;
+    // replace a newer (already-set) preview — but when the preview is EMPTY,
+    // an older-but-real last-message line beats a blank row: set it anyway and
+    // let newer content overwrite once it loads.
+    const hasPreview =
+      channel.last_message_preview !== undefined && channel.last_message_preview !== '';
+    if (hasPreview && channel.updated_at > 0 && latest.timestamp < channel.updated_at) return;
 
     const preview = derivePreview(latest.content, latest.message_type);
     const next: ChannelRecord = {
@@ -3621,23 +3621,39 @@ export class PrivchatClient {
         next = { ...next, latest_pts: record.pts };
         mutated = true;
       }
-      if (record.timestamp > channel.updated_at) {
+      const timestampAdvanced = record.timestamp > channel.updated_at;
+      if (timestampAdvanced) {
         next = { ...next, updated_at: record.timestamp };
         mutated = true;
-        // Refresh the channel-list preview to the most recent message.
-        // Only when timestamp is actually advancing (so an out-of-order
-        // push doesn't replace a newer preview with an older one) and only
-        // for non-revoked rows. `derivePreview` resolves the content type
-        // (the UI renders a localized placeholder for non-text); an empty
-        // *text* preview is dropped — keep the prior line.
-        if (!record.revoked) {
-          const preview = derivePreview(record.content, record.message_type);
-          if (preview.content_type !== 'text' || preview.text !== '') {
+      }
+      // Refresh the channel-list preview to the most recent message. pts is
+      // the authoritative per-channel order, so any new-latest row owns the
+      // preview (out-of-order pushes can't downgrade it: they don't advance
+      // pts). Also backfill an EMPTY preview from an equal-latest replay —
+      // after a reload the offline-replayed latest push carries
+      // timestamp == updated_at, and the old timestamp-only condition left
+      // the row blank forever. Non-revoked rows only; an empty *text*
+      // preview is dropped — keep the prior line.
+      const previewMissing =
+        next.last_message_preview === undefined || next.last_message_preview === '';
+      if (
+        !record.revoked &&
+        (becomesLatest ||
+          timestampAdvanced ||
+          (previewMissing && (wasLatest || record.timestamp >= channel.updated_at)))
+      ) {
+        const preview = derivePreview(record.content, record.message_type);
+        if (preview.content_type !== 'text' || preview.text !== '') {
+          if (
+            next.last_message_preview !== preview.text ||
+            next.last_message_type !== preview.content_type
+          ) {
             next = {
               ...next,
               last_message_preview: preview.text,
               last_message_type: preview.content_type,
             };
+            mutated = true;
           }
         }
       }

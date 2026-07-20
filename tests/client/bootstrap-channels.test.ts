@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Packet, PacketType } from '@msgtrans/client';
 import {
   CacheDisabledError,
+  MessageType,
   PrivchatClient,
   decodeRpcRequest,
+  encodePushMessageRequest,
   encodeRpcResponse,
 } from '../../src/index.js';
 import { FakeTransport } from './fake-transport.js';
@@ -275,6 +278,121 @@ describe('bootstrapChannels', () => {
     expect(client.cachedChannels()[0]).toMatchObject({
       last_message_preview: '',
       last_message_type: 'image',
+    });
+  });
+
+  it('keeps the cached preview across bootstrap even when the server reports newer activity', async () => {
+    // Regression (privchat-web blank previews): channel sync no longer carries
+    // preview content, so blanking the locally derived line whenever the
+    // server timestamp advanced left every unopened conversation empty after
+    // each page load. Stale-but-real must win over blank; newer content
+    // overwrites once it lands via ingest/open/backfill.
+    const dbName = uniqueDbName('preview-keep');
+    const db = new CacheDB(dbName);
+    await upsertChannels(db, [
+      {
+        channel_id: '12345',
+        channel_type: 1,
+        title: 'Alice',
+        latest_pts: '9',
+        read_pts: '4',
+        unread_count: 5,
+        last_message_preview: '昨晚的最后一条',
+        last_message_type: 'text',
+        updated_at: 1_700,
+        sync_version: 7,
+      },
+    ]);
+    db.close();
+
+    const t = entitySyncFake({
+      channelItems: [
+        {
+          entity_id: '12345',
+          version: 8,
+          payload: {
+            channel_id: 12345,
+            channel_type: 1,
+            channel_name: 'Alice',
+            // Newer than the cached updated_at=1_700 — previously blanked the preview.
+            last_msg_timestamp: 9_999,
+          },
+        },
+      ],
+      cursorItems: [],
+    });
+    client = new PrivchatClient({
+      transport: t,
+      cache: { enabled: true, dbName },
+    });
+
+    const channels = await client.bootstrapChannels();
+    expect(channels[0]).toMatchObject({
+      last_message_preview: '昨晚的最后一条',
+      last_message_type: 'text',
+      updated_at: 9_999,
+    });
+  });
+
+  it('realtime replay fills an empty preview even when the timestamp does not advance', async () => {
+    // Regression (privchat-web blank previews after reload): bootstrap sets
+    // updated_at from the server's last_msg_timestamp, then the reconnect
+    // replay delivers that same latest message with timestamp == updated_at.
+    // The old timestamp-only refresh condition skipped it, leaving the row
+    // blank even though the message just arrived. pts is the authoritative
+    // order — a new-latest pts must own the preview.
+    const t = entitySyncFake({
+      channelItems: [
+        {
+          entity_id: '12345',
+          version: 1,
+          payload: {
+            channel_id: 12345,
+            channel_type: 1,
+            channel_name: 'Alice',
+            last_msg_timestamp: 1_700_000_000, // ms; == replayed push timestamp below
+          },
+        },
+      ],
+      cursorItems: [],
+    });
+    client = new PrivchatClient({
+      transport: t,
+      cache: { enabled: true, dbName: uniqueDbName('replay-preview') },
+    });
+    const channels = await client.bootstrapChannels();
+    expect(channels[0]?.last_message_preview).toBeUndefined();
+
+    t.fireMessage(
+      new Packet({
+        packetType: PacketType.OneWay,
+        messageId: 0,
+        bizType: MessageType.PushMessageRequest,
+        payload: encodePushMessageRequest({
+          setting: { need_receipt: false, signal: 0 },
+          msg_key: 'k',
+          server_message_id: '700110001',
+          message_seq: 100,
+          local_message_id: '0',
+          stream_no: '',
+          stream_seq: 0,
+          stream_flag: 0,
+          timestamp: 1_700_000, // seconds → *1000 == channel.updated_at (no advance)
+          channel_id: '12345',
+          channel_type: 1,
+          message_type: 0,
+          expire: 0,
+          topic: '',
+          from_uid: '999',
+          payload: new TextEncoder().encode('重连补推的最后一条'),
+          deleted: false,
+        }),
+      }),
+    );
+
+    expect(client.cachedChannels()[0]).toMatchObject({
+      last_message_preview: '重连补推的最后一条',
+      last_message_type: 'text',
     });
   });
 
