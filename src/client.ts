@@ -115,7 +115,11 @@ import {
 import { parseRpcJson, stringifyWithRawIds } from './codec/safe-json.js';
 import { decodeLegacyMessageEnvelope, normalizeMessageDisplayContent } from './message-content.js';
 import { derivePreview } from './preview.js';
-import { contentTypeFromWireTag } from './content-type.js';
+import {
+  contentTypeFromWireTag,
+  contentTypeToWireTag,
+  decodeContentTypeName,
+} from './content-type.js';
 import {
   AuthRefreshCoordinator,
   SessionExpiredError,
@@ -1667,6 +1671,65 @@ export class PrivchatClient {
       local_message_id: localMsgId,
       response: resp,
     };
+  }
+
+  /**
+   * Forward a cached message into another conversation (Rust-SDK
+   * `forward_message` parity): the source message's content / content-type
+   * are re-sent as a NEW message to the target — a copy, not a reference.
+   * Reply/mention references are deliberately dropped (they point into the
+   * source conversation), matching the Rust behaviour.
+   *
+   * - Text-family rows are re-sent from `content` (fresh raw-UTF-8 payload).
+   * - Media rows reuse the source's raw FlatBuffers envelope payload
+   *   verbatim (metadata / file_id fidelity). Rows reconstructed from
+   *   history carry no raw payload — forwarding such a media row throws
+   *   rather than emitting a broken bubble.
+   * - Revoked sources are rejected, matching Rust.
+   */
+  async forwardMessage(input: {
+    source_channel_id: string;
+    source_channel_type: number;
+    source_server_message_id: string;
+    target_channel_id: string;
+    target_channel_type: number;
+    from_uid: string;
+  }): Promise<SendTextOperationResult> {
+    const rows = this.getCachedMessages(
+      input.source_channel_id,
+      input.source_channel_type,
+    );
+    const src = rows.find(
+      (m) => String(m.server_message_id ?? '') === String(input.source_server_message_id),
+    );
+    if (src === undefined) {
+      throw new Error('forward source message is not cached');
+    }
+    if (src.revoked === true) {
+      throw new Error('cannot forward a revoked message');
+    }
+    const typeName = decodeContentTypeName(src.message_type);
+    const tag = contentTypeToWireTag(typeName);
+    // Money cards are server-injected artifacts — a client-side copy would
+    // render a card with no backing payment record. Refuse, like the UI does.
+    if (typeName === 'red_packet' || typeName === 'money_transfer') {
+      throw new Error('money messages cannot be forwarded');
+    }
+    let payload: Uint8Array | undefined;
+    if (tag !== 0 && typeName !== 'system') {
+      if (src.payload.length === 0) {
+        throw new Error('source media payload is not cached; cannot forward');
+      }
+      payload = src.payload;
+    }
+    return this.sendTextMessage({
+      channel_id: input.target_channel_id,
+      channel_type: input.target_channel_type,
+      from_uid: input.from_uid,
+      content: src.content,
+      message_type: tag,
+      payload,
+    });
   }
 
   /**
