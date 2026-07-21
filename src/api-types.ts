@@ -965,3 +965,54 @@ export interface GroupQrCodeJoinResponse {
   /** status='joined' 时返回加群时间 Unix 毫秒。 */
   joined_at?: number;
 }
+
+// ---------- account/privacy (PROFILE_VISIBILITY P2) ----------
+
+/** 「添加我的方式」+ 可搜索性个人隐私开关(server UserPrivacySettings)。 */
+export interface UserPrivacySettings {
+  user_id: number;
+  allow_add_by_group: boolean;
+  /** 名片分享添加(老 server 不下发时按 true 处理)。 */
+  allow_add_by_card?: boolean;
+  allow_search_by_phone: boolean;
+  allow_search_by_username: boolean;
+  allow_search_by_email: boolean;
+  allow_search_by_qrcode: boolean;
+  allow_view_by_non_friend: boolean;
+  allow_receive_message_from_non_friend: boolean;
+}
+
+export type PrivacyUpdateRequest = Partial<
+  Omit<UserPrivacySettings, 'user_id'>
+>;
+
+// ---------- account/user/detail (typed;PROFILE_VISIBILITY) ----------
+
+export interface UserDetailRequest {
+  target_user_id: number;
+  /** search / group / friend / card_share / friend_pending / conversation */
+  source: string;
+  source_id: string;
+}
+
+export interface UserDetailResponse {
+  user_id: number;
+  /** 投影后的账号:非好友且非 by_username 搜索来源时为空串。 */
+  username: string;
+  nickname?: string;
+  avatar_url?: string;
+  phone?: string | null;
+  email?: string | null;
+  user_type: number;
+  is_friend: boolean;
+  can_send_message: boolean;
+  /** 服务端算好的能力位——UI 只据此显示「添加到通讯录」,不得自行推断。 */
+  can_add_friend: boolean;
+  /** group_policy / personal_privacy / blacklist / already_friend */
+  deny_reason?: string | null;
+  /** 查看凭证(§2.5.1):10 分钟内可直接作为 friendApply 的 grantId。 */
+  grant_id?: string;
+  is_follow: boolean;
+  source_type: string;
+  source_id: string;
+}

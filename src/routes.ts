@@ -12,6 +12,10 @@ export const Routes = {
   account_search: {
     QUERY: 'account/search/query',
   },
+  account_privacy: {
+    GET: 'account/privacy/get',
+    UPDATE: 'account/privacy/update',
+  },
   account_bot: {
     FOLLOW: 'account/bot/follow',
     UNFOLLOW: 'account/bot/unfollow',

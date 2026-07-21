@@ -77,6 +77,10 @@ import type {
   UserQrCodeResolveResponse,
   MessageHistorySearchResponse,
   MessageHistoryAroundResponse,
+  PrivacyUpdateRequest,
+  UserDetailRequest,
+  UserDetailResponse,
+  UserPrivacySettings,
 } from './api-types.js';
 
 // ----- Public method declarations (declaration merge into PrivchatClient) -----
@@ -95,6 +99,12 @@ declare module './client.js' {
 
     // contact/friend
     friendApply(targetUserId: number, message?: string, source?: string, sourceId?: string, grantId?: string): Promise<FriendApplyResponse>;
+    /** 查看用户详情(必须带可靠来源;响应含 can_add_friend/grant_id 投影)。 */
+    userDetail(req: UserDetailRequest): Promise<UserDetailResponse>;
+    /** 读取自己的隐私设置(「添加我的方式」等)。 */
+    privacyGet(): Promise<UserPrivacySettings>;
+    /** 更新自己的隐私设置(部分字段)。 */
+    privacyUpdate(patch: PrivacyUpdateRequest): Promise<unknown>;
     friendAccept(fromUserId: number, message?: string): Promise<FriendAcceptResponse>;
     friendPending(): Promise<FriendPendingResponse>;
     friendCheck(friendId: number): Promise<FriendCheckResponse>;
@@ -344,6 +354,22 @@ proto.friendApply = function (targetUserId, message, source, sourceId, grantId) 
     ...(grantId !== undefined ? { grant_id: grantId } : {}),
     from_user_id: 0,
   });
+};
+
+proto.userDetail = function (req) {
+  return this.rpcCallTyped(Routes.account_user.DETAIL, {
+    target_user_id: req.target_user_id,
+    source: req.source,
+    source_id: req.source_id,
+  });
+};
+
+proto.privacyGet = function () {
+  return this.rpcCallTyped(Routes.account_privacy.GET, {});
+};
+
+proto.privacyUpdate = function (patch) {
+  return this.rpcCallTyped(Routes.account_privacy.UPDATE, patch);
 };
 
 proto.friendAccept = function (fromUserId, message) {
