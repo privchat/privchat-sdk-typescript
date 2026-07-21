@@ -790,9 +790,12 @@ describe('bootstrapChannels', () => {
     await client.bootstrapChannels();
     await new Promise((r) => setTimeout(r, 30));
 
-    // Friendship dropped — UserRecord stays.
+    // Friendship dropped — UserRecord stays, but the username is cleared:
+    // PROFILE_VISIBILITY P1 makes username friend-channel-owned; after an
+    // unfriend tombstone the local copy must not keep leaking the account.
     expect(client.cachedFriendship('500')).toBeUndefined();
-    expect(client.cachedUser('500')?.username).toBe('wangwu');
+    expect(client.cachedUser('500')).toBeDefined();
+    expect(client.cachedUser('500')?.username).toBe('');
   });
 
   it('R2.1: friend sync failure does NOT block bootstrap', async () => {

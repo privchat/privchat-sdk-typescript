@@ -94,7 +94,7 @@ declare module './client.js' {
     botUnfollow(botUserId: number): Promise<BotUnfollowResponse>;
 
     // contact/friend
-    friendApply(targetUserId: number, message?: string, source?: string, sourceId?: string): Promise<FriendApplyResponse>;
+    friendApply(targetUserId: number, message?: string, source?: string, sourceId?: string, grantId?: string): Promise<FriendApplyResponse>;
     friendAccept(fromUserId: number, message?: string): Promise<FriendAcceptResponse>;
     friendPending(): Promise<FriendPendingResponse>;
     friendCheck(friendId: number): Promise<FriendCheckResponse>;
@@ -333,12 +333,15 @@ proto.botUnfollow = function (botUserId) {
 
 // Friend ----------
 
-proto.friendApply = function (targetUserId, message, source, sourceId) {
+proto.friendApply = function (targetUserId, message, source, sourceId, grantId) {
   return this.rpcCallTyped(Routes.friend.APPLY, {
     target_user_id: targetUserId,
     message,
     source,
     source_id: sourceId,
+    // PROFILE_VISIBILITY §2.5.1:携带 user/detail 下发的查看凭证时,
+    // 服务端按凭证放行(字符串防 u64 精度)。
+    ...(grantId !== undefined ? { grant_id: grantId } : {}),
     from_user_id: 0,
   });
 };

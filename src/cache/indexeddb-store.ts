@@ -167,6 +167,25 @@ export class CacheDB extends Dexie {
     this.version(8).stores({
       cache_metadata: '&key',
     });
+
+    // v9 (PROFILE_VISIBILITY P1): one-time cleanse of stale usernames.
+    // The server no longer emits non-friend usernames, but rows cached by
+    // older builds still hold them — an eternal leak unless wiped. Clear
+    // username for every user row without a local friendship; friends keep
+    // theirs (and the friend entity sync re-hydrates going forward).
+    this.version(9)
+      .stores({})
+      .upgrade(async (tx) => {
+        const friendIds = new Set(
+          (await tx.table('friendships').toCollection().primaryKeys()).map(String),
+        );
+        await tx
+          .table('users')
+          .toCollection()
+          .modify((u: { user_id: string; username?: string }) => {
+            if (!friendIds.has(String(u.user_id))) u.username = '';
+          });
+      });
   }
 }
 

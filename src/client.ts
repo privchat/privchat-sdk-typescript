@@ -2145,7 +2145,17 @@ export class PrivchatClient {
       for (const item of page.items) {
         if (item.deleted || !item.payload) continue;
         const record = userPayloadToRecord(item.payload, item.version);
-        if (record !== null) aggregated.push(record);
+        if (record !== null) {
+          // PROFILE_VISIBILITY:公开投影不携带他人 username(空/null)。
+          // username 归 friend 通道所有 —— user 通道的空值不得冲掉它。
+          if (record.username === '') {
+            const existing = store.get(record.user_id);
+            if (existing !== undefined && existing.username !== '') {
+              record.username = existing.username;
+            }
+          }
+          aggregated.push(record);
+        }
       }
       since = page.next_version;
       if (!page.has_more) break;
@@ -2210,6 +2220,7 @@ export class PrivchatClient {
     );
     const upserted: FriendshipRecord[] = [];
     const tombstoneIds: string[] = [];
+    const friendProfiles: IngestableUserProfile[] = [];
     let safety = 0;
     while (safety++ < 1000) {
       const page = await this.rpcCallTyped<
@@ -2230,6 +2241,15 @@ export class PrivchatClient {
         const record = friendPayloadToRecord(item.payload, item.version);
         if (record !== null) {
           upserted.push(record);
+          const uid = item.payload.user_id ?? item.payload.uid;
+          if (uid !== undefined && item.payload.user !== undefined) {
+            friendProfiles.push({
+              user_id: uid,
+              username: item.payload.user.username,
+              nickname: item.payload.user.nickname,
+              avatar: item.payload.user.avatar,
+            });
+          }
         } else {
           // 请求态(status != 1)—— 不是好友:按 tombstone 清理本地可能存在的
           // 同 uid 好友行(修复旧版本把 pending 当好友入库的脏数据;拒绝/撤回同理)。
@@ -2244,6 +2264,23 @@ export class PrivchatClient {
     if (upserted.length > 0) await cacheUpsertFriendships(db, upserted);
     if (tombstoneIds.length > 0) await cacheDeleteFriendships(db, tombstoneIds);
     store.applyDelta(upserted, tombstoneIds);
+
+    // PROFILE_VISIBILITY D5:好友级字段搭 friend 实体分发。accepted 行的
+    // user 快照(含 username)合入 UserRecord;解除好友后清除 username
+    // (公开投影不含它,本地不得残留)。
+    if (friendProfiles.length > 0) this.ingestUserProfiles(friendProfiles);
+    const userStore = this.userStore;
+    if (userStore !== null && tombstoneIds.length > 0) {
+      const cleared: UserRecord[] = [];
+      for (const id of tombstoneIds) {
+        const u = userStore.get(id);
+        if (u !== undefined && u.username !== '') cleared.push({ ...u, username: '' });
+      }
+      if (cleared.length > 0) {
+        userStore.upsertMany(cleared);
+        void cacheUpsertUsers(db, cleared).catch(() => {});
+      }
+    }
   }
 
   /** Returns the cached channel list (in-memory). Empty when bootstrap not yet run. */
