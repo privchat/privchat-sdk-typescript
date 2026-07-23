@@ -868,6 +868,17 @@ export function buildSendImageInput(args: {
   caption?: string;
   local_message_id?: string;
 }): import('./client.js').SendTextInput {
+  // 图片消息协议要求必须带缩略图引用(server 同样校验);生成失败时调用方
+  // 应把原图 file 引用为缩略图,而不是发无缩略图消息(接收端气泡靠它渲染)。
+  const m = args.metadata;
+  const hasThumb =
+    (m.thumbnail_file_id !== undefined && m.thumbnail_file_id !== '') ||
+    (m.thumbnail_url !== undefined && m.thumbnail_url !== '');
+  if (!hasThumb) {
+    throw new Error(
+      'image message requires thumbnail metadata (thumbnail_file_id or thumbnail_url); reuse the original file reference when no downscaled thumbnail is available',
+    );
+  }
   const caption = args.caption ?? '';
   return {
     channel_id: args.channel_id,
