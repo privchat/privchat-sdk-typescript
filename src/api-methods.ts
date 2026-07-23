@@ -765,6 +765,10 @@ export interface SendImageMetadata {
   url?: string;
   width: number;
   height: number;
+  /** 缩略图独立 file_id（Scheme B：接收端 thumbnail_file_id -> file/get_url）。 */
+  thumbnail_file_id?: string;
+  /** 明文缩略图 url（v0/未加密上传）；接收端 Rust SDK 缺 file_id 时退回此字段。 */
+  thumbnail_url?: string;
 }
 
 export interface SendFileMetadata {
@@ -787,6 +791,7 @@ export interface SendVideoMetadata {
   width: number;
   height: number;
   duration: number;
+  thumbnail_file_id?: string;
   thumbnail_url?: string;
 }
 
@@ -813,6 +818,8 @@ function encodeMediaPayload(
           url: m.url,
           width: m.width,
           height: m.height,
+          thumbnail_file_id: m.thumbnail_file_id,
+          thumbnail_url: m.thumbnail_url,
         };
       }
       case 'file': {
@@ -837,6 +844,7 @@ function encodeMediaPayload(
           duration: m.duration,
           width: m.width,
           height: m.height,
+          thumbnail_file_id: m.thumbnail_file_id,
           thumbnail_url: m.thumbnail_url,
         };
       }
