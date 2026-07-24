@@ -478,10 +478,16 @@ proto.groupMemberList = function (groupId) {
     Routes.group_member.LIST,
     { group_id: groupId },
   ).then((resp) => {
+    // Role strings are a lowercase contract ('owner'/'admin'/'member');
+    // older servers emitted Debug-capitalized variants ('Owner') which
+    // silently disabled every permission gate downstream. Normalize here.
+    const members = (resp.members ?? []).map((m) =>
+      typeof m.role === 'string' ? { ...m, role: m.role.toLowerCase() } : m,
+    );
     // Single write-path: hydrate the user cache from member profiles so
     // clicking a (non-friend, un-synced) member's avatar resolves.
-    this.ingestUserProfiles(resp.members ?? []);
-    return resp;
+    this.ingestUserProfiles(members);
+    return { ...resp, members };
   });
 };
 

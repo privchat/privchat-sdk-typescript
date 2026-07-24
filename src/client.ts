@@ -137,7 +137,7 @@ import {
   type SendMessageRequest,
   type SendMessageResponse,
 } from './codec/send.js';
-import { encodeMessagePayloadEnvelope } from './codec/payload.js';
+import { encodeMessagePayloadEnvelope, decodeMessagePayloadEnvelope } from './codec/payload.js';
 import {
   decodeSubscribeResponse,
   encodeSubscribeRequest,
@@ -1726,6 +1726,28 @@ export class PrivchatClient {
         throw new Error('source media payload is not cached; cannot forward');
       }
       payload = src.payload;
+      // Legacy image envelopes may predate the thumbnail-required rule; the
+      // server now rejects thumbless images. Re-encode with the original file
+      // reference as the thumbnail (same fallback the Rust send path uses).
+      if (typeName === 'image') {
+        try {
+          const env = decodeMessagePayloadEnvelope(src.payload);
+          const m = env.metadata;
+          if (
+            m !== undefined &&
+            m.type === 'image' &&
+            (m.thumbnail_file_id === undefined || m.thumbnail_file_id === '' || m.thumbnail_file_id === '0') &&
+            (m.thumbnail_url === undefined || m.thumbnail_url === '')
+          ) {
+            payload = encodeMessagePayloadEnvelope({
+              ...env,
+              metadata: { ...m, thumbnail_file_id: m.file_id, thumbnail_url: m.url },
+            });
+          }
+        } catch {
+          // Undecodable envelope: forward the raw bytes unchanged.
+        }
+      }
     }
     return this.sendTextMessage({
       channel_id: input.target_channel_id,
