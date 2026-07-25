@@ -178,13 +178,10 @@ declare module './client.js' {
     ): Promise<GroupSettingsUpdateResponse>;
 
     /** Toggle whole-group mute. Convenience wrapper around the
-     *  `group/settings/mute_all` route; semantically equivalent to
-     *  `groupSettingsUpdate(groupId, op, { all_muted: muted })` but
-     *  goes through the dedicated route (server emits a distinct
-     *  notification) — match spec. */
+     *  `group/settings/mute_all` route (server emits a distinct
+     *  notification). operator 由 server 从鉴权会话取，不传 operator_id。 */
     groupMuteAll(
       groupId: number,
-      operatorId: number,
       muted: boolean,
     ): Promise<GroupMuteAllResponse>;
 
@@ -546,10 +543,10 @@ proto.groupSettingsUpdate = function (groupId, operatorId, settings) {
   });
 };
 
-proto.groupMuteAll = function (groupId, operatorId, muted) {
+proto.groupMuteAll = function (groupId, muted) {
+  // operator 由 server 从鉴权会话取（group/settings/mute_all），客户端不传 operator_id。
   return this.rpcCallTyped(Routes.group_settings.MUTE_ALL, {
     group_id: groupId,
-    operator_id: operatorId,
     muted,
   });
 };

@@ -165,7 +165,7 @@ describe('group', () => {
       'group/settings/update',
     ],
     [
-      (c: PrivchatClient) => c.groupMuteAll(1, 100, true),
+      (c: PrivchatClient) => c.groupMuteAll(1, true),
       'group/settings/mute_all',
     ],
   ] as const)('hits %#', async (fn, expectedRoute) => {
