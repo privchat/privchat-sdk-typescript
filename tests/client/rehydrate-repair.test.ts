@@ -1,11 +1,16 @@
 // The `message_rehydrate` repair, end to end.
 //
 // The situation it exists for: the server accepted a media message, the local
-// ACK commit did not land, the cache row is gone, and the sync cursor has
-// already moved past the message. That last part is what makes it hard —
-// `sync/get_difference` only returns commits after the cursor, so a channel
-// resync will never return this message again. Recovery has to fetch it by
-// its server id, which is anchored rather than cursor-relative.
+// ACK commit did not land, and the cache row is gone.
+//
+// The design premise — NOT something this test seeds — is that the sync cursor
+// has already moved past the message, so `sync/get_difference` would never
+// return it again and recovery has to fetch it by its server id instead. That
+// premise is why the fix is anchored rather than cursor-relative, and the
+// assertions below pin the anchoring itself: recovery must go to
+// `message/history/around`, and the row must come back. Falling back to
+// `syncChannel` fails both, so a fake cursor-filtering sync would add setup
+// without adding a single thing the test can catch.
 //
 // Every id here is above 2^53 on purpose. `Number()` silently changes those,
 // and a test using small ids cannot see it.
@@ -126,7 +131,8 @@ describe('message_rehydrate repair', () => {
     await client.flushOutbox();
     await client.flushOutbox();
 
-    // 1. Recovery went to the anchored route, not a channel resync.
+    // 1. Recovery went to the anchored route, not a channel resync — this is
+    //    what stands in for the cursor premise above.
     expect(rpcRoutes).toContain('message/history/around');
     // 2. …and carried the channel id intact. `Number()` would have made this
     //    9007199254740992.

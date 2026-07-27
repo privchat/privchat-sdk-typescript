@@ -1,4 +1,8 @@
-// The four official media builders, driven through the real send.
+// The four official media builders, driven into the durable outbox.
+//
+// Scope, stated exactly: builder → sendTextMessage → validation → outbox
+// persistence. These deliberately stay unauthenticated, so nothing reaches
+// the wire; what is under test is that a builder's output is accepted at all.
 //
 // Asserting on what a builder returns cannot catch a builder that produces an
 // input `sendTextMessage` refuses. That is exactly what happened: making
@@ -6,8 +10,6 @@
 // every image, file, voice and video send threw at runtime while the returned
 // objects still looked correct — and `tsc` said nothing, because an optional
 // field is satisfied by omitting it.
-//
-// So these go through the client, not past it.
 
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -89,8 +91,8 @@ const builders: Array<[string, (lid: string) => SendTextInput]> = [
   ],
 ];
 
-describe.each(builders)('buildSend%sInput reaches the wire', (kind, build) => {
-  it(`sends a ${kind} message without throwing`, async () => {
+describe.each(builders)('buildSend%sInput reaches the durable outbox', (kind, build) => {
+  it(`enqueues a ${kind} message without throwing`, async () => {
     const t = new FakeTransport();
     t.responder = (pkt) => {
       if (pkt.bizType === 1) return encodeAuthorizationResponse({ success: true });
@@ -109,9 +111,6 @@ describe.each(builders)('buildSend%sInput reaches the wire', (kind, build) => {
       transport: t,
       cache: { enabled: true, dbName: `media-builder-${kind}-${++dbCounter}` },
     });
-    // Deliberately not authenticated: the send takes the queued path, which
-    // still runs the whole input-validation and enqueue chain. What is under
-    // test is that a builder's output is accepted at all.
     const input = build(`lid-${kind}`);
     const result = await client.sendTextMessage(input);
 
