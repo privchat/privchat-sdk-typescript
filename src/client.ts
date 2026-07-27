@@ -2569,9 +2569,14 @@ export class PrivchatClient {
    * latest server window, merge, persist, emit again. Returns the merged
    * remote window. Canonical flow per SDK_EVENT_SURFACE_AND_API_SHAPE_SPEC §8.
    *
-   * `channel.latest_pts` is NOT lifted here — `message/history/get` doesn't
-   * carry per-channel pts. latest_pts gets populated by inbound push
-   * (push.message_seq) and by Phase 5+ sync engine.
+   * `channel.latest_pts` is NOT lifted here. Note the reason, because the
+   * one this comment used to give was false: history *does* carry
+   * per-channel pts (`message_seq`), and `historicalMessageToRecord` writes
+   * it into `MessageRecord.pts`. The reason to keep the guard is that
+   * history carries only messages — no reaction, edit or revoke commits — so
+   * advancing the sync cursor from it would skip those permanently.
+   * `latest_pts` may only move from inbound push (`push.message_seq`) and
+   * from applying `sync/get_difference` (SDK_ENTITY_MODEL_SPEC §2.6.3).
    */
   async openConversation(
     channel_id: string,

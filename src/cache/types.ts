@@ -203,9 +203,18 @@ export interface ChannelRecord {
  *   - `local_message_id`: client-side snowflake from sendTextMessage.
  *     Present for pending and sent rows whose origin was a local send.
  *
- * Sort key: `timestamp` (server ms wall-clock for received rows;
- * `Date.now()` for pending rows). Snowflakes are roughly time-ordered
- * but timestamp is the authoritative sort key for UI display.
+ * Display order (SDK_ENTITY_MODEL_SPEC §2.6.2) is the tuple
+ *   (pending_group, pts, server_message_id, id)
+ * and `timestamp` is a display value only.
+ *
+ * KNOWN DEVIATION: this SDK still sorts by `timestamp` in three places —
+ * the `[channel_id+timestamp]` index, `compareTimestamp` in message-store,
+ * and local paging. Wall clocks come from senders, so a skewed sender
+ * misplaces its own messages permanently and two senders with unsynced
+ * clocks can render the same conversation in a different order here than on
+ * the app. Do not add new timestamp-ordered read paths; the convergence to
+ * the tuple has to move all three at once, since changing one alone just
+ * makes the layers disagree.
  */
 export interface MessageRecord {
   /** Stable local row identity. Assigned once on insert, unchanged by the
