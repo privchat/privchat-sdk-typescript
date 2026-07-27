@@ -3,9 +3,9 @@
 //
 // Identity model (v3):
 //   - channels primary: `channel_id` (string)
-//   - messages primary: compound (channel_id, record_key); record_key
+//   - messages_v2 primary: the stable `id`; the persisted `sort_key`
 //     derives from server_message_id || local_message_id (see
-//     `messageRecordKey` in ./types.ts).
+//     `displaySortKey` in ./types.ts).
 //   - sync_state primary: `channel_id`
 //   - outbox primary: `outbox_id`; secondary indexes on channel_id (and
 //     `[channel_id+created_at]`) drive per-channel FIFO scans.
@@ -23,7 +23,6 @@
 
 import Dexie, { type Table } from 'dexie';
 import {
-  messageRecordKey,
   nextLocalMessageRecordId,
   type ChannelRecord,
   type FriendshipRecord,
@@ -32,13 +31,17 @@ import {
   type OutboxEntry,
   type SyncStateRecord,
   type UserRecord,
+  compareDisplayOrder,
+  displaySortKey,
+  encodeSortKey,
 } from './types.js';
 
-/** Persisted shape — adds the derived `record_key` so Dexie has something
- *  reliable as part of the compound primary key. Not exposed outside the
- *  cache module. */
+/** Persisted shape — adds the derived, fixed-width `sort_key` so IndexedDB
+ *  can range-scan a channel in display order without loading and re-sorting
+ *  it. Derived on write, never read by callers. Not exposed outside the cache
+ *  module. */
 interface StoredMessage extends MessageRecord {
-  record_key: string;
+  sort_key: string;
 }
 
 interface CacheMetadataRecord {
@@ -47,10 +50,15 @@ interface CacheMetadataRecord {
 }
 
 const CACHE_OWNER_KEY = 'owner_user_id';
+/** High-water mark for `local_order_seq`. Account-global and monotonic; it is
+ *  read, bumped and used inside one transaction, because allocating outside
+ *  the write is how two tabs hand out the same number. */
+const LOCAL_ORDER_SEQ_KEY = 'local_order_seq_high_water';
 
 export class CacheDB extends Dexie {
   channels!: Table<ChannelRecord, string>;
-  messages!: Table<StoredMessage, [string, string]>;
+  messages_v2!: Table<StoredMessage, string>;
+
   sync_state!: Table<SyncStateRecord, string>;
   /** Outbox. `outbox_id` is the primary key; `local_message_id` is unique. */
   outbox!: Table<OutboxEntry, string>;
@@ -333,6 +341,116 @@ export class CacheDB extends Dexie {
           await outbox.update(o.outbox_id, { message_id: row.id });
         }
       });
+
+    // v12: the message store's primary key becomes the stable `id`.
+    //
+    // Dexie cannot change an object store's primary key in place
+    // (`UpgradeError: Not yet support for changing primary key`), so this
+    // creates `messages_v2` and moves the rows across inside the upgrade
+    // transaction, together with the outbox references that point at them.
+    // Migrating the messages first and the outbox afterwards would leave a
+    // window where a crash strands commands pointing at a table that no
+    // longer exists.
+    //
+    // What goes away with the old key: `record_key` was derived from
+    // `local_message_id` before the ack and `server_message_id` after, so the
+    // primary key moved mid-flight. Rekeying on ack, identity-conflict
+    // detection, re-minting and the repair pass around them all existed to
+    // survive that. None of them are needed once the key stops moving.
+    this.version(12)
+      .stores({
+        messages_v2:
+          '&id, [channel_id+sort_key], &[channel_id+server_message_id], [channel_id+local_message_id], channel_id',
+        // Old store stays declared so the upgrade can read it; dropped in v13.
+        messages:
+          '&[channel_id+record_key], &id, [channel_id+timestamp], [channel_id+server_message_id]',
+      })
+      .upgrade(async (tx) => {
+        const oldMessages = tx.table('messages');
+        const v2 = tx.table('messages_v2');
+        const outbox = tx.table('outbox');
+        const meta = tx.table('cache_metadata');
+
+        const rows: Array<Record<string, unknown>> = await oldMessages.toArray();
+
+        // Deterministic, repeatable numbering (SDK_ENTITY_MODEL_SPEC
+        // §2.6.2.1). Per channel: while ANY confirmed row lacks pts, that
+        // channel's confirmed rows are ordered by server_message_id alone —
+        // a server-issued snowflake needing no local inference. Ordering them
+        // by "has pts" would claim the local write path tells us the server's
+        // order, which it does not.
+        const byChannel = new Map<string, Array<Record<string, unknown>>>();
+        for (const r of rows) {
+          const cid = String(r.channel_id ?? '');
+          const list = byChannel.get(cid);
+          if (list === undefined) byChannel.set(cid, [r]);
+          else list.push(r);
+        }
+
+        const cmp = (a: string | undefined, b: string | undefined): number => {
+          const x = encodeSortKey(a);
+          const y = encodeSortKey(b);
+          return x < y ? -1 : x > y ? 1 : 0;
+        };
+
+        let seq = 0;
+        const ordered: Array<Record<string, unknown>> = [];
+        for (const list of byChannel.values()) {
+          const confirmed = list.filter(
+            (r) => r.server_message_id !== undefined && r.server_message_id !== '',
+          );
+          const pendingRows = list.filter(
+            (r) => r.server_message_id === undefined || r.server_message_id === '',
+          );
+          const anyMissingPts = confirmed.some(
+            (r) => r.pts === undefined || r.pts === '',
+          );
+          confirmed.sort((a, b) =>
+            anyMissingPts
+              ? cmp(a.server_message_id as string, b.server_message_id as string)
+              : cmp(a.pts as string, b.pts as string) ||
+                cmp(a.server_message_id as string, b.server_message_id as string),
+          );
+          // Pending last, in their existing persisted order. Rows with no
+          // outbox row left carry no authoritative order at all, so timestamp
+          // is used — acceptable for one-shot deterministic numbering, and
+          // not a runtime ordering rule.
+          pendingRows.sort(
+            (a, b) =>
+              Number(a.timestamp ?? 0) - Number(b.timestamp ?? 0) ||
+              String(a.id ?? '').localeCompare(String(b.id ?? '')),
+          );
+          ordered.push(...confirmed, ...pendingRows);
+        }
+
+        const idByOldKey = new Map<string, string>();
+        for (const r of ordered) {
+          seq += 1;
+          const id = String(r.id ?? nextLocalMessageRecordId());
+          const { record_key, ...rest } = r as { record_key?: string };
+          if (record_key !== undefined) {
+            idByOldKey.set(`${String(r.channel_id ?? '')}|${record_key}`, id);
+          }
+          const migrated = { ...rest, id, local_order_seq: seq } as MessageRecord;
+          await v2.put({ ...migrated, sort_key: displaySortKey(migrated) });
+        }
+        await meta.put({ key: LOCAL_ORDER_SEQ_KEY, value: String(seq) });
+
+        // Outbox references, in the same transaction. A command whose
+        // message_id already resolves is left alone; otherwise its stale
+        // record_key is translated once, while the mapping still exists.
+        const commands: Array<Record<string, unknown>> = await outbox.toArray();
+        for (const o of commands) {
+          if (o.message_id !== undefined) continue;
+          const key = `${String(o.channel_id ?? '')}|${String(o.record_key ?? '')}`;
+          const id = idByOldKey.get(key);
+          if (id !== undefined) await outbox.update(o.outbox_id as string, { message_id: id });
+        }
+      });
+
+    // v13: the old store has served its purpose.
+    this.version(13).stores({ messages: null });
+
   }
 }
 
@@ -357,7 +475,7 @@ export async function ensureCacheOwner(
     'rw',
     [
       db.channels,
-      db.messages,
+      db.messages_v2,
       db.sync_state,
       db.outbox,
       db.users,
@@ -370,7 +488,7 @@ export async function ensureCacheOwner(
       if (current?.value === userId) return false;
 
       await db.channels.clear();
-      await db.messages.clear();
+      await db.messages_v2.clear();
       await db.sync_state.clear();
       await db.outbox.clear();
       await db.users.clear();
@@ -413,25 +531,76 @@ export async function getChannel(
 
 // ----- Message ops -----
 
+/** Allocate the next `local_order_seq` values inside the caller's
+ *  transaction (SDK_ENTITY_MODEL_SPEC §2.6.2.1).
+ *
+ *  Read, bump and use must be one transaction. Handing out numbers outside
+ *  the write is how two tabs get the same one. */
+async function allocateOrderSeq(db: CacheDB, count: number): Promise<number> {
+  const row = await db.cache_metadata.get(LOCAL_ORDER_SEQ_KEY);
+  const start = Number(row?.value ?? '0');
+  await db.cache_metadata.put({
+    key: LOCAL_ORDER_SEQ_KEY,
+    value: String(start + count),
+  });
+  return start;
+}
+
 /**
  * Write rows, returning them **as stored**.
  *
- * The returned records are not always the ones passed in: `stampIdentity`
- * replaces a caller-minted `id` with the one already on disk. Callers that
- * publish to an in-memory store must publish THESE rows — publishing their
- * own copies re-introduces the identity split this whole mechanism exists
- * to prevent (the database keeps the stable id, memory shows a fresh one).
+ * Identity and order both come off the row already on disk when there is
+ * one: a re-opened conversation re-fetches the same history and rebuilds
+ * fresh `MessageRecord`s each time, so keeping the caller's id would either
+ * duplicate the row or fail the unique index, and re-allocating
+ * `local_order_seq` would make the message jump position in the timeline.
+ *
+ * A row is matched — in this order — by stable id, by
+ * `(channel_id, server_message_id)`, then by
+ * `(channel_id, local_message_id)`. The second is what dedupes the same
+ * server message arriving by push and by sync; the third is what lets an
+ * ack, or our own message echoed back from the server, find the optimistic
+ * row instead of inserting beside it.
  */
 export async function upsertMessages(
   db: CacheDB,
   records: MessageRecord[],
 ): Promise<MessageRecord[]> {
   if (records.length === 0) return [];
-  return db.transaction('rw', db.messages, async () => {
-    const stamped: StoredMessage[] = [];
-    for (const record of records) stamped.push(await stampIdentity(db, record));
-    await db.messages.bulkPut(stamped);
-    return stamped.map(strip);
+  return db.transaction('rw', db.messages_v2, db.cache_metadata, async () => {
+    // Allocate once for the batch; only genuinely new rows consume one.
+    let next = await allocateOrderSeq(db, records.length);
+    const out: StoredMessage[] = [];
+    for (const record of records) {
+      const existing = await findExisting(db, record);
+      // `id` is account-global, so a row arriving under an existing id but a
+      // different channel is not an update — it is one message being moved
+      // into another conversation. `put` would do it silently. Refuse: the
+      // caller minted a colliding id, and pretending otherwise loses the row
+      // that was there.
+      if (existing !== undefined && existing.channel_id !== record.channel_id) {
+        throw new Error(
+          `message id ${record.id} already belongs to channel ${existing.channel_id}; ` +
+            `refusing to move it to ${record.channel_id}`,
+        );
+      }
+      const merged: MessageRecord = {
+        ...record,
+        id: existing?.id ?? record.id,
+        local_order_seq:
+          existing?.local_order_seq ?? record.local_order_seq ?? (next += 1),
+      };
+      const stamped = stamp(merged);
+      // The row may be moving off a key another row holds (pending row that
+      // just gained its server id). Delete by the old primary key first so
+      // the unique index does not see two.
+      if (existing !== undefined && existing.id !== stamped.id) {
+        await db.messages_v2.delete(existing.id);
+      }
+      await db.messages_v2.put(stamped);
+      out.push(stamped);
+    }
+    return out.map(strip);
   });
 }
 
@@ -440,52 +609,42 @@ export async function upsertMessage(
   db: CacheDB,
   record: MessageRecord,
 ): Promise<MessageRecord> {
-  return db.transaction('rw', db.messages, async () => {
-    const stamped = await stampIdentity(db, record);
-    await db.messages.put(stamped);
-    return strip(stamped);
-  });
+  const [stored] = await upsertMessages(db, [record]);
+  return stored!;
 }
 
-/**
- * Give the row its persistent identity, reusing the one already on disk.
- *
- * Callers rebuild `MessageRecord`s from the network freely — a re-opened
- * conversation re-fetches the same history — and each rebuild mints a fresh
- * `id`. Left alone that would either duplicate the row or, since `id` is a
- * unique index, fail the write outright. The stored id wins over the incoming
- * one; only a genuinely new row keeps the caller's.
- *
- * This is the plain-write path only. The ACK does NOT go through here: it
- * changes the row's key, which needs the deletes and the write to be one
- * atomic step — see `applyAckRekey`.
- */
-async function stampIdentity(
+/** Locate the row this record refers to, by stable id then by either
+ *  network identity. Returns undefined for a genuinely new message. */
+async function findExisting(
   db: CacheDB,
   record: MessageRecord,
-): Promise<StoredMessage> {
-  const stamped = stamp(record);
-  const existing = await db.messages.get([stamped.channel_id, stamped.record_key]);
-  return existing === undefined ? stamped : { ...stamped, id: existing.id };
+): Promise<StoredMessage | undefined> {
+  const byId = await db.messages_v2.get(record.id);
+  if (byId !== undefined) return byId;
+  if (record.server_message_id !== undefined && record.server_message_id !== '') {
+    const bySmid = await db.messages_v2
+      .where('[channel_id+server_message_id]')
+      .equals([record.channel_id, record.server_message_id])
+      .first();
+    if (bySmid !== undefined) return bySmid;
+  }
+  if (record.local_message_id !== undefined && record.local_message_id !== '') {
+    const byLmid = await db.messages_v2
+      .where('[channel_id+local_message_id]')
+      .equals([record.channel_id, record.local_message_id])
+      .first();
+    if (byLmid !== undefined) return byLmid;
+  }
+  return undefined;
 }
 
-/**
- * A row other than the one being written already owns this `id`.
- *
- * Not recoverable locally: the identity is account-global, so a duplicate
- * means the invariant was already broken upstream. Surfaced as its own type
- * so callers can tell it apart from an ordinary write failure.
- */
 /** The cache row a command was delivering is gone, and its payload cannot
  *  rebuild it — media and structured cards depend on a local file or on
  *  metadata the outbox row never carried.
  *
- *  Deliberately NOT a `MessageIdentityConflictError`. Nothing here is
- *  contested: there is no second row holding the id, so re-minting an
- *  identity fixes nothing and throws away the one link the command still
- *  has. What this needs is the projection re-hydrated from the server —
- *  the message was accepted, so `syncChannel` can bring it back — after
- *  which the original stable id is kept.
+ *  Repair is to re-hydrate the projection from the server: the message was
+ *  accepted, so it can be fetched back by its server id, after which the
+ *  original stable id is kept.
  */
 export class ProjectionRehydrateRequiredError extends Error {
   constructor(
@@ -501,162 +660,118 @@ export class ProjectionRehydrateRequiredError extends Error {
   }
 }
 
-export class MessageIdentityConflictError extends Error {
-  readonly id: string;
-  readonly conflicting_channel_id: string;
-  readonly conflicting_record_key: string;
-
-  constructor(id: string, channel_id: string, record_key: string) {
-    super(
-      `message id ${id} is already held by ${channel_id}/${record_key}; ` +
-        'refusing to overwrite an unrelated row',
-    );
-    this.name = 'MessageIdentityConflictError';
-    this.id = id;
-    this.conflicting_channel_id = channel_id;
-    this.conflicting_record_key = record_key;
-  }
-}
-
 /**
- * Give one row a fresh local identity, atomically.
+ * Apply a server ACK to the message the command delivered — in place.
  *
- * The repair for an id collision. The alternative — deleting whichever row
- * currently holds the id — destroys a message that may be perfectly valid
- * and belongs to a different conversation. Re-minting touches only the row
- * that cannot currently be written, and `id` carries no meaning beyond
- * being unique, so nothing else depends on its value.
+ * The row keeps its primary key, because the key is the stable `id` and the
+ * ack does not touch it. What used to happen here was a rekey: the key was
+ * derived from `local_message_id` before the ack and `server_message_id`
+ * after, so applying an ack meant deleting one row and inserting another,
+ * which needed collision detection, identity re-minting and a repair pass to
+ * survive. All of that was the cost of a moving key, and it is gone.
  *
- * Returns the row as stored, or `undefined` if it is gone.
- *
- * DEPENDENCY MIGRATION: once `pending_dependency` exists, its rows
- * referencing this message as a consumer must be re-keyed to the new id
- * INSIDE this transaction. Splitting the two would leave dependencies
- * pointing at an id no row has — precisely the dangling reference the
- * readiness spec forbids.
+ * `local_order_seq` is preserved: the message does not change position in the
+ * timeline just because it was acknowledged.
  */
-export async function remintMessageIdentity(
+export async function applyAck(
   db: CacheDB,
-  channel_id: string,
-  record_key: string,
-  id: string,
-): Promise<MessageRecord | undefined> {
-  return db.transaction('rw', db.messages, async () => {
-    const row = await db.messages.get([channel_id, record_key]);
-    if (row === undefined) return undefined;
-    const clash = await db.messages.get({ id });
-    if (clash !== undefined && clash.record_key !== record_key) {
-      throw new MessageIdentityConflictError(id, clash.channel_id, clash.record_key);
-    }
-    const next: StoredMessage = { ...row, id };
-    await db.messages.put(next);
-    return strip(next);
-  });
-}
-
-/** True when no row holds this id. Used to pick a replacement identity. */
-export async function isMessageIdFree(db: CacheDB, id: string): Promise<boolean> {
-  return (await db.messages.get({ id })) === undefined;
-}
-
-/**
- * Move a pending row onto its server key when the ACK lands. Atomic.
- *
- * The pending row's `id` wins, unconditionally. The competing row is the
- * self-push: the server can echo our own message back to us before the ACK
- * for it returns, creating a row under `s:{serverId}` with an id of its own.
- * If that id were allowed to win, every dependency and projection recorded
- * against the pending row — which is what the UI has been showing since the
- * moment the user hit send — would dangle. So the push-created row is
- * discarded and the pending identity is carried onto the server key.
- *
- * Both deletes and the write are one transaction. A crash mid-way must not
- * be able to leave the message twice in the timeline (pending + acked) or
- * zero times.
- *
- * Returns the row as persisted, so callers publish exactly what is durable.
- */
-export async function applyAckRekey(
-  db: CacheDB,
-  channel_id: string,
-  _channel_type: number,
-  pending_record_key: string,
   acked: MessageRecord,
-  opts: {
-    /** The caller's `id` is the long-lived one; anything on disk under this
-     *  key was minted more recently and has no references yet.
-     *
-     *  Set only by the `message_rehydrate` repair. There the stored row is a
-     *  history import created seconds ago, while the caller's id is what the
-     *  outbox, the UI and any dependencies have pointed at all along — the
-     *  usual precedence is exactly backwards for that one case. */
-    callerIdWins?: boolean;
-  } = {},
 ): Promise<MessageRecord> {
-  return db.transaction('rw', db.messages, async () => {
-    const stamped = stamp(acked);
-    const pending = await db.messages.get([channel_id, pending_record_key]);
-    const selfPush =
-      stamped.record_key === pending_record_key
+  return db.transaction('rw', db.messages_v2, db.cache_metadata, async () => {
+    // Up to two rows can describe this message at ack time: the optimistic
+    // one we inserted when the user hit send, and a self-push copy the
+    // server fanned back before the ack landed.
+    const local =
+      acked.local_message_id === undefined
         ? undefined
-        : await db.messages.get([channel_id, stamped.record_key]);
+        : await db.messages_v2
+            .where('[channel_id+local_message_id]')
+            .equals([acked.channel_id, acked.local_message_id])
+            .first();
+    const remote =
+      acked.server_message_id === undefined
+        ? undefined
+        : await db.messages_v2
+            .where('[channel_id+server_message_id]')
+            .equals([acked.channel_id, acked.server_message_id])
+            .first();
 
-    // Precedence: the pending row, then a self-push row already on disk,
-    // then the caller's. The middle case is what happens when the pending
-    // write failed but the push landed — taking the caller's freshly minted
-    // id there would orphan whatever already referenced the stored row.
-    const id = opts.callerIdWins
-      ? stamped.id
-      : (pending?.id ?? selfPush?.id ?? stamped.id);
+    // Whose identity survives:
+    //
+    //   - the optimistic row, when it is still there. It is what the UI
+    //     rendered and what dependencies were keyed by.
+    //   - otherwise the CALLER's, not the remote row's. A row found only by
+    //     server id and carrying no local_message_id is a network copy —
+    //     a self-push, or a history row a rehydrate just fetched back. Those
+    //     were created seconds ago and nothing references them, while the
+    //     caller's id comes off the outbox command and is what the UI and
+    //     any dependencies have pointed at all along.
+    //
+    // Either way the other row is absorbed below, so one message stays one
+    // row.
+    const keep = local;
+    const merged: MessageRecord = {
+      ...acked,
+      id: keep?.id ?? acked.id,
+      // Position does not change just because the message was acknowledged.
+      // Position is inherited from whichever row already had one: being
+      // acknowledged does not move a message in the timeline.
+      local_order_seq:
+        keep?.local_order_seq ??
+        remote?.local_order_seq ??
+        acked.local_order_seq ??
+        (await allocateOrderSeq(db, 1)) + 1,
+    };
+    const stamped = stamp(merged);
 
-    await db.messages.delete([channel_id, pending_record_key]);
-    if (selfPush !== undefined) {
-      await db.messages.delete([channel_id, stamped.record_key]);
+    // Absorb whichever row we did not keep. One logical message, one row.
+    for (const row of [local, remote]) {
+      if (row !== undefined && row.id !== stamped.id) {
+        await db.messages_v2.delete(row.id);
+      }
     }
-
-    // `id` is account-global. Anything else still holding it is not a race
-    // this function can resolve — it means a broken migration, a corrupted
-    // database, or a caller reusing an id. Deleting that row to make room
-    // would silently destroy an unrelated message, possibly in another
-    // conversation. Throw and let the transaction roll back.
-    const clash = await db.messages.get({ id });
-    if (clash !== undefined) {
-      throw new MessageIdentityConflictError(id, clash.channel_id, clash.record_key);
-    }
-
-    const row: StoredMessage = { ...stamped, id };
-    await db.messages.put(row);
-    return strip(row);
+    await db.messages_v2.put(stamped);
+    return strip(stamped);
   });
 }
 
-/** Latest `limit` messages for a channel, ordered ascending by timestamp. */
+/** Latest `limit` messages for a channel, in display order (ascending).
+ *
+ *  Range-scans the persisted `sort_key`, so IndexedDB returns the timeline
+ *  already ordered — no load-everything-and-re-sort, and no second ordering
+ *  rule that could disagree with the in-memory one. */
 export async function getMessageWindow(
   db: CacheDB,
   channel_id: string,
   _channel_type: number,
   limit: number,
 ): Promise<MessageRecord[]> {
-  const desc = await db.messages
-    .where('[channel_id+timestamp]')
-    .between([channel_id, -Infinity], [channel_id, Infinity])
+  const desc = await db.messages_v2
+    .where('[channel_id+sort_key]')
+    .between([channel_id, ''], [channel_id, '\uffff'])
     .reverse()
     .limit(limit)
     .toArray();
   return desc.reverse().map(strip);
 }
 
-/** Page older than the given timestamp, ascending order. */
+/** Page strictly older than a cursor, in display order (ascending).
+ *
+ *  The cursor is the display sort key, not a timestamp: a keyset page has to
+ *  walk the same order the list is rendered in, or paging and rendering
+ *  disagree at every boundary. This is local only — the network history
+ *  cursor stays `before_server_message_id` (SDK_ENTITY_MODEL_SPEC §2.6.3). */
 export async function getMessagesBefore(
   db: CacheDB,
   channel_id: string,
   _channel_type: number,
-  before_timestamp: number,
+  before: MessageRecord | string,
   limit: number,
 ): Promise<MessageRecord[]> {
-  const desc = await db.messages
-    .where('[channel_id+timestamp]')
-    .between([channel_id, -Infinity], [channel_id, before_timestamp], true, false)
+  const cursor = typeof before === 'string' ? before : displaySortKey(before);
+  const desc = await db.messages_v2
+    .where('[channel_id+sort_key]')
+    .between([channel_id, ''], [channel_id, cursor], true, false)
     .reverse()
     .limit(limit)
     .toArray();
@@ -670,20 +785,15 @@ export async function deleteMessageByServerId(
   _channel_type: number,
   server_message_id: string,
 ): Promise<void> {
-  await db.messages
+  await db.messages_v2
     .where('[channel_id+server_message_id]')
     .equals([channel_id, server_message_id])
     .delete();
 }
 
-/** Delete a message by its internal record_key (used for local-echo ACK swaps). */
-export async function deleteMessageByRecordKey(
-  db: CacheDB,
-  channel_id: string,
-  _channel_type: number,
-  record_key: string,
-): Promise<void> {
-  await db.messages.delete([channel_id, record_key]);
+/** Delete a message by its stable local id. */
+export async function deleteMessageById(db: CacheDB, id: string): Promise<void> {
+  await db.messages_v2.delete(id);
 }
 
 /**
@@ -697,10 +807,7 @@ export async function clearChannelMessages(
   channel_id: string,
   _channel_type?: number,
 ): Promise<void> {
-  await db.messages
-    .where('[channel_id+timestamp]')
-    .between([channel_id, -Infinity], [channel_id, Infinity])
-    .delete();
+  await db.messages_v2.where('channel_id').equals(channel_id).delete();
 }
 
 // ----- Sync state ops -----
@@ -797,7 +904,7 @@ export async function clearAll(db: CacheDB): Promise<void> {
     'rw',
     [
       db.channels,
-      db.messages,
+      db.messages_v2,
       db.sync_state,
       db.outbox,
       db.users,
@@ -807,7 +914,7 @@ export async function clearAll(db: CacheDB): Promise<void> {
     ],
     async () => {
       await db.channels.clear();
-      await db.messages.clear();
+      await db.messages_v2.clear();
       await db.sync_state.clear();
       await db.outbox.clear();
       await db.users.clear();
@@ -821,11 +928,11 @@ export async function clearAll(db: CacheDB): Promise<void> {
 // ----- Internal: record_key stamping -----
 
 function stamp(record: MessageRecord): StoredMessage {
-  return { ...record, record_key: messageRecordKey(record) };
+  return { ...record, sort_key: displaySortKey(record) };
 }
 
 function strip(stored: StoredMessage): MessageRecord {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { record_key: _, ...rest } = stored;
+  const { sort_key: _, ...rest } = stored;
   return rest;
 }

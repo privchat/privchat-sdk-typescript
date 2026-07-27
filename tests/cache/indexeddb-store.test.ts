@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   CacheDB,
-  applyAckRekey,
+  applyAck,
   clearAll,
-  deleteMessageByRecordKey,
+  deleteMessageById,
   deleteMessageByServerId,
   ensureCacheOwner,
   getCacheOwner,
@@ -128,14 +128,19 @@ describe('messages table', () => {
     expect(window.map((m) => m.server_message_id)).toEqual(['s-3', 's-4', 's-5']);
   });
 
-  it('getMessagesBefore paginates older-than-cursor by timestamp', async () => {
-    await upsertMessages(db, ['1', '2', '3', '4', '5'].map((s) => sampleMessage(s)));
-    // Before timestamp 4000 (= id 4) → returns ids 1, 2, 3
-    const older = await getMessagesBefore(db, '12345', 1, 4_000, 10);
+  it('getMessagesBefore paginates older-than-cursor in display order', async () => {
+    const rows = await upsertMessages(
+      db,
+      ['1', '2', '3', '4', '5'].map((s) => sampleMessage(s)),
+    );
+    // Keyset cursor is the record itself, walked in the same order the list
+    // renders in — a timestamp cursor would page a different sequence than
+    // the one on screen.
+    const older = await getMessagesBefore(db, '12345', 1, rows[3]!, 10);
     expect(older.map((m) => m.server_message_id)).toEqual(['s-1', 's-2', 's-3']);
   });
 
-  it('upsert by record_key (derived from server_message_id) replaces row', async () => {
+  it('upsert by server_message_id replaces the row', async () => {
     await upsertMessages(db, [sampleMessage('5', { content: 'first' })]);
     await upsertMessages(db, [sampleMessage('5', { content: 'updated' })]);
     const win = await getMessageWindow(db, '12345', 1, 10);
@@ -150,7 +155,7 @@ describe('messages table', () => {
     expect(win.map((m) => m.server_message_id)).toEqual(['s-6']);
   });
 
-  it('deleteMessageByRecordKey removes pending row by its local key', async () => {
+  it('deleteMessageById removes pending row by its local key', async () => {
     const pending: MessageRecord = {
       id: 'r-local-1',
       channel_id: '12345',
@@ -165,14 +170,14 @@ describe('messages table', () => {
     };
     await upsertMessage(db, pending);
     expect(await getMessageWindow(db, '12345', 1, 10)).toHaveLength(1);
-    await deleteMessageByRecordKey(db, '12345', 1, 'l:local-1');
+    await deleteMessageById(db, (await getMessageWindow(db, '12345', 1, 10))[0]!.id);
     expect(await getMessageWindow(db, '12345', 1, 10)).toEqual([]);
   });
 
-  // CONVERSATION_DEPENDENCY_READINESS §3.3: `id` is the identity that
-  // pending dependencies and projections are keyed by. `record_key` flips
-  // `l:` → `s:` on ACK, so anything keyed by it loses its row at that
-  // moment — `id` must not move with it.
+  // SDK_ENTITY_MODEL_SPEC §2.6.1: `id` is the identity pending dependencies
+  // and projections are keyed by, and the ACK must not move it. It used to
+  // share that job with a key that flipped `l:` → `s:` on ACK; the store now
+  // updates the row in place.
   describe('stable local id', () => {
     const pending: MessageRecord = {
       id: 'r-local-1',
@@ -197,9 +202,9 @@ describe('messages table', () => {
       status: 'sent',
     });
 
-    it('survives the ACK record_key flip even when the caller re-mints it', async () => {
+    it('keeps the stable id through the ACK even when the caller re-mints it', async () => {
       await upsertMessage(db, pending);
-      const stored = await applyAckRekey(db, '12345', 1, 'l:local-1', ackedFor('srv-1'));
+      const stored = await applyAck(db, ackedFor('srv-1'));
 
       const win = await getMessageWindow(db, '12345', 1, 10);
       expect(win).toHaveLength(1);
@@ -239,7 +244,7 @@ describe('messages table', () => {
       });
       expect(await getMessageWindow(db, '12345', 1, 10)).toHaveLength(2);
 
-      await applyAckRekey(db, '12345', 1, 'l:local-1', ackedFor('srv-3'));
+      await applyAck(db, ackedFor('srv-3'));
 
       const win = await getMessageWindow(db, '12345', 1, 10);
       expect(win).toHaveLength(1);
@@ -249,7 +254,7 @@ describe('messages table', () => {
 
     it('leaves one row when the ACK lands before the self-push', async () => {
       await upsertMessage(db, pending);
-      await applyAckRekey(db, '12345', 1, 'l:local-1', ackedFor('srv-4'));
+      await applyAck(db, ackedFor('srv-4'));
       // Push arrives afterwards for the same server id: a plain upsert on
       // an existing key, so it must merge, not duplicate or re-mint.
       await upsertMessage(db, {
@@ -265,26 +270,18 @@ describe('messages table', () => {
       expect(win[0]!.id).toBe('r-local-1');
     });
 
-    it('a failed ACK leaves the pending row intact and is retryable', async () => {
+    it('is idempotent: replaying an ACK does not duplicate or re-order', async () => {
+      // The engine replays a stored ACK on every repair pass, so this runs
+      // more than once for the same message by design.
       await upsertMessage(db, pending);
-      // A record with neither id is unwritable — `messageRecordKey` throws
-      // inside the transaction, which must roll the whole thing back.
-      const broken = { ...pending, local_message_id: undefined } as MessageRecord;
-      await expect(
-        applyAckRekey(db, '12345', 1, 'l:local-1', broken),
-      ).rejects.toThrow();
-
-      const afterFailure = await getMessageWindow(db, '12345', 1, 10);
-      expect(afterFailure).toHaveLength(1);
-      expect(afterFailure[0]!.status).toBe('pending');
-      expect(afterFailure[0]!.id).toBe('r-local-1');
-
-      // Retry succeeds and still carries the original identity.
-      await applyAckRekey(db, '12345', 1, 'l:local-1', ackedFor('srv-5'));
+      const first = await applyAck(db, ackedFor('srv-5'));
+      await applyAck(db, ackedFor('srv-5'));
       const afterRetry = await getMessageWindow(db, '12345', 1, 10);
       expect(afterRetry).toHaveLength(1);
       expect(afterRetry[0]!.id).toBe('r-local-1');
       expect(afterRetry[0]!.status).toBe('sent');
+      // Position in the timeline is not disturbed by the replay.
+      expect(afterRetry[0]!.local_order_seq).toBe(first.local_order_seq);
     });
 
     it('rejects the same id in a different channel (account-global)', async () => {

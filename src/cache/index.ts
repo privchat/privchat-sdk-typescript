@@ -4,12 +4,9 @@ export {
   clearAll,
   clearChannelMessages,
   deleteFriendships,
-  applyAckRekey,
-  MessageIdentityConflictError,
   ProjectionRehydrateRequiredError,
-  isMessageIdFree,
-  remintMessageIdentity,
-  deleteMessageByRecordKey,
+  deleteMessageById,
+  applyAck,
   deleteMessageByServerId,
   getChannel,
   getCacheOwner,
@@ -67,4 +64,10 @@ export type {
   SyncStateRecord,
   UserRecord,
 } from './types.js';
-export { messageRecordKey, nextLocalMessageRecordId, pushToMessageRecord } from './types.js';
+export {
+  compareDisplayOrder,
+  displaySortKey,
+  encodeSortKey,
+  nextLocalMessageRecordId,
+  pushToMessageRecord,
+} from './types.js';

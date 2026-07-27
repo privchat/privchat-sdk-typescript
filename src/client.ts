@@ -24,9 +24,9 @@ import {
   MessageStore,
   UserStore,
   ensureCacheOwner,
+  applyAck as cacheApplyAck,
+  deleteMessageById as cacheDeleteMessageById,
   deleteFriendships as cacheDeleteFriendships,
-  applyAckRekey as cacheApplyAckRekey,
-  deleteMessageByRecordKey as cacheDeleteMessageByRecordKey,
   deleteOutboxEntry as cacheDeleteOutboxEntry,
   getMessageWindow as cacheGetMessageWindow,
   getOutboxEntry as cacheGetOutboxEntry,
@@ -40,7 +40,6 @@ import {
   maxGroupSyncVersion as cacheMaxGroupSyncVersion,
   maxUserSyncVersion as cacheMaxUserSyncVersion,
   mergeOnPushAbsorb,
-  messageRecordKey,
   nextLocalMessageRecordId,
   putOutboxEntry as cachePutOutboxEntry,
   updateOutboxStatus as cacheUpdateOutboxStatus,
@@ -1641,14 +1640,14 @@ export class PrivchatClient {
     }
 
     // 1. Insert pending local-echo record. Identity is local_message_id
-    //    (no server_message_id yet); record_key derives from it. The
+    //    (no server_message_id yet). The
     //    cache row stays `pending` throughout this method — even on
     //    failure paths, because the outbox now owns retry semantics
     //    and the UI should not regress to `failed` while a retry is
     //    pending.
     const pending: MessageRecord = {
       // Stable for the whole life of this row: the ack fills in
-      // server_message_id and flips record_key, but never touches `id`.
+      // server_message_id but never touches `id`, which is the primary key.
       id: nextLocalMessageRecordId(),
       channel_id: input.channel_id,
       channel_type: input.channel_type,
@@ -1660,7 +1659,6 @@ export class PrivchatClient {
       timestamp: Date.now(),
       status: 'pending',
     };
-    const pendingKey = messageRecordKey(pending);
     // Memory first, so the local echo is on screen in the same tick the user
     // hit send — publishing it costs nothing and risks nothing.
     this.cacheStore.upsertMessage(pending, false);
@@ -1679,7 +1677,7 @@ export class PrivchatClient {
       // forever with no path to resolution. Removing it puts the UI back
       // where it was before the call, and the thrown error is what tells
       // the caller the send did not happen.
-      this.cacheStore.removeMessage(input.channel_id, input.channel_type, pendingKey);
+      this.cacheStore.removeMessage(input.channel_id, input.channel_type, pending.id);
       throw new LocalMessagePersistError(localMsgId, err);
     }
 
@@ -1693,8 +1691,8 @@ export class PrivchatClient {
         input,
         payload,
         'pending',
-        undefined,
         pending.id,
+        undefined,
         payloadEncoding,
       );
       return {
@@ -1716,8 +1714,8 @@ export class PrivchatClient {
         input,
         payload,
         'failed',
-        formatTransientError(e),
         pending.id,
+        formatTransientError(e),
         payloadEncoding,
       );
       return {
@@ -1736,8 +1734,8 @@ export class PrivchatClient {
         input,
         payload,
         'failed',
-        `rejected: code=${resp.reason_code}`,
         pending.id,
+        `rejected: code=${resp.reason_code}`,
         payloadEncoding,
       );
       return {
@@ -1748,9 +1746,9 @@ export class PrivchatClient {
     }
 
     // 4. ACK: swap pending record for the server-acked one. The acked
-    //    record's identity is `server_message_id`, so its record_key
+    //    record keeps the same `id`, so its identity
     //    differs from the pending one — the patch carries the old
-    //    record_key in `removed` so observers drop the stale row.
+    //    stays put and observers see an update, not a swap.
     let acked: MessageRecord = {
       ...pending,
       server_message_id: resp.server_message_id,
@@ -1765,13 +1763,7 @@ export class PrivchatClient {
     // reconcile it would never fetch it again. Leaving the cursor where it
     // is keeps that recovery path open.
     try {
-      acked = await cacheApplyAckRekey(
-        this.cacheDb,
-        input.channel_id,
-        input.channel_type,
-        pendingKey,
-        acked,
-      );
+      acked = await cacheApplyAck(this.cacheDb, acked);
     } catch (err) {
       // The send succeeded — the server has the message — but locally it is
       // still pending, which is the truthful state and the one a reload will
@@ -1793,7 +1785,7 @@ export class PrivchatClient {
     this.cacheStore.replaceMessage(
       input.channel_id,
       input.channel_type,
-      pendingKey,
+      acked.id,
       acked,
       false,
     );
@@ -1961,9 +1953,9 @@ export class PrivchatClient {
     input: SendTextInput,
     payload: Uint8Array,
     status: OutboxStatus,
-    last_error?: string,
     /** Stable `MessageRecord.id` of the local echo this command delivers. */
-    message_id?: string,
+    message_id: string,
+    last_error?: string,
     payload_encoding?: 'raw_utf8' | 'message_envelope',
   ): Promise<void> {
     if (this.cacheDb === null) return;
@@ -1972,7 +1964,6 @@ export class PrivchatClient {
       outbox_id,
       message_id,
       payload_encoding,
-      record_key: `l:${outbox_id}`,
       channel_id: input.channel_id,
       channel_type: input.channel_type,
       local_message_id: outbox_id,
@@ -3001,13 +2992,8 @@ export class PrivchatClient {
     await cacheDeleteOutboxEntry(this.cacheDb, outbox_id);
     // Drop the matching cache MessageRecord. Memory removal emits a
     // patch with `removed=[recordKey]`; IDB deletion is fire-and-forget.
-    this.cacheStore.removeMessage(entry.channel_id, entry.channel_type, entry.record_key);
-    void cacheDeleteMessageByRecordKey(
-      this.cacheDb,
-      entry.channel_id,
-      entry.channel_type,
-      entry.record_key,
-    ).catch(() => {});
+    this.cacheStore.removeMessage(entry.channel_id, entry.channel_type, entry.message_id);
+    void cacheDeleteMessageById(this.cacheDb, entry.message_id).catch(() => {});
     this.onOutboxMutation({
       type: 'outbox_state_changed',
       outbox_id: entry.outbox_id,
@@ -3868,12 +3854,16 @@ export class PrivchatClient {
     // the push (status='received', content='') would silently regress
     // a row our local-echo / outbox-flush ACK already promoted to
     // 'sent'. See `cache/merge.ts` for the rule set.
-    const incomingKey = messageRecordKey(incoming);
+    // Matched on the network identities, not on a local key: the push is a
+    // fresh object with a fresh `id`, so only server_message_id (the same
+    // message) or local_message_id (our own send echoed back) can find the
+    // row it duplicates.
     const existing = this.cacheStore
       .getMessages(incoming.channel_id, incoming.channel_type)
       .find(
         (m) =>
-          messageRecordKey(m) === incomingKey ||
+          (incoming.server_message_id !== undefined &&
+            m.server_message_id === incoming.server_message_id) ||
           (incoming.local_message_id !== undefined &&
             m.local_message_id === incoming.local_message_id),
       );
@@ -3882,8 +3872,8 @@ export class PrivchatClient {
     });
 
     // 1. Memory: synchronous emit to observers.
-    const existingKey = existing !== undefined ? messageRecordKey(existing) : undefined;
-    const recordKey = messageRecordKey(record);
+    const existingKey = existing?.id;
+    const recordKey = record.id;
     if (existingKey !== undefined && existingKey !== recordKey) {
       this.cacheStore.replaceMessage(
         record.channel_id,
@@ -3987,13 +3977,8 @@ export class PrivchatClient {
     // 3. IndexedDB: async, fire-and-forget. UI never waits.
     if (existingKey !== undefined && existingKey !== recordKey) {
       void this.cacheDb
-        .transaction('rw', this.cacheDb.messages, async () => {
-          await cacheDeleteMessageByRecordKey(
-            this.cacheDb!,
-            record.channel_id,
-            record.channel_type,
-            existingKey,
-          );
+        .transaction('rw', this.cacheDb.messages_v2, this.cacheDb.cache_metadata, async () => {
+          await cacheDeleteMessageById(this.cacheDb!, existingKey);
           await cacheUpsertMessage(this.cacheDb!, record);
         })
         .catch(() => {});

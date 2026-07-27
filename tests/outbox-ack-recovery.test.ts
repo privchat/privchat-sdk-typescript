@@ -8,8 +8,8 @@
 // twice. So the ACK itself is persisted on the outbox row and recovery
 // replays it locally.
 //
-// A *transient* storage failure is injected here; the permanent-integrity
-// case (`MessageIdentityConflictError` → quarantine) lives in
+// A *transient* storage failure is injected here; the permanent case
+// (`ProjectionRehydrateRequiredError` → quarantine) lives in
 // outbox-engine.test.ts. `vi.mock` is module-scoped, hence the own file.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -17,7 +17,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const ackRekeyShouldFail = { value: false };
 /** Simulates damage that re-minting cannot fix — the rekey refuses no
  *  matter what identity it is handed. */
-const ackRekeyAlwaysConflicts = { value: false };
+const ackAlwaysUnrecoverable = { value: false };
 
 vi.mock('../src/cache/index.js', async () => {
   const actual = await vi.importActual<typeof import('../src/cache/index.js')>(
@@ -25,15 +25,15 @@ vi.mock('../src/cache/index.js', async () => {
   );
   return {
     ...actual,
-    applyAckRekey: async (...args: Parameters<typeof actual.applyAckRekey>) => {
-      if (ackRekeyAlwaysConflicts.value) {
-        throw new actual.MessageIdentityConflictError('stuck-id', 'elsewhere', 's:x');
+    applyAck: async (...args: Parameters<typeof actual.applyAck>) => {
+      if (ackAlwaysUnrecoverable.value) {
+        throw new actual.ProjectionRehydrateRequiredError('m-A', '100', 'image');
       }
       if (ackRekeyShouldFail.value) {
         // Transient: the kind of failure a retry can actually resolve.
         throw new Error('injected: IndexedDB write failed');
       }
-      return actual.applyAckRekey(...args);
+      return actual.applyAck(...args);
     },
   };
 });
@@ -48,7 +48,7 @@ const NOW = 1_700_000_000_000;
 
 const row = (overrides: Partial<OutboxEntry> = {}): OutboxEntry => ({
   outbox_id: 'A',
-  record_key: 'l:A',
+  message_id: 'm-A',
   channel_id: '100',
   channel_type: 1,
   local_message_id: 'A',
@@ -74,7 +74,7 @@ let connectionState: 'authenticated' | 'disconnected' = 'authenticated';
 
 beforeEach(async () => {
   ackRekeyShouldFail.value = true;
-  ackRekeyAlwaysConflicts.value = false;
+  ackAlwaysUnrecoverable.value = false;
   connectionState = 'authenticated';
   now = NOW;
   sendCalls = [];
@@ -113,7 +113,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   ackRekeyShouldFail.value = false;
-  ackRekeyAlwaysConflicts.value = false;
+  ackAlwaysUnrecoverable.value = false;
   try {
     db.close();
   } catch {
@@ -163,7 +163,7 @@ describe('OutboxEngine — delivered but not yet committed locally', () => {
     expect(cached[0]!.status).toBe('sent');
     expect(cached[0]!.server_message_id).toBe('s-A');
     // Identity survived the whole detour.
-    expect(cached[0]!.id).toBe('r-A');
+    expect(cached[0]!.id).toBe('m-A');
   });
 
   it('never freezes: a delivered message must stay recoverable', async () => {
@@ -234,7 +234,7 @@ describe('OutboxEngine — ack_pending recovery is offline-safe', () => {
 describe('OutboxEngine — repair gives up honestly', () => {
   it('reaches local_data_error after the repair budget, with backoff between passes', async () => {
     ackRekeyShouldFail.value = false;
-    ackRekeyAlwaysConflicts.value = true;
+    ackAlwaysUnrecoverable.value = true;
 
     const engineWithBudget = new OutboxEngine({
       db,
@@ -274,7 +274,7 @@ describe('OutboxEngine — repair gives up honestly', () => {
 
   it('a local_data_error row is never claimed for sending again', async () => {
     ackRekeyShouldFail.value = false;
-    ackRekeyAlwaysConflicts.value = true;
+    ackAlwaysUnrecoverable.value = true;
     const e = new OutboxEngine({
       db,
       store,
@@ -312,7 +312,7 @@ describe('OutboxEngine — repair ACK is fenced by the repair lease', () => {
     // host hook is awaited inside it), so the pass finishes holding a token
     // that is no longer valid. Its ACK commit must be refused.
     ackRekeyShouldFail.value = false;
-    ackRekeyAlwaysConflicts.value = true;
+    ackAlwaysUnrecoverable.value = true;
 
     let stolen = false;
     // Recorded, not asserted inside the hook: `attemptRepair` catches hook
@@ -337,7 +337,7 @@ describe('OutboxEngine — repair ACK is fenced by the repair lease', () => {
           if (stolen) return;
           stolen = true;
           // Repair can now succeed, but this pass no longer owns the row.
-          ackRekeyAlwaysConflicts.value = false;
+          ackAlwaysUnrecoverable.value = false;
           now += 5_000;
           const taken = await claimRepairRow(db, 'A', 'repair-B', now, 60_000);
           stolenToken = taken?.repair_lease_token;
@@ -362,7 +362,7 @@ describe('OutboxEngine — repair ACK is fenced by the repair lease', () => {
 
   it('a stale repair owner cannot delete the row', async () => {
     ackRekeyShouldFail.value = false;
-    ackRekeyAlwaysConflicts.value = true;
+    ackAlwaysUnrecoverable.value = true;
     const e = new OutboxEngine({
       db,
       store,
@@ -389,7 +389,7 @@ describe('OutboxEngine — repair ACK is fenced by the repair lease', () => {
 
     // The stale owner now tries to finish: its ACK commit must not delete
     // the row out from under repair-B.
-    ackRekeyAlwaysConflicts.value = false;
+    ackAlwaysUnrecoverable.value = false;
     const applyAck = (
       e as unknown as {
         applyAck: (

@@ -3,15 +3,15 @@
 // fast). The store owns:
 //   - per-channel sorted message buffer (ascending by timestamp)
 //   - per-channel observer registry
-//   - dedup by record_key (server_message_id || local_message_id)
-//   - patch synthesis (`upserted` + `removed` listing record_keys)
+//   - dedup by the stable `id`, collapsing rows that share a network id
+//   - patch synthesis (`upserted` + `removed` listing message ids)
 //
 // IndexedDB I/O does NOT live here — the cache layer (PrivchatClient
 // methods) drives it. The store is pure in-memory state that fires
 // observers synchronously.
 
 import {
-  messageRecordKey,
+  compareDisplayOrder,
   type ChannelRecord,
   type ConversationPatch,
   type ConversationSnapshot,
@@ -126,7 +126,7 @@ export class MessageStore {
     is_remote: boolean,
   ): void {
     const k = channelKey(channel_id);
-    const sorted = records.map(normalizeRecord).sort(compareTimestamp);
+    const sorted = records.map(normalizeRecord).sort(compareDisplayOrder);
     const existing = this.buffers.get(k) ?? [];
 
     if (sorted.length === 0) {
@@ -134,24 +134,28 @@ export class MessageStore {
       return;
     }
 
-    const minTs = sorted[0]!.timestamp;
-    const maxTs = sorted[sorted.length - 1]!.timestamp;
+    // "Outside the window" is decided in display order, the same order the
+    // window itself was selected in. Comparing timestamps here while the
+    // window is ordered by the tuple is how a row ends up preserved and
+    // re-inserted at once, or dropped though it was never in range.
+    const lo = sorted[0]!;
+    const hi = sorted[sorted.length - 1]!;
     const outsideRange = existing.filter(
-      (m) => m.timestamp < minTs || m.timestamp > maxTs,
+      (m) => compareDisplayOrder(m, lo) < 0 || compareDisplayOrder(m, hi) > 0,
     );
 
-    const merged = mergeByKey(outsideRange, sorted);
+    const merged = mergeByKey(absorbDuplicates(outsideRange, sorted), sorted);
     this.buffers.set(k, merged);
 
-    const oldKeys = new Set(existing.map(messageRecordKey));
-    const newKeys = new Set(merged.map(messageRecordKey));
-    const upserted = merged.filter((m) => !oldKeys.has(messageRecordKey(m)));
+    const oldKeys = new Set(existing.map(messageIdOf));
+    const newKeys = new Set(merged.map(messageIdOf));
+    const upserted = merged.filter((m) => !oldKeys.has(messageIdOf(m)));
     const removed = [...oldKeys].filter((key) => !newKeys.has(key));
     this.notify(channel_id, channel_type, merged, { upserted, removed, is_remote });
   }
 
   /**
-   * Insert or update a single record. Dedupes by record_key. Emits
+   * Insert or update a single record. Dedupes by stable id. Emits
    * a patch with just the affected record.
    */
   upsertMessage(record: MessageRecord, is_remote: boolean): void {
@@ -166,83 +170,94 @@ export class MessageStore {
   ): void {
     if (records.length === 0) return;
     const k = channelKey(channel_id);
-    const existing = this.buffers.get(k) ?? [];
-    const byKey = new Map(existing.map((m) => [messageRecordKey(m), m]));
+    const existing = absorbDuplicates(
+      this.buffers.get(k) ?? [],
+      records.map(normalizeRecord),
+    );
+    const byKey = new Map(existing.map((m) => [messageIdOf(m), m]));
     const upserted: MessageRecord[] = [];
     for (const input of records) {
       const r = normalizeRecord(input);
-      const key = messageRecordKey(r);
+      const key = messageIdOf(r);
       const prev = byKey.get(key);
       byKey.set(key, r);
       if (!prev || !messageEquals(prev, r)) upserted.push(r);
     }
     if (upserted.length === 0) return;
-    const merged = [...byKey.values()].sort(compareTimestamp);
+    const merged = [...byKey.values()].sort(compareDisplayOrder);
     this.buffers.set(k, merged);
     this.notify(channel_id, channel_type, merged, { upserted, removed: [], is_remote });
   }
 
   /**
-   * Replace one record by its current record_key. If the new record
-   * resolves to a DIFFERENT record_key (typical for local-echo ACK:
-   * pending row keyed by local_message_id → sent row keyed by
-   * server_message_id), the old key is included in the patch's
-   * `removed` list so observers can drop the stale entry.
+   * Replace one record by its stable id.
+   *
+   * The ack no longer changes the identity, so this no longer swaps keys —
+   * `removed` stays empty unless the caller genuinely replaces one row with
+   * a different one. What it still does is collapse a duplicate: a self-push
+   * for our own message can land before the ack, and both describe the same
+   * message.
    */
   replaceMessage(
     channel_id: string,
     channel_type: number,
-    oldRecordKey: string,
+    replacedId: string,
     next: MessageRecord,
     is_remote: boolean,
   ): void {
     const k = channelKey(channel_id);
     const existing = this.buffers.get(k) ?? [];
     next = normalizeRecord(next);
-    const newKey = messageRecordKey(next);
-    // Filter both keys: drop the pending row (oldRecordKey) AND any row
-    // that already carries the new identity (newKey). The latter handles
-    // the race where a self-push for our own message arrived BEFORE the
-    // ACK swap — without this dedup the buffer would end up with two
-    // rows for the same logical message (the push's stale receive +
-    // the engine's authoritative sent).
+    const nextId = messageIdOf(next);
+    // Drop the row being replaced, any row already holding the new id, and
+    // any row describing the SAME message under a different local id.
+    //
+    // That last one is the self-push race: the server fans our own message
+    // back before the ack, so two rows exist for one message with different
+    // ids. The persistent `applyAck` absorbs them; memory has to match, or
+    // the timeline shows the message twice until the next reload.
+    const sameMessage = (m: MessageRecord): boolean =>
+      (next.server_message_id !== undefined &&
+        m.server_message_id === next.server_message_id) ||
+      (next.local_message_id !== undefined &&
+        m.local_message_id === next.local_message_id);
     const filtered = existing.filter((m) => {
-      const key = messageRecordKey(m);
-      return key !== oldRecordKey && key !== newKey;
+      const id = messageIdOf(m);
+      return id !== replacedId && id !== nextId && !sameMessage(m);
     });
-    const merged = [...filtered, next].sort(compareTimestamp);
+    const merged = [...filtered, next].sort(compareDisplayOrder);
     this.buffers.set(k, merged);
-    const removed = oldRecordKey !== newKey ? [oldRecordKey] : [];
+    const removed = replacedId !== nextId ? [replacedId] : [];
     this.notify(channel_id, channel_type, merged, { upserted: [next], removed, is_remote });
   }
 
   removeMessage(
     channel_id: string,
     channel_type: number,
-    recordKey: string,
+    messageId: string,
   ): void {
     const k = channelKey(channel_id);
     const existing = this.buffers.get(k) ?? [];
-    const next = existing.filter((m) => messageRecordKey(m) !== recordKey);
+    const next = existing.filter((m) => messageIdOf(m) !== messageId);
     if (next.length === existing.length) return;
     this.buffers.set(k, next);
     this.notify(channel_id, channel_type, next, {
       upserted: [],
-      removed: [recordKey],
+      removed: [messageId],
       is_remote: true,
     });
   }
 
   /**
    * Drop the entire in-memory buffer for one (channel_id, channel_type).
-   * Emits a single patch listing every removed record_key. Used by the
+   * Emits a single patch listing every removed id. Used by the
    * sync engine's 20900-resync path; not exposed publicly.
    */
   clearBuffer(channel_id: string, channel_type: number): void {
     const k = channelKey(channel_id);
     const existing = this.buffers.get(k);
     if (!existing || existing.length === 0) return;
-    const removed = existing.map(messageRecordKey);
+    const removed = existing.map(messageIdOf);
     this.buffers.delete(k);
     this.notify(channel_id, channel_type, [], {
       upserted: [],
@@ -252,7 +267,7 @@ export class MessageStore {
   }
 
   /**
-   * Sync read access. Sorted ascending by timestamp.
+   * Sync read access. Sorted ascending in display order.
    */
   getMessages(channel_id: string, _channel_type?: number): MessageRecord[] {
     return this.buffers.get(channelKey(channel_id)) ?? [];
@@ -335,17 +350,48 @@ export class MessageStore {
 
 // ----- Sort + merge helpers -----
 
-function compareTimestamp(a: MessageRecord, b: MessageRecord): number {
-  if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp;
-  // Tie-breaker on record_key for stable order under identical timestamps.
-  return messageRecordKey(a).localeCompare(messageRecordKey(b));
+/** Buffer identity is the stable id, full stop. It never changes, so the ack
+ *  is an update rather than a remove-and-insert, and a consumer holding one
+ *  keeps holding the same message. */
+function messageIdOf(record: MessageRecord): string {
+  return record.id;
+}
+
+/** Collapse rows describing the same message under different local ids.
+ *
+ * Records rebuilt from the wire — a re-opened conversation re-fetching the
+ * same history, a self-push echoing our own send — carry a freshly minted
+ * `id`. Keying the buffer on `id` alone would then show one message twice
+ * until the next reload, even though the persistent store deduped it
+ * correctly. Memory has to apply the same rule the store does: same
+ * `server_message_id`, or same `local_message_id`, is the same message.
+ */
+function absorbDuplicates(
+  rows: MessageRecord[],
+  incoming: MessageRecord[],
+): MessageRecord[] {
+  if (incoming.length === 0) return rows;
+  const serverIds = new Set<string>();
+  const localIds = new Set<string>();
+  const ids = new Set<string>();
+  for (const r of incoming) {
+    ids.add(r.id);
+    if (r.server_message_id !== undefined) serverIds.add(r.server_message_id);
+    if (r.local_message_id !== undefined) localIds.add(r.local_message_id);
+  }
+  return rows.filter((m) => {
+    if (ids.has(m.id)) return true; // same row; the upsert replaces it
+    if (m.server_message_id !== undefined && serverIds.has(m.server_message_id)) return false;
+    if (m.local_message_id !== undefined && localIds.has(m.local_message_id)) return false;
+    return true;
+  });
 }
 
 function mergeByKey(a: MessageRecord[], b: MessageRecord[]): MessageRecord[] {
   const byKey = new Map<string, MessageRecord>();
-  for (const m of a) byKey.set(messageRecordKey(m), m);
-  for (const m of b) byKey.set(messageRecordKey(m), m); // b wins on collision
-  return [...byKey.values()].sort(compareTimestamp);
+  for (const m of a) byKey.set(messageIdOf(m), m);
+  for (const m of b) byKey.set(messageIdOf(m), m); // b wins on collision
+  return [...byKey.values()].sort(compareDisplayOrder);
 }
 
 function messageEquals(a: MessageRecord, b: MessageRecord): boolean {

@@ -31,7 +31,7 @@ export interface MergePushContext {
 
 /**
  * Decide what record to persist when an inbound push has the same
- * `record_key` as an existing cache row.
+ * identity as an existing cache row (same server or local message id).
  *
  * - `existing === undefined`: trivially return `incoming`.
  * - own-message + existing pending/sent: preserve local display fields,

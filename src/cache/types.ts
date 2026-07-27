@@ -2,11 +2,15 @@
 // terminology where it exists: `pts` for the per-channel sequence,
 // `server_message_id` and `local_message_id` as distinct identities
 // Local row identity: `MessageRecord.id` is this cache's equivalent of the
-// Rust SDK's SQLite `message.id` (CONVERSATION_DEPENDENCY_READINESS_SPEC
-// §3.3). It is generated locally, never changes across the ack, and never
-// goes on the wire. `record_key` stays a dedup index and is allowed to move
-// from `l:` to `s:`; a pending dependency keyed by a value that flips on ack
-// would simply lose its consumer.
+// Rust SDK's SQLite `message.id` (SDK_ENTITY_MODEL_SPEC §2.6.1). It is
+// generated locally, never changes across the ack, never goes on the wire,
+// and is the primary key of the message store.
+//
+// It used to share that job with a `record_key` derived from
+// `local_message_id` before the ack and `server_message_id` after — a primary
+// key that moved mid-flight. Every piece of rekey, identity-conflict and
+// repair machinery around the outbox existed to survive that one decision,
+// and all of it went away with it.
 //
 // Authority rules (don't move):
 //   - server pts always wins on conflict; cache is read-through, not authoritative
@@ -204,24 +208,19 @@ export interface ChannelRecord {
  *     Present for pending and sent rows whose origin was a local send.
  *
  * Display order (SDK_ENTITY_MODEL_SPEC §2.6.2) is the tuple
- *   (pending_group, pts, server_message_id, id)
- * and `timestamp` is a display value only.
- *
- * KNOWN DEVIATION: this SDK still sorts by `timestamp` in three places —
- * the `[channel_id+timestamp]` index, `compareTimestamp` in message-store,
- * and local paging. Wall clocks come from senders, so a skewed sender
- * misplaces its own messages permanently and two senders with unsynced
- * clocks can render the same conversation in a different order here than on
- * the app. Do not add new timestamp-ordered read paths; the convergence to
- * the tuple has to move all three at once, since changing one alone just
- * makes the layers disagree.
+ *   (pending_group, pts, server_message_id, local_order_seq)
+ * and `timestamp` is a display value only — wall clocks come from senders,
+ * so ordering by one lets a skewed sender misplace its own messages
+ * permanently and lets two clients render the same conversation differently.
+ * Every read path uses `compareDisplayOrder` / `displaySortKey`; there is no
+ * second ordering rule anywhere.
  */
 export interface MessageRecord {
   /** Stable local row identity. Assigned once on insert, unchanged by the
    *  ack, never serialized to the wire. Equivalent to Rust's SQLite
    *  `message.id`; the two SDKs agree on semantics and decimal encoding, not
-   *  on the value. Use it — never `local_message_id`, never `record_key` —
-   *  as the projection/dependency identity of a message. */
+   *  on the value. Use it — never `local_message_id` — as the
+   *  projection/dependency identity of a message. */
   id: IdString;
   channel_id: IdString;
   channel_type: number;
@@ -240,6 +239,14 @@ export interface MessageRecord {
    *  `historicalMessageToRecord` has always written it). Undefined only for
    *  pending rows, which have no ACK yet and sort ahead of everything. */
   pts?: IdString;
+  /** Local, persistent, monotonic insertion order (SDK_ENTITY_MODEL_SPEC
+   *  §2.6.2.1). Storage ordering only — never on the wire, never across
+   *  devices, no part in dedupe or identity.
+   *
+   *  It exists because `id` cannot serve as the tiebreaker here: this SDK's
+   *  is 128 random bits, so consecutive pending sends would come out
+   *  shuffled. Rust's is a monotonic rowid and needs no extra column. */
+  local_order_seq?: number;
   from_uid: IdString;
   /** Application content type ("text" / "image" / "voice" / ...). String
    *  form mirrors Rust SDK conventions; for FlatBuffers numeric tags use
@@ -327,9 +334,8 @@ export type OutboxStatus =
  */
 export interface OutboxEntry {
   outbox_id: IdString;
-  /** Stable `MessageRecord.id`. Absent only on rows written before v11. */
-  message_id?: IdString;
-  record_key: string;
+  /** Stable `MessageRecord.id` of the message this command delivers. */
+  message_id: IdString;
   channel_id: IdString;
   channel_type: number;
   local_message_id: IdString;
@@ -454,8 +460,9 @@ export interface ConversationPatch {
   channel_type: number;
   /** Inserted or content-changed records. */
   upserted: MessageRecord[];
-  /** Internal record_keys (see `messageRecordKey`) of records that were
-   *  removed from the buffer (revoke / pending → sent ACK swap). */
+  /** `MessageRecord.id`s removed from the buffer (revoke, or a window
+   *  replace that dropped a row). The ack no longer removes anything: it
+   *  updates the row in place, because the id does not change. */
   removed: string[];
   /** Whether this patch came from a remote RPC / push (true) vs
    *  cache / local-echo (false). */
@@ -500,14 +507,44 @@ export function nextLocalMessageRecordId(): IdString {
   return value.toString();
 }
 
-export function messageRecordKey(record: MessageRecord): string {
-  if (record.server_message_id !== undefined) {
-    return `s:${record.server_message_id}`;
-  }
-  if (record.local_message_id !== undefined) {
-    return `l:${record.local_message_id}`;
-  }
-  throw new Error('MessageRecord must have either server_message_id or local_message_id');
+/** Fixed-width encoding for storage sort keys (SDK_ENTITY_MODEL_SPEC
+ *  §2.6.2.2). IndexedDB compares compound index members lexicographically,
+ *  so a decimal string sorts "10" before "2"; 20 digits covers all of u64.
+ *  The human-readable fields keep their plain decimal form. */
+export const SORT_KEY_WIDTH = 20;
+
+export function encodeSortKey(value: string | number | undefined): string {
+  if (value === undefined) return '0'.repeat(SORT_KEY_WIDTH);
+  const digits = String(value);
+  return digits.length >= SORT_KEY_WIDTH
+    ? digits
+    : '0'.repeat(SORT_KEY_WIDTH - digits.length) + digits;
+}
+
+/** `0` for confirmed rows, `1` for pending — pending sorts last, i.e. at the
+ *  newest end of an ascending timeline. */
+export function pendingGroup(record: MessageRecord): number {
+  const sid = record.server_message_id;
+  return sid === undefined || sid === '' || sid === '0' ? 1 : 0;
+}
+
+/** The persisted compound sort key: `[channel_id, pending, pts, smid, seq]`.
+ *  Written on every row so IndexedDB can range-scan the timeline in display
+ *  order without loading and re-sorting it. */
+export function displaySortKey(record: MessageRecord): string {
+  return [
+    String(pendingGroup(record)),
+    encodeSortKey(record.pts),
+    encodeSortKey(record.server_message_id),
+    encodeSortKey(record.local_order_seq),
+  ].join('|');
+}
+
+/** The single comparator. Every in-memory ordering goes through it. */
+export function compareDisplayOrder(a: MessageRecord, b: MessageRecord): number {
+  const key = displaySortKey(a);
+  const other = displaySortKey(b);
+  return key < other ? -1 : key > other ? 1 : 0;
 }
 
 // ----- Wire helpers -----

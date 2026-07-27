@@ -21,22 +21,17 @@ import { decodeMessagePayloadEnvelope } from './codec/payload.js';
 import {
   CacheDB,
   MessageStore,
-  applyAckRekey as cacheApplyAckRekey,
   claimOutboxEntry,
   claimRepairRow,
   commitOutboxTransition,
   commitRepairTransition,
   deleteOutboxEntryIfOwner,
   deleteOutboxEntryIfRepairOwner,
-  deleteMessageByRecordKey as cacheDeleteMessageByRecordKey,
   deleteOutboxEntry,
   listDueOutboxEntries,
-  MessageIdentityConflictError,
+  applyAck as cacheApplyAck,
   ProjectionRehydrateRequiredError,
-  messageRecordKey,
-  isMessageIdFree,
   nextLocalMessageRecordId,
-  remintMessageIdentity,
   updateOutboxStatus,
   upsertMessage as cacheUpsertMessage,
   type MessageRecord,
@@ -457,40 +452,10 @@ export class OutboxEngine {
       this.warn('onIntegrityFault hook threw', { error: formatErr(e) });
     }
 
-    let overrideId: string | undefined;
-    if (entry.repair_kind === 'identity_conflict') {
-      try {
-        // Mint a replacement identity for OUR message and use it for both
-        // the stored pending row (when there is one) and the ACK below, so
-        // the two cannot disagree. The row that currently holds the
-        // contested id is never touched: it belongs to another
-        // conversation and may be a perfectly good message.
-        let candidate = nextLocalMessageRecordId();
-        for (let i = 0; i < 4 && !(await isMessageIdFree(this.db, candidate)); i += 1) {
-          candidate = nextLocalMessageRecordId();
-        }
-        overrideId = candidate;
-        // The pending row may not be on disk at all (the collision can
-        // arise from an id carried only in memory), in which case there is
-        // nothing to re-mint and the override alone does the job.
-        const reminted = await remintMessageIdentity(
-          this.db,
-          entry.channel_id,
-          entry.record_key,
-          candidate,
-        );
-        if (reminted !== undefined) {
-          this.store.upsertMessage(reminted, false);
-        }
-      } catch (e) {
-        this.warn('identity re-mint failed', {
-          outbox_id: entry.outbox_id,
-          error: formatErr(e),
-        });
-        return false;
-      }
-    }
-
+    // No identity re-mint arm any more. Ids stopped moving when the message
+    // store's primary key became the stable `id`, so there is nothing to
+    // contest and nothing to re-mint: the only repair left is re-hydrating a
+    // projection the server still has.
     const server_message_id = entry.acked_server_message_id;
     if (server_message_id === undefined) return false;
     try {
@@ -503,7 +468,6 @@ export class OutboxEngine {
           reason_code: 0,
         },
         { kind: 'repair', token: repairToken },
-        overrideId,
       );
       if (owned) {
         this.emit({ ...identityOf(entry), status: 'sent', server_message_id });
@@ -710,10 +674,10 @@ export class OutboxEngine {
    *     counter measures how many times the *server* refused the message
    *     and freezes the row when exhausted — spending it here would
    *     eventually freeze a message that was successfully delivered.
-   *   - **[`MessageIdentityConflictError`]** → `integrity_error`. Its own
-   *     contract says it means a broken migration, a corrupted database,
-   *     or a reused id. Retrying cannot fix any of those, so the row is
-   *     quarantined: no network, no retry loop, reported for repair.
+   *   - **[`ProjectionRehydrateRequiredError`]** → `integrity_error`. The
+   *     row is gone and its payload cannot rebuild it. Retrying cannot fix
+   *     that, so the row is quarantined: no network, no retry loop,
+   *     reported for repair.
    */
   private async handleLocalCommitFailure(
     entry: OutboxEntry,
@@ -736,39 +700,27 @@ export class OutboxEngine {
       acked_message_seq: resp.message_seq,
     };
 
-    if (
-      error instanceof MessageIdentityConflictError ||
-      error instanceof ProjectionRehydrateRequiredError
-    ) {
-      // Both are local-cache faults on an already-delivered message, so both
-      // quarantine rather than retry. They are NOT the same repair, though:
-      // a conflict means two rows contest one id and ours must be re-minted;
-      // a rehydrate means our row is simply gone and re-minting would
-      // discard the only link we still have. The repair actor branches on
-      // repair_kind, so recording the wrong one sends it down the wrong path.
-      const rehydrate = error instanceof ProjectionRehydrateRequiredError;
+    if (error instanceof ProjectionRehydrateRequiredError) {
+      // A local-cache fault on an already-delivered message: quarantine
+      // rather than retry, because retrying re-sends something the server
+      // already has. There is only one repair kind left — the row is gone
+      // and has to come back from the server. Identity conflicts went away
+      // with the moving primary key.
       const last_error = `integrity: ${formatErr(error)}`;
       this.warn('local cache integrity fault; message IS delivered, row quarantined', {
         outbox_id: entry.outbox_id,
-        repair_kind: rehydrate ? 'message_rehydrate' : 'identity_conflict',
-        conflicting_id: rehydrate
-          ? (error as ProjectionRehydrateRequiredError).message_id
-          : (error as MessageIdentityConflictError).id,
+        repair_kind: 'message_rehydrate',
+        conflicting_id: error.message_id,
         conflicting_channel_id: error.conflicting_channel_id,
         last_error,
       });
       const stored = await write({
         status: 'integrity_error',
         ...ackFields,
-        // Persist WHAT is broken, not just that something is. A repair pass
-        // after a restart only has the row: without the conflicting id and
-        // the channel that holds it, it cannot tell an id collision from
-        // any other fault, and re-syncing this channel would never touch
-        // the row that actually owns the id.
-        repair_kind: rehydrate ? 'message_rehydrate' : 'identity_conflict',
-        conflicting_id: rehydrate
-          ? (error as ProjectionRehydrateRequiredError).message_id
-          : (error as MessageIdentityConflictError).id,
+        // Persist WHAT is broken, not just that something is: a repair pass
+        // after a restart has only the row to go on.
+        repair_kind: 'message_rehydrate',
+        conflicting_id: error.message_id,
         conflicting_channel_id: error.conflicting_channel_id,
         // Not due for a send ever again; the repair pass picks it up by
         // status instead.
@@ -899,20 +851,10 @@ export class OutboxEngine {
      * claimed for sending in that state.
      */
     lease: { kind: 'send' | 'repair'; token: string } | { kind: 'none' },
-    /** Repair path: replacement local identity for this row. */
-    overrideId?: string,
   ): Promise<boolean> {
     const pendingRec = await this.resolvePending(entry);
-    // The key to retire is the one the row is *actually* stored under, not
-    // the one the command was written with. Those differ whenever the row
-    // has already been rekeyed once (an earlier ack, a repair): removing the
-    // stale key deletes nothing and the new record lands beside the old one
-    // — one logical message, two rows on screen. Only `message_id` survives
-    // that, which is why it is now the join (SDK_ENTITY_MODEL_SPEC §2.6.1).
-    const pendingKey = messageRecordKey(pendingRec);
     const acked: MessageRecord = {
       ...pendingRec,
-      ...(overrideId !== undefined ? { id: overrideId } : {}),
       server_message_id: resp.server_message_id,
       local_message_id: entry.local_message_id,
       pts: String(resp.message_seq),
@@ -920,9 +862,13 @@ export class OutboxEngine {
     };
 
     // IDB first: single rw transaction across messages + outbox so a tab
-    // refresh can't observe a half-applied ACK. The rekey is atomic and
-    // returns what it stored, so memory publishes what is durable — not an
-    // optimistic `sent` that a crash could roll back to forever-pending.
+    // refresh can't observe a half-applied ACK. The write returns what it
+    // stored, so memory publishes what is durable — not an optimistic `sent`
+    // that a crash could roll back to forever-pending.
+    //
+    // The message row is updated IN PLACE. Its primary key is the stable id,
+    // which the ack does not touch, so there is no delete-then-insert and
+    // therefore no window, no collision to detect and no identity to re-mint.
     //
     // A failure propagates to the caller, which turns it into a transient
     // retry. Catching it here and continuing would publish `sent` for a row
@@ -936,8 +882,9 @@ export class OutboxEngine {
     let owned = true;
     await this.db.transaction(
       'rw',
-      this.db.messages,
+      this.db.messages_v2,
       this.db.outbox,
+      this.db.cache_metadata,
       async () => {
         if (lease.kind === 'send') {
           owned = await deleteOutboxEntryIfOwner(this.db, entry.outbox_id, lease.token);
@@ -947,17 +894,7 @@ export class OutboxEngine {
           await deleteOutboxEntry(this.db, entry.outbox_id);
         }
         if (!owned) return;
-        durable = await cacheApplyAckRekey(
-          this.db,
-          entry.channel_id,
-          entry.channel_type,
-          pendingKey,
-          acked,
-          // A rehydrate replaced our row with a freshly imported history one.
-          // Its id is seconds old and referenced by nothing; ours is what the
-          // outbox and the UI have pointed at all along.
-          { callerIdWins: entry.repair_kind === 'message_rehydrate' },
-        );
+        durable = await cacheApplyAck(this.db, acked);
       },
     );
     if (!owned) {
@@ -967,12 +904,13 @@ export class OutboxEngine {
       return false;
     }
 
-    // Memory: pending → sent. Patches carry removed=[oldKey] when the
-    // record_key changes (always the case here: l: → s:).
+    // Memory: pending → sent, in place. The id does not change, so the
+    // patch carries no removal and any consumer holding it keeps holding
+    // the same message.
     this.store.replaceMessage(
       entry.channel_id,
       entry.channel_type,
-      pendingKey,
+      durable.id,
       durable,
       false,
     );
@@ -991,124 +929,79 @@ export class OutboxEngine {
    * can no longer see it by then).
    */
   private async resolvePending(entry: OutboxEntry): Promise<MessageRecord> {
-    // Prefer the stable link. `record_key` is derived from
-    // `local_message_id` before the ACK and `server_message_id` after, so a
-    // command that outlives its own ACK — a retry, a repair, a reload — can
-    // find the key it stored no longer matching the row it meant.
-    // `message_id` is `MessageRecord.id` and never moves
-    // (SDK_ENTITY_MODEL_SPEC §2.6.1). Rows written before v11 have no
-    // message_id, so the old join stays as the fallback.
-    // A command may only resolve to a message in its own channel and, when
-    // both name one, the same send.
-    //
-    // The match must be exact. An earlier version waved through rows with no
-    // `local_message_id`, which is every inbound message — so a damaged link
-    // could claim a message somebody else sent us. The storage layer refuses
-    // to overwrite it (applyAckRekey guards the id), but the command then
-    // dies in `integrity_error`: the corruption is contained and the user's
-    // message is lost anyway. Declining to claim it lets the send complete.
+    // A command may only resolve to a message of its own send: same channel,
+    // same `local_message_id`. The match is exact — a row without one is an
+    // inbound message we never sent, and letting a damaged link claim one is
+    // how somebody else's message gets rewritten as ours.
     const owns = (m: MessageRecord): boolean =>
       m.channel_id === entry.channel_id &&
       m.channel_type === entry.channel_type &&
       m.local_message_id === entry.local_message_id;
 
-    const inChannel = this.store.getMessages(entry.channel_id, entry.channel_type);
-    const memHit =
-      (entry.message_id !== undefined
-        ? inChannel.find((m) => m.id === entry.message_id && owns(m))
-        : undefined) ??
-      inChannel.find((m) => messageRecordKey(m) === entry.record_key && owns(m));
+    const memHit = this.store
+      .getMessages(entry.channel_id, entry.channel_type)
+      .find((m) => m.id === entry.message_id && owns(m));
     if (memHit) return memHit;
 
-    // On disk, in the same order, plus one more probe. Minting a new identity
-    // is the last resort, not the first miss: a re-mint on a row that does
-    // exist produces a second row for one logical message.
-    let cached =
-      entry.message_id !== undefined
-        ? await this.db.messages.where('id').equals(entry.message_id).first()
-        : undefined;
-    // Two different failures wear the same shape here and must not be
-    // conflated:
-    //   - the named row exists but is not ours  -> the LINK is wrong, and
-    //     reusing that id would land right back on the row we just declined;
-    //   - the named row is absent               -> the link is plausible and
-    //     rebuilding under it keeps the command attached to what the UI shows.
+    let cached = await this.db.messages_v2.get(entry.message_id);
     const linkIsWrong = cached !== undefined && !owns(cached);
     if (linkIsWrong) cached = undefined;
     if (cached === undefined) {
-      const byKey = await this.db.messages.get([entry.channel_id, entry.record_key]);
-      cached = byKey !== undefined && owns(byKey) ? byKey : undefined;
-    }
-    if (cached === undefined && entry.message_id === undefined) {
-      // Pre-v11 command whose row has already been rekeyed `l:` → `s:`, so
-      // its record_key resolves to nothing. `local_message_id` still
-      // identifies the row — the migration uses the same probe, and this
-      // covers commands that were queued between the upgrade and now.
-      cached = await this.db.messages
-        .where('[channel_id+record_key]')
-        .between([entry.channel_id, ''], [entry.channel_id, '\uffff'])
-        .filter((m) => m.local_message_id === entry.local_message_id)
+      // The optimistic row, found by the send's own identity. This is also
+      // how a cold start reattaches: memory is empty, but the row is not.
+      const byLocal = await this.db.messages_v2
+        .where('[channel_id+local_message_id]')
+        .equals([entry.channel_id, entry.local_message_id])
         .first();
+      if (byLocal !== undefined) cached = byLocal;
     }
-    if (cached === undefined && entry.message_id !== undefined) {
-      this.warn(
-        linkIsWrong
-          ? 'outbox command names a message belonging to something else; rebuilding under a new id'
-          : 'outbox command names a message that no longer exists; rebuilding under its id',
-        { outbox_id: entry.outbox_id, message_id: entry.message_id },
-      );
-    }
-    const rebuiltId = linkIsWrong
-      ? nextLocalMessageRecordId()
-      : (entry.message_id ?? nextLocalMessageRecordId());
+
     // Last resort before declaring damage: the row the server already has.
-    //
-    // A `message_rehydrate` repair fetches the message back by its server id,
-    // and what lands is a history row — a fresh random `id`, a
-    // `server_message_id`, and NO `local_message_id`, because history does
-    // not know which device's send it was. `owns()` therefore rejects it, and
-    // without this probe the repair would throw again on every pass until the
-    // row degraded to `local_data_error`: the rehydrate could never close.
-    //
-    // The rehydrated row is adopted, but its identity is not. The command's
-    // own `message_id` wins, because that is the id the UI, dependencies and
-    // the outbox all still point at; taking history's freshly minted one
-    // would detach every one of them.
+    // A `message_rehydrate` repair fetches the message back by its server
+    // id, and what lands is a history row — no `local_message_id`, because
+    // history does not know which device sent it — so `owns()` rejects it
+    // and only this probe can see it. The row is adopted; its identity is
+    // not, because the command's `message_id` is what the UI and the outbox
+    // still point at.
     if (cached === undefined && entry.acked_server_message_id !== undefined) {
-      const rehydrated = await this.db.messages
+      const rehydrated = await this.db.messages_v2
         .where('[channel_id+server_message_id]')
         .equals([entry.channel_id, entry.acked_server_message_id])
         .first();
       if (rehydrated !== undefined) {
-        return {
-          ...rehydrated,
-          id: entry.message_id ?? rehydrated.id,
-          local_message_id: entry.local_message_id,
-        };
+        return { ...rehydrated, id: entry.message_id, local_message_id: entry.local_message_id };
       }
     }
 
     if (cached === undefined && !isRebuildableFromPayload(entry.content_type)) {
-      // The row is gone and this payload cannot be turned back into one.
-      // Media payloads are structured bytes, not UTF-8: decoding them as text
-      // produces a garbled bubble, and an attachment rebuilt without its
-      // local file produces one that can never load. A broken message on
-      // screen is worse than a command the repair path can still act on, so
-      // this is surfaced as damage rather than papered over.
+      // Gone, and this payload cannot make it again: media payloads are
+      // structured bytes and attachments additionally need a local file the
+      // outbox row never carried. A broken bubble on screen is worse than a
+      // command the repair path can still act on.
       throw new ProjectionRehydrateRequiredError(
         entry.message_id,
         entry.channel_id,
         entry.content_type,
       );
     }
+    if (cached !== undefined) return cached;
+
+    if (linkIsWrong) {
+      this.warn('outbox command names a message belonging to something else', {
+        outbox_id: entry.outbox_id,
+        message_id: entry.message_id,
+      });
+    }
     return {
-      id: cached?.id ?? rebuiltId,
+      // A link we just rejected must not be reused as the rebuilt row's id:
+      // writing under it would overwrite the very row we declined to claim.
+      // An absent link is different — reusing it keeps the command attached
+      // to what the UI still shows.
+      id: linkIsWrong ? nextLocalMessageRecordId() : entry.message_id,
       channel_id: entry.channel_id,
       channel_type: entry.channel_type,
       local_message_id: entry.local_message_id,
       from_uid: entry.from_uid,
-      // Cache rows store the word form directly; the wire tag is only
-      // materialised in buildRequest.
       message_type: entry.content_type,
       content: decodeRebuildableContent(entry),
       payload: entry.payload,

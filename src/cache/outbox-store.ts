@@ -36,7 +36,7 @@ export async function putOutboxEntry(
  * matched the `outbox_id` (no-op).
  *
  * Mutable fields only: status, attempt_count, local_commit_failures,
- * next_attempt_at, last_error, updated_at, record_key. Immutable identity fields
+ * next_attempt_at, last_error, updated_at. Immutable identity fields
  * (outbox_id, channel_id/type, local_message_id, from_uid,
  * content_type, payload, created_at) intentionally cannot be patched
  * here — to change those, delete and re-put.
@@ -57,7 +57,6 @@ export interface OutboxStatusPatch {
   acked_message_seq?: number;
   next_attempt_at?: number;
   last_error?: string | null;
-  record_key?: string;
   updated_at?: number;
 }
 
@@ -90,7 +89,6 @@ function applyOutboxPatch(existing: OutboxEntry, patch: OutboxStatusPatch): Outb
     next.acked_message_seq = patch.acked_message_seq;
   }
   if (patch.next_attempt_at !== undefined) next.next_attempt_at = patch.next_attempt_at;
-  if (patch.record_key !== undefined) next.record_key = patch.record_key;
   if ('last_error' in patch) {
     if (patch.last_error === null || patch.last_error === undefined) {
       delete next.last_error;

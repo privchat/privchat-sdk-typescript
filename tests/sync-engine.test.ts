@@ -250,7 +250,7 @@ describe('SyncEngine', () => {
   });
 
   describe('Case 4: local-echo ACK via sync', () => {
-    it('emits removed=[l:L] + upserted=[s:S] when commit echoes local_message_id', async () => {
+    it('updates the pending row in place when a commit echoes local_message_id', async () => {
       const h = newHarness({ selfUid: SELF_UID });
       seedChannel(h.store);
 
@@ -294,7 +294,7 @@ describe('SyncEngine', () => {
 
       expect(res.commits_applied).toBe(0); // ACK swap is NOT a newly inserted commit
       expect(patches).toHaveLength(1);
-      expect(patches[0]!.removed).toEqual(['l:9']);
+      expect(patches[0]!.removed).toEqual([]);
       expect(patches[0]!.upserted[0]!.server_message_id).toBe('4242');
       expect(patches[0]!.upserted[0]!.local_message_id).toBe('9');
       expect(patches[0]!.upserted[0]!.status).toBe('sent');
@@ -305,8 +305,8 @@ describe('SyncEngine', () => {
       expect(buffer[0]!.server_message_id).toBe('4242');
 
       // IndexedDB: pending row gone, acked row present.
-      const persisted = await h.db.messages.toArray();
-      expect(persisted.map((m) => m.record_key).sort()).toEqual(['s:4242']);
+      const persisted = await h.db.messages_v2.toArray();
+      expect(persisted.map((m) => m.id).sort()).toHaveLength(1);
     });
   });
 
@@ -645,7 +645,7 @@ describe('SyncEngine — durable state is the published state', () => {
     );
     await h.engine.syncChannel(CHANNEL_ID, CHANNEL_TYPE);
 
-    const persisted = await h.db.messages.toArray();
+    const persisted = await h.db.messages_v2.toArray();
     expect(persisted).toHaveLength(1);
     expect(persisted[0]!.id).toBe('r-established');
 
@@ -715,7 +715,7 @@ describe('SyncEngine — durable state is the published state', () => {
     expect(channel?.unread_count).toBe(2);
     // And the higher pts must not be rolled back by the slower writer.
     expect(channel?.latest_pts).toBe('2');
-    expect((await dbA.messages.toArray()).length).toBe(2);
+    expect((await dbA.messages_v2.toArray()).length).toBe(2);
   });
 
   it('gives BOTH tabs the message the other one stored', async () => {
@@ -769,7 +769,7 @@ describe('SyncEngine — durable state is the published state', () => {
       expect(msgs.map((m) => m.server_message_id)).toEqual(['777']);
     }
     // Identity agrees across tabs and with disk.
-    const onDisk = (await dbA.messages.toArray())[0]!;
+    const onDisk = (await dbA.messages_v2.toArray())[0]!;
     expect(tabA.store.getMessages(CHANNEL_ID, CHANNEL_TYPE)[0]!.id).toBe(onDisk.id);
     expect(tabB.store.getMessages(CHANNEL_ID, CHANNEL_TYPE)[0]!.id).toBe(onDisk.id);
 

@@ -200,21 +200,21 @@ describe('replaceMessage (local-echo ack flow)', () => {
     expect(s.getMessages('12345', 1).map((m) => m.server_message_id)).toEqual(['srv-100']);
   });
 
-  it('no removed entry when record_key is unchanged', () => {
+  it('no removed entry when the id is unchanged', () => {
     const s = new MessageStore();
     const patches: ConversationPatch[] = [];
     s.observeConversation('12345', 1, (_, p) => patches.push(p));
 
     s.upsertMessage(msg('1', { status: 'pending' }), false);
-    s.replaceMessage('12345', 1, 's:s-1', msg('1', { status: 'sent' }), true);
+    s.replaceMessage('12345', 1, msg('1').id, msg('1', { status: 'sent' }), true);
 
     expect(patches[1]!.removed).toEqual([]);
   });
 
-  it('dedupes by NEW record_key too — handles the push-arrived-before-ACK race', () => {
+  it('collapses the self-push copy when the ACK lands after it', () => {
     // Setup: push for our own message arrived first (status=received,
     // content=''). Then the local-echo ACK swap runs replaceMessage with
-    // pendingKey='l:local-1' and acked.record_key='s:srv-100'. Without
+    // pendingKey='l:local-1' and acked.id='s:srv-100'. Without
     // the new-key dedup the buffer would end up with TWO rows under
     // record_key='s:srv-100' (the push + the acked).
     const s = new MessageStore();
@@ -254,7 +254,7 @@ describe('replaceMessage (local-echo ack flow)', () => {
       server_message_id: 'srv-100',
       status: 'sent',
     };
-    s.replaceMessage('12345', 1, 'l:local-1', acked, false);
+    s.replaceMessage('12345', 1, 'r-local-1', acked, false);
 
     // Buffer must contain exactly one row (the acked) — no duplicate
     // under s:srv-100, no leftover pending under l:local-1.
@@ -273,9 +273,9 @@ describe('removeMessage (revoke / delete)', () => {
     s.upsertMessage(msg('1'), false);
     s.upsertMessage(msg('2'), false);
     s.observeConversation('12345', 1, (_, p) => patches.push(p));
-    s.removeMessage('12345', 1, 's:s-1');
+    s.removeMessage('12345', 1, msg('1').id);
     expect(patches).toHaveLength(1);
-    expect(patches[0]!.removed).toEqual(['s:s-1']);
+    expect(patches[0]!.removed).toEqual([msg('1').id]);
     expect(patches[0]!.upserted).toEqual([]);
     expect(s.getMessages('12345', 1).map((m) => m.server_message_id)).toEqual(['s-2']);
   });

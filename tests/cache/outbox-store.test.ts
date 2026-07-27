@@ -48,7 +48,7 @@ function entry(
 ): OutboxEntry {
   return {
     outbox_id,
-    record_key: `l:${outbox_id}`,
+    message_id: `m-${outbox_id}`,
     channel_id: '100',
     channel_type: 1,
     local_message_id: outbox_id, // 5C: outbox_id === local_message_id
@@ -344,7 +344,7 @@ describe('Dexie v2 migration', () => {
 
     // All four tables independently readable.
     expect((await db.channels.toArray()).map((c) => c.channel_id)).toEqual(['c1']);
-    expect((await db.messages.toArray()).map((m) => m.server_message_id)).toEqual(['s-1']);
+    expect((await db.messages_v2.toArray()).map((m) => m.server_message_id)).toEqual(['s-1']);
     expect((await db.sync_state.toArray()).map((s) => s.channel_id)).toEqual(['c1']);
     expect((await db.outbox.toArray()).map((o) => o.outbox_id)).toEqual(['o-1']);
   });

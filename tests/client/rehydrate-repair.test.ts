@@ -109,7 +109,6 @@ describe('message_rehydrate repair', () => {
     await putOutboxEntry(db, {
       outbox_id: 'cmd-rehydrate',
       message_id: STABLE_ID,
-      record_key: 'l:cmd-rehydrate',
       channel_id: CHANNEL_ID,
       channel_type: 1,
       local_message_id: 'cmd-rehydrate',
@@ -144,7 +143,7 @@ describe('message_rehydrate repair', () => {
     expect(await getOutboxEntry(db, 'cmd-rehydrate')).toBeUndefined();
     // 5. The row is back, under the id everything else still points at —
     //    not the fresh one history minted for it.
-    const rows = await db.messages.toArray();
+    const rows = await db.messages_v2.toArray();
     const recovered = rows.find((m) => m.server_message_id === SERVER_MESSAGE_ID);
     expect(recovered).toBeDefined();
     expect(recovered?.id).toBe(STABLE_ID);

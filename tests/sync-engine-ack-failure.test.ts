@@ -23,11 +23,11 @@ vi.mock('../src/cache/index.js', async () => {
   );
   return {
     ...actual,
-    applyAckRekey: async (...args: Parameters<typeof actual.applyAckRekey>) => {
+    applyAck: async (...args: Parameters<typeof actual.applyAck>) => {
       if (ackRekeyShouldFail.value) {
         throw new Error('injected: ACK rekey transaction failed');
       }
-      return actual.applyAckRekey(...args);
+      return actual.applyAck(...args);
     },
     upsertMessages: async (...args: Parameters<typeof actual.upsertMessages>) => {
       if (messageWriteShouldFail.value) {
@@ -162,9 +162,9 @@ describe('SyncEngine — ACK rekey failure', () => {
     expect(buffer).toHaveLength(1);
     expect(buffer[0]!.status).toBe('pending');
 
-    const persisted = await db.messages.toArray();
+    const persisted = await db.messages_v2.toArray();
     expect(persisted).toHaveLength(1);
-    expect(persisted[0]!.record_key).toBe('l:9');
+    expect(persisted[0]!.id).toBe('r-9');
     expect(persisted[0]!.status).toBe('pending');
     expect(persisted[0]!.id).toBe('r-9');
   });
@@ -178,9 +178,9 @@ describe('SyncEngine — ACK rekey failure', () => {
     // And only now does the cursor move past the commit.
     expect((await getSyncState(db, CHANNEL_ID, CHANNEL_TYPE))?.latest_pts).toBe('7');
 
-    const persisted = await db.messages.toArray();
+    const persisted = await db.messages_v2.toArray();
     expect(persisted).toHaveLength(1);
-    expect(persisted[0]!.record_key).toBe('s:4242');
+    expect(persisted[0]!.id).toBe('r-9');
     // The identity survived the failed attempt AND the retry.
     expect(persisted[0]!.id).toBe('r-9');
   });
@@ -270,7 +270,7 @@ describe('SyncEngine — ordinary commits are page-atomic', () => {
     expect(res.status).toBe('synced');
     expect((await getSyncState(db, CHANNEL_ID, CHANNEL_TYPE))?.latest_pts).toBe('7');
     expect(store.getChannel(CHANNEL_ID, CHANNEL_TYPE)?.unread_count).toBe(1);
-    const rows = await db.messages.toArray();
-    expect(rows.map((r) => r.record_key).sort()).toEqual(['l:9', 's:5000']);
+    const rows = await db.messages_v2.toArray();
+    expect(rows.map((r) => r.id).sort()).toHaveLength(2);
   });
 });

@@ -27,9 +27,9 @@ vi.mock('../../src/cache/index.js', async () => {
       if (fail.pendingWrite) throw new Error('injected: pending write failed');
       return actual.upsertMessage(...args);
     },
-    applyAckRekey: async (...args: Parameters<typeof actual.applyAckRekey>) => {
+    applyAck: async (...args: Parameters<typeof actual.applyAck>) => {
       if (fail.ackRekey) throw new Error('injected: ack rekey failed');
-      return actual.applyAckRekey(...args);
+      return actual.applyAck(...args);
     },
   };
 });
@@ -222,9 +222,9 @@ describe('sendTextMessage — ACK cannot be persisted', () => {
     await send().catch(() => undefined);
 
     const reopened = new CacheDB(dbName);
-    const rows = await reopened.messages.toArray();
+    const rows = await reopened.messages_v2.toArray();
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.record_key).toBe('l:9007199254740994');
+    expect(rows[0]!.local_message_id).toBe('9007199254740994');
     expect(rows[0]!.status).toBe('pending');
     reopened.close();
   });

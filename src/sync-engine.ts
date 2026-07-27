@@ -8,7 +8,7 @@
 //     migrate when server u64-as-string ships).
 //   - All snowflake / pts ids cross the engine boundary as `IdString`
 //     (decimal strings); BigInt comparisons are the ONLY numeric ops.
-//   - Identity is `record_key` derived from server_message_id ||
+//   - Identity is the stable `id`; network lookups go through
 //     local_message_id (5B-0 invariant). The engine never invents a
 //     `message_id` field on MessageRecord.
 //   - Unread bumps count ONLY commits that hit the "newly inserted"
@@ -22,14 +22,12 @@ import { resolveCanonicalTimelineEvent } from './codec/timeline.js';
 import { contentTypeFromWireTag } from './content-type.js';
 import {
   clearChannelMessages as cacheClearChannelMessages,
-  applyAckRekey,
-  deleteMessageByRecordKey as cacheDeleteMessageByRecordKey,
+  applyAck,
   getSyncState as cacheGetSyncState,
   upsertMessages as cacheUpsertMessages,
   upsertSyncState as cacheUpsertSyncState,
   CacheDB,
   MessageStore,
-  messageRecordKey,
   nextLocalMessageRecordId,
   type ChannelRecord,
   type MessageRecord,
@@ -41,13 +39,13 @@ import type {
 } from './api-types.js';
 import type { SdkEvent } from './events.js';
 
-/** Row shape as persisted (`MessageRecord` + its derived `record_key`). */
-type StoredMessageRow = MessageRecord & { record_key: string };
+/** Row shape as persisted (`MessageRecord` + its derived `sort_key`). */
+type StoredMessageRow = MessageRecord & { sort_key: string };
 
-/** Drop the storage-only `record_key`; it is derived, never published. */
+/** Drop the storage-only `sort_key`; it is derived, never published. */
 function stripRecordKey(row: StoredMessageRow): MessageRecord {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { record_key: _ignored, ...rest } = row;
+  const { sort_key: _ignored, ...rest } = row;
   return rest;
 }
 
@@ -496,9 +494,10 @@ export class SyncEngine {
     // another tab already stored is only visible on disk.
     const page = await db.transaction(
       'rw',
-      db.messages,
+      db.messages_v2,
       db.channels,
       db.sync_state,
+      db.cache_metadata,
       async (): Promise<PageCommit> => {
         // Disk is authoritative — that is what makes concurrent tabs safe.
         // The memory fallback covers the window where a channel exists in
@@ -514,20 +513,33 @@ export class SyncEngine {
 
         // Only the keys this page can touch — bounded by page size, so the
         // read stays cheap regardless of how long the conversation is.
-        const serverKeys = [...new Set(commits.map((c) => `s:${c.server_msg_id}`))];
-        const wanted = new Set<string>(serverKeys);
-        for (const c of commits) {
-          if (c.local_message_id !== undefined) wanted.add(`l:${c.local_message_id}`);
-        }
-        const keys = [...wanted];
-        const existingRows = await db.messages.bulkGet(
-          keys.map((k) => [channel_id, k] as [string, string]),
-        );
+        // Look rows up by the two network identities. `id` cannot be used
+        // here: a commit arriving from the wire has no local id yet, and the
+        // whole point of the lookup is to find whether a row for that
+        // message already exists.
+        const serverIds = [...new Set(commits.map((c) => String(c.server_msg_id)))];
+        const localIds = [
+          ...new Set(
+            commits
+              .filter((c) => c.local_message_id !== undefined)
+              .map((c) => String(c.local_message_id)),
+          ),
+        ];
         const onDisk = new Map<string, StoredMessageRow>();
-        keys.forEach((k, i) => {
-          const row = existingRows[i];
-          if (row !== undefined) onDisk.set(k, row);
-        });
+        for (const sid of serverIds) {
+          const row = await db.messages_v2
+            .where('[channel_id+server_message_id]')
+            .equals([channel_id, sid])
+            .first();
+          if (row !== undefined) onDisk.set(`s:${sid}`, row);
+        }
+        for (const lid of localIds) {
+          const row = await db.messages_v2
+            .where('[channel_id+local_message_id]')
+            .equals([channel_id, lid])
+            .first();
+          if (row !== undefined) onDisk.set(`l:${lid}`, row);
+        }
 
         let newlyInserted = 0;
         let unreadBump = 0;
@@ -559,8 +571,9 @@ export class SyncEngine {
               const acked: MessageRecord = {
                 ...next,
                 // Identity is the pending row's, not the one minted for the
-                // commit: same local row, re-keyed by the ACK.
+                // commit: the ACK updates that row, it does not create one.
                 id: pending.id,
+                local_order_seq: pending.local_order_seq,
                 local_message_id: pending.local_message_id,
                 status: 'sent',
                 payload: pending.payload,
@@ -597,15 +610,15 @@ export class SyncEngine {
           }
         }
 
-        // Write rows first, and keep what the store actually persisted:
-        // `stampIdentity` may have replaced a freshly minted `id` with the
-        // one already on disk. Publishing our own copies instead would put a
-        // different id in memory than in the database — the identity split
-        // this mechanism exists to prevent.
+        // Write rows first, and keep what the store actually persisted: the
+        // write may have adopted the id and order already on disk. Publishing
+        // our own copies instead would put a different id in memory than in
+        // the database — the identity split this mechanism exists to
+        // prevent.
         const durableAcked: Array<{ localKey: string; acked: MessageRecord }> = [];
         for (const { localKey, acked } of ackSwaps) {
-          const stored = await applyAckRekey(db, channel_id, channel_type, localKey, acked);
-          durableAcked.push({ localKey, acked: stored });
+          const stored = await applyAck(db, acked);
+          durableAcked.push({ localKey: stored.id, acked: stored });
         }
         await cacheUpsertMessages(db, toUpsert);
 
@@ -660,12 +673,15 @@ export class SyncEngine {
         // leave this tab's timeline missing the message. The same applies
         // to the channel: another tab may have advanced it further than we
         // did, and memory should reflect the durable truth either way.
-        const finalRows = await db.messages.bulkGet(
-          serverKeys.map((k) => [channel_id, k] as [string, string]),
-        );
-        const authoritative = finalRows
-          .filter((r): r is StoredMessageRow => r !== undefined)
-          .map(stripRecordKey);
+        const finalRows: StoredMessageRow[] = [];
+        for (const sid of serverIds) {
+          const row = await db.messages_v2
+            .where('[channel_id+server_message_id]')
+            .equals([channel_id, sid])
+            .first();
+          if (row !== undefined) finalRows.push(row);
+        }
+        const authoritative = finalRows.map(stripRecordKey);
         const finalChannel = (await db.channels.get(channel_id)) ?? nextChannel;
 
         return {
@@ -684,7 +700,7 @@ export class SyncEngine {
       store.replaceMessage(channel_id, channel_type, localKey, acked, true);
     }
     if (page.upserts.length > 0) {
-      // Single patch from MessageStore (already dedupes via record_key).
+      // Single patch from MessageStore (already dedupes by identity).
       store.upsertMessages(channel_id, channel_type, page.upserts, true);
     }
     if (page.nextChannel !== undefined) {

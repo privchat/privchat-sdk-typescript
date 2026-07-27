@@ -148,7 +148,8 @@ describe('sendTextMessage offline → queued', () => {
     expect(entry!.status).toBe('pending');
     expect(entry!.attempt_count).toBe(0);
     expect(entry!.last_error).toBeUndefined();
-    expect(entry!.record_key).toBe('l:9007199254740992');
+    // The command points at the local echo by its stable id.
+    expect(entry!.message_id).toBeTypeOf('string');
     expect(entry!.content_type).toBe('text');
     // Payload preserved verbatim (UTF-8 of "queued-test").
     expect(new TextDecoder().decode(entry!.payload)).toBe('queued-test');

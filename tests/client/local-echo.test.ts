@@ -139,7 +139,10 @@ describe('sendTextMessage — cache-enabled, online happy path', () => {
 
     // ACK patch: pending row removed, sent row upserted.
     expect(patches).toHaveLength(2);
-    expect(patches[1]!.removed).toEqual(['l:9007199254740992']);
+    // The ack updates the row in place now — the id does not change, so
+    // nothing is removed. Under the old moving-key model this carried the
+    // retired `l:` key.
+    expect(patches[1]!.removed).toEqual([]);
     expect(patches[1]!.upserted[0]!.server_message_id).toBe('700110001');
     expect(patches[1]!.upserted[0]!.status).toBe('sent');
 
