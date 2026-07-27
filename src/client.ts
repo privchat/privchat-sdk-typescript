@@ -828,16 +828,35 @@ export class PrivchatClient {
               onIntegrityFault: async (fault) => {
                 // The engine calls this on every repair pass, then replays
                 // the stored ACK — so this must be the repair itself, and
-                // must finish before it returns. A channel resync re-reads
-                // the authoritative timeline, which is what can clear the
-                // conflicting row.
+                // must finish before it returns.
                 // eslint-disable-next-line no-console
                 console.error('[privchat] local cache integrity fault', fault);
                 try {
-                  await this.syncChannel(fault.channel_id, fault.channel_type);
+                  if (fault.repair_kind === 'message_rehydrate') {
+                    // Our row is gone. A channel sync cannot bring it back:
+                    // `sync/get_difference` only returns commits after the
+                    // cursor, and the cursor has already passed this message.
+                    // Fetch it directly by its server id instead — that path
+                    // is anchored, not cursor-relative — and let the write
+                    // land in the cache, which is the repair.
+                    await this.jumpToMessageContext(
+                      fault.channel_id,
+                      fault.channel_type,
+                      fault.server_message_id,
+                      { beforeLimit: 0, afterLimit: 0 },
+                    );
+                  } else {
+                    // A contested id: re-reading the authoritative timeline is
+                    // what lets the conflicting row be resolved and ours
+                    // re-minted.
+                    await this.syncChannel(fault.channel_id, fault.channel_type);
+                  }
                 } catch (e) {
                   // eslint-disable-next-line no-console
-                  console.error('[privchat] integrity repair sync failed', e);
+                  console.error('[privchat] integrity repair failed', {
+                    repair_kind: fault.repair_kind,
+                    error: e,
+                  });
                 }
               },
             },
@@ -1549,8 +1568,12 @@ export class PrivchatClient {
     // Encode reply_to / mentions into the SAME FlatBuffers envelope media
     // uses. Plain text stays raw UTF-8 bytes (server's text fallback).
     let payload: Uint8Array;
+    // Recorded, not inferred: recovery must never have to guess this.
+    let payloadEncoding: 'raw_utf8' | 'message_envelope';
     if (input.payload !== undefined) {
       payload = input.payload;
+      // Pre-encoded by a media/structured caller — always an envelope.
+      payloadEncoding = 'message_envelope';
     } else if (
       embeddedEnvelope !== undefined ||
       input.reply_to_message_id !== undefined ||
@@ -1562,8 +1585,10 @@ export class PrivchatClient {
         mentioned_user_ids: input.mentioned_user_ids ?? [],
         reply_to_message_id: input.reply_to_message_id,
       });
+      payloadEncoding = 'message_envelope';
     } else {
       payload = new TextEncoder().encode(input.content);
+      payloadEncoding = 'raw_utf8';
     }
     const localMsgId = input.local_message_id ?? generateLocalMessageId();
     const req: SendMessageRequest = {
@@ -1639,7 +1664,15 @@ export class PrivchatClient {
     //    reconnect window, post-`disconnect()` state. The reconnect
     //    flush hook (5C-1d) will pick the row up later.
     if (this.state !== 'authenticated') {
-      await this.enqueueOutboxRow(localMsgId, input, payload, 'pending', undefined, pending.id);
+      await this.enqueueOutboxRow(
+        localMsgId,
+        input,
+        payload,
+        'pending',
+        undefined,
+        pending.id,
+        payloadEncoding,
+      );
       return {
         status: 'queued',
         local_message_id: localMsgId,
@@ -1661,6 +1694,7 @@ export class PrivchatClient {
         'failed',
         formatTransientError(e),
         pending.id,
+        payloadEncoding,
       );
       return {
         status: 'queued',
@@ -1680,6 +1714,7 @@ export class PrivchatClient {
         'failed',
         `rejected: code=${resp.reason_code}`,
         pending.id,
+        payloadEncoding,
       );
       return {
         status: 'queued',
@@ -1898,12 +1933,14 @@ export class PrivchatClient {
     last_error?: string,
     /** Stable `MessageRecord.id` of the local echo this command delivers. */
     message_id?: string,
+    payload_encoding?: 'raw_utf8' | 'message_envelope',
   ): Promise<void> {
     if (this.cacheDb === null) return;
     const now = Date.now();
     const entry: OutboxEntry = {
       outbox_id,
       message_id,
+      payload_encoding,
       record_key: `l:${outbox_id}`,
       channel_id: input.channel_id,
       channel_type: input.channel_type,

@@ -61,6 +61,40 @@ const SAMPLE_INPUT = {
   local_message_id: '9007199254740991',
 } as const;
 
+describe('sendTextMessage records how it encoded the payload', () => {
+  // The encoding is written at enqueue precisely so recovery never has to
+  // guess it. If the send path mislabels it, a cold-start rebuild puts either
+  // mojibake or framing bytes on screen, and no amount of care in the engine
+  // can tell.
+  it('labels plain text raw_utf8 and reply/mention message_envelope', async () => {
+    const t = new FakeTransport();
+    client = new PrivchatClient({
+      transport: t,
+      cache: { enabled: true, dbName: `queued-encoding-${++dbCounter}` },
+    });
+
+    await client.sendTextMessage({ ...SAMPLE_INPUT, local_message_id: 'plain-1' });
+    await client.sendTextMessage({
+      ...SAMPLE_INPUT,
+      local_message_id: 'reply-1',
+      reply_to_message_id: '777',
+    });
+    await client.sendTextMessage({
+      ...SAMPLE_INPUT,
+      local_message_id: 'mention-1',
+      mentioned_user_ids: ['4242'],
+    });
+
+    const plain = await getOutboxByLocalMessageId((client as any).cacheDb, 'plain-1');
+    const reply = await getOutboxByLocalMessageId((client as any).cacheDb, 'reply-1');
+    const mention = await getOutboxByLocalMessageId((client as any).cacheDb, 'mention-1');
+
+    expect(plain?.payload_encoding).toBe('raw_utf8');
+    expect(reply?.payload_encoding).toBe('message_envelope');
+    expect(mention?.payload_encoding).toBe('message_envelope');
+  });
+});
+
 describe('sendTextMessage offline → queued', () => {
   it('returns queued without hitting the wire when client is not authenticated', async () => {
     const t = new FakeTransport();

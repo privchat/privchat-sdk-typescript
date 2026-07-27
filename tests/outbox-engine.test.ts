@@ -272,7 +272,14 @@ describe('OutboxEngine — message link is the stable id', () => {
       mentioned_user_ids: ['4242'],
       reply_to_message_id: '777',
     });
-    await putOutboxEntry(h.db, row('RPL', { content_type: 'text', payload: envelope }));
+    await putOutboxEntry(
+      h.db,
+      row('RPL', {
+        content_type: 'text',
+        payload: envelope,
+        payload_encoding: 'message_envelope',
+      }),
+    );
 
     const result = await h.engine.flushOutbox();
     expect(result.sent).toBe(1);
@@ -284,6 +291,48 @@ describe('OutboxEngine — message link is the stable id', () => {
     // And the bytes that go on the wire are still the envelope, so the reply
     // reference survives the rebuild.
     expect(rebuilt?.payload).toEqual(envelope);
+  });
+
+  it('tells the host which repair a fault needs', async () => {
+    const db = newDb();
+    const store = new MessageStore();
+    const faults: Array<Record<string, unknown>> = [];
+    const engine = new OutboxEngine({
+      db,
+      store,
+      sendMessage: async () => okResp('s-IMG', 42),
+      getConnectionState: () => 'authenticated',
+      now: () => NOW,
+      warn: () => {},
+      hooks: { onIntegrityFault: (f) => void faults.push({ ...f }) },
+    });
+    await putOutboxEntry(
+      db,
+      row('IMG', { content_type: 'image', payload: new Uint8Array([1, 2, 3]) }),
+    );
+
+    await engine.flushOutbox();
+    await engine.flushOutbox(); // repair pass
+
+    // Without repair_kind the host cannot tell "re-mint after a resync" from
+    // "fetch this exact message back" — and a resync will not return it once
+    // the sync cursor has moved past it.
+    expect(faults.some((f) => f.repair_kind === 'message_rehydrate')).toBe(true);
+    expect(faults.every((f) => f.server_message_id === 's-IMG')).toBe(true);
+  });
+
+  it('falls back to sniffing only for rows written before payload_encoding existed', async () => {
+    const h = newHarness();
+    h.setSendImpl(async () => okResp('s-LEG', 45));
+    // No payload_encoding: an outbox row from an older build. Sniffing is
+    // wrong as a general rule but is all these rows can offer.
+    await putOutboxEntry(h.db, row('LEG'));
+
+    expect((await h.engine.flushOutbox()).sent).toBe(1);
+    const rebuilt = (await h.db.messages.toArray()).find(
+      (m) => m.local_message_id === 'LEG',
+    );
+    expect(rebuilt?.content).toBe('body-LEG');
   });
 
   it('sends a lost media row to repair instead of rebuilding it as text', async () => {
@@ -316,7 +365,7 @@ describe('OutboxEngine — message link is the stable id', () => {
   it('still rebuilds a lost text row, whose payload really is the body', async () => {
     const h = newHarness();
     h.setSendImpl(async () => okResp('s-TXT', 43));
-    await putOutboxEntry(h.db, row('TXT'));
+    await putOutboxEntry(h.db, row('TXT', { payload_encoding: 'raw_utf8' }));
 
     const result = await h.engine.flushOutbox();
     expect(result.sent).toBe(1);

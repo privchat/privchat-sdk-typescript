@@ -128,6 +128,13 @@ export interface OutboxIntegrityFault {
   channel_type: number;
   /** The message IS on the server — recovery must not re-send it. */
   server_message_id: string;
+  /** Which repair this fault needs. The host must branch on it: a
+   *  `identity_conflict` is resolved by re-syncing the channel so the
+   *  contested id can be re-minted; a `message_rehydrate` means our row is
+   *  simply gone, and a channel sync will NOT bring it back once
+   *  `latest_pts` has passed it — it needs a targeted fetch anchored on
+   *  `server_message_id`, and must not re-mint. */
+  repair_kind?: 'identity_conflict' | 'message_rehydrate';
   /** Local row id that could not be reconciled. */
   conflicting_id?: string;
   /** Channel holding the row that already owns that id. Reported for
@@ -443,6 +450,7 @@ export class OutboxEngine {
         conflicting_id: entry.conflicting_id,
         conflicting_channel_id: entry.conflicting_channel_id,
         error: entry.last_error ?? 'integrity fault',
+        repair_kind: entry.repair_kind,
         repair_attempt: attempt,
       });
     } catch (e) {
@@ -1071,7 +1079,7 @@ export class OutboxEngine {
       // Cache rows store the word form directly; the wire tag is only
       // materialised in buildRequest.
       message_type: entry.content_type,
-      content: decodeRebuildableContent(entry.payload),
+      content: decodeRebuildableContent(entry),
       payload: entry.payload,
       timestamp: entry.created_at,
       status: 'pending',
@@ -1094,32 +1102,41 @@ function isRebuildableFromPayload(contentType: string): boolean {
 
 /** Recover the body from a rebuildable payload.
  *
- * Text is not one encoding. Plain text is raw UTF-8, but the moment it
- * carries a reply or a mention the send path wraps it in the same
- * FlatBuffers envelope media uses — the server only decodes the typed
- * envelope, so a reply cannot travel any other way. Decoding those as UTF-8
- * gives mojibake, which is what a rebuilt reply used to look like.
+ * Text is not one encoding: plain text is raw UTF-8, while text carrying a
+ * reply or a mention is wrapped in the same FlatBuffers envelope media uses,
+ * because the server only decodes the typed envelope.
  *
- * Envelope first, raw bytes second. The reply/mention references themselves
- * live in `payload`, which is stored unchanged, so they survive the rebuild
- * even though `MessageRecord` has no field for them.
+ * Which one it is comes off the row (`payload_encoding`), recorded when the
+ * send path chose the branch. It is not inferred: FlatBuffers reads arbitrary
+ * bytes without complaint, so "try to decode and see" cannot separate an
+ * envelope from raw text, and a legitimately empty body looks exactly like a
+ * failed parse. Guessing here is how a rebuilt reply became mojibake.
  *
- * "Did it throw" is not the test. FlatBuffers reads arbitrary bytes without
- * complaint — raw UTF-8 decodes "successfully" into an envelope with empty
- * content — so a non-empty body is what distinguishes a real envelope. The
- * one case this mis-handles is a reply whose text is empty, which the send
- * path cannot produce: content comes from user input.
+ * The reply/mention references live in `payload`, stored unchanged, so they
+ * survive the rebuild even though `MessageRecord` has no field for them.
  */
-function decodeRebuildableContent(payload: Uint8Array): string {
-  try {
-    const envelope = decodeMessagePayloadEnvelope(payload);
-    if (typeof envelope.content === 'string' && envelope.content.length > 0) {
-      return envelope.content;
-    }
-  } catch {
-    // Not an envelope at all: plain text took the raw-UTF-8 branch.
+function decodeRebuildableContent(entry: OutboxEntry): string {
+  const raw = (): string => new TextDecoder().decode(entry.payload);
+  switch (entry.payload_encoding) {
+    case 'raw_utf8':
+      return raw();
+    case 'message_envelope':
+      // Declared an envelope, so a decode failure is damage, not a hint to
+      // fall back — falling back would put the framing bytes on screen.
+      return decodeMessagePayloadEnvelope(entry.payload).content ?? '';
+    default:
+      // Rows written before the field existed. This is the old heuristic,
+      // now scoped to legacy data instead of being the general rule.
+      try {
+        const envelope = decodeMessagePayloadEnvelope(entry.payload);
+        if (typeof envelope.content === 'string' && envelope.content.length > 0) {
+          return envelope.content;
+        }
+      } catch {
+        // fall through
+      }
+      return raw();
   }
-  return new TextDecoder().decode(payload);
 }
 
 

@@ -337,8 +337,19 @@ export interface OutboxEntry {
   /** Application content type ("text" / "image" / ...). The flush path
    *  maps this to the wire `MessageType` numeric tag at send time. */
   content_type: string;
-  /** Encoded message payload bytes (FlatBuffers-side ready). For text
-   *  this is `TextEncoder().encode(content)`. */
+  /** How `payload` is encoded — recorded at enqueue, never inferred.
+   *
+   *  Text is not one encoding: plain text goes as raw UTF-8, but the moment
+   *  it carries a reply or a mention the send path wraps it in the same
+   *  FlatBuffers envelope media uses. Recovery used to guess by trying to
+   *  decode and checking whether the body came out non-empty, which is not a
+   *  sound test — FlatBuffers reads arbitrary bytes without complaint, and a
+   *  legitimately empty body is indistinguishable from a failed parse. The
+   *  send path knows which branch it took, so it says so.
+   *
+   *  `legacy_unknown` is only for rows written before this field existed. */
+  payload_encoding?: 'raw_utf8' | 'message_envelope' | 'legacy_unknown';
+  /** Encoded message payload bytes (FlatBuffers-side ready). */
   payload: Uint8Array;
   /** Wall-clock at first enqueue. Drives per-channel FIFO ordering. */
   created_at: number;
