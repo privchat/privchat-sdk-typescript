@@ -988,10 +988,24 @@ export type PrivacyUpdateRequest = Partial<
 
 // ---------- account/user/detail (typed;PROFILE_VISIBILITY) ----------
 
+/**
+ * 资料查询来源(PROFILE_VISIBILITY §2.5)。服务端对每种来源都做真伪校验:
+ * 声称 friend 但不是好友 → 整个请求被拒(2026-07-26 生产每天 17.8 万次)。
+ * 拿不到合法来源时**不要伪造**,公开字段应由 user 实体增量同步维护。
+ */
+export type UserDetailSource =
+  | 'search'
+  | 'group'
+  | 'friend'
+  | 'card_share'
+  | 'friend_pending'
+  | 'conversation'
+  /** 本人查本人(protocol DetailSourceType::SelfProfile),source_id = 自己的 user_id。 */
+  | 'self';
+
 export interface UserDetailRequest {
   target_user_id: number;
-  /** search / group / friend / card_share / friend_pending / conversation */
-  source: string;
+  source: UserDetailSource;
   source_id: string;
 }
 
