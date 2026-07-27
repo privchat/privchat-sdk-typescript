@@ -625,7 +625,7 @@ export interface SessionSnapshot {
   last_event_sequence_id: number;
 }
 
-export interface SendTextInput {
+export interface SendTextInputBase {
   channel_id: string;
   channel_type: number;
   from_uid: string;
@@ -641,30 +641,37 @@ export interface SendTextInput {
    *  System=5, Sticker=6, ContactCard=7, Location=8, Link=9,
    *  Forward=10). */
   message_type?: number;
-  /** Override the auto-computed payload bytes. Default:
-   *  `TextEncoder.encode(content)`.
-   *
-   *  Media and structured variants set this to a FlatBuffers
-   *  `MessagePayloadEnvelope` — NOT the JSON envelope an earlier version of
-   *  this comment described; the server only decodes the typed one.
-   *
-   *  Supplying it requires declaring [`payload_encoding`]. Recovery has to
-   *  know how to read these bytes back, and an earlier version simply
-   *  assumed any caller-supplied payload was an envelope — an assumption
-   *  nothing checked, on a field any caller can set to any bytes. */
-  payload?: Uint8Array;
-  /** How [`payload`] is encoded. Required whenever `payload` is set. */
-  payload_encoding?: 'raw_utf8' | 'message_envelope';
+
   /** Quote/reply target — the server_message_id of the original
    *  message this one replies to. When set, the SDK switches the wire
    *  payload to a JSON `LocalMessagePayloadEnvelope` so the receiver
-   *  can show the quoted preview. Ignored if `payload` is also given
-   *  (caller already built the envelope). */
+   *  can show the quoted preview. Encoded into a FlatBuffers
+   *  `MessagePayloadEnvelope` (not JSON — the server only decodes the typed
+   *  one). Ignored if `payload` is also given: the caller already built it. */
   reply_to_message_id?: string;
-  /** uids the message @-mentions. Same JSON-envelope behavior as
-   *  reply_to. Ignored if `payload` is also given. */
+  /** uids the message @-mentions. Encoded into the same FlatBuffers
+   *  envelope as reply_to. Ignored if `payload` is also given. */
   mentioned_user_ids?: string[];
 }
+
+/** Payload half of [`SendTextInput`], as a discriminated union.
+ *
+ * Making `payload_encoding` a plain optional field is what let four media
+ * builders ship without one — every send of an image, file, voice or video
+ * threw at runtime while `tsc` stayed silent. The union puts the pairing in
+ * the type: bytes cannot arrive without saying how to read them back.
+ */
+export type SendTextPayload =
+  | { payload?: undefined; payload_encoding?: never }
+  | {
+      /** Pre-encoded bytes. Media and structured variants pass a FlatBuffers
+       *  `MessagePayloadEnvelope`; the server only decodes that one. */
+      payload: Uint8Array;
+      /** How to read [`payload`] back on a cold-start rebuild. */
+      payload_encoding: 'raw_utf8' | 'message_envelope';
+    };
+
+export type SendTextInput = SendTextInputBase & SendTextPayload;
 
 /**
  * Outcome of `sendTextMessage` (Phase 5C contract). Discriminated union
@@ -1878,19 +1885,21 @@ export class PrivchatClient {
         }
       }
     }
-    return this.sendTextMessage({
+    const base = {
       channel_id: input.target_channel_id,
       channel_type: input.target_channel_type,
       from_uid: input.from_uid,
       content: src.content,
       message_type: tag,
-      payload,
-      // Forward always carries the source row's typed envelope through
-      // verbatim; text forwards fall out above with payload undefined.
-      ...(payload !== undefined
-        ? { payload_encoding: 'message_envelope' as const }
-        : {}),
-    });
+    };
+    // Forward carries the source row's typed envelope through verbatim; text
+    // forwards leave payload undefined. Branch rather than spread so each
+    // arm is one concrete member of the union.
+    return this.sendTextMessage(
+      payload !== undefined
+        ? { ...base, payload, payload_encoding: 'message_envelope' }
+        : base,
+    );
   }
 
   /**

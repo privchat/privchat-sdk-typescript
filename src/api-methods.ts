@@ -892,6 +892,7 @@ export function buildSendImageInput(args: {
     content: caption !== '' ? caption : '[图片]',
     message_type: ContentMessageType.Image,
     payload: encodeMediaPayload('image', caption, args.metadata),
+    payload_encoding: 'message_envelope',
     local_message_id: args.local_message_id,
   };
 }
@@ -913,6 +914,7 @@ export function buildSendFileInput(args: {
     content: caption,
     message_type: ContentMessageType.File,
     payload: encodeMediaPayload('file', caption, args.metadata),
+    payload_encoding: 'message_envelope',
     local_message_id: args.local_message_id,
   };
 }
@@ -931,6 +933,7 @@ export function buildSendVoiceInput(args: {
     content: '[语音]',
     message_type: ContentMessageType.Voice,
     payload: encodeMediaPayload('voice', '', args.metadata),
+    payload_encoding: 'message_envelope',
     local_message_id: args.local_message_id,
   };
 }
@@ -957,6 +960,7 @@ export function buildSendVideoInput(args: {
     content: caption !== '' ? caption : '[视频]',
     message_type: ContentMessageType.Video,
     payload: encodeMediaPayload('video', caption, args.metadata),
+    payload_encoding: 'message_envelope',
     local_message_id: args.local_message_id,
   };
 }
