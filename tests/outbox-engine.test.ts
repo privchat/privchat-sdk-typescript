@@ -213,6 +213,86 @@ describe('OutboxEngine — message link is the stable id', () => {
     expect(rows.find((m) => m.local_message_id === 'A')?.id).toBe('stable-1');
   });
 
+  it('refuses to claim an inbound message that was never a local send', async () => {
+    const h = newHarness();
+    // The reachable corruption. An ordinary inbound message has no
+    // local_message_id at all, so a rule that waves those through lets a
+    // damaged link claim it. Nothing collides -- there is only one row -- so
+    // the unique id index cannot see this, and the ACK rewrites someone
+    // else's received message into our sent one, content and all.
+    await h.db.messages.put({
+      id: 'foreign',
+      record_key: 's:inbound-1',
+      channel_id: '100',
+      channel_type: 1,
+      server_message_id: 'inbound-1',
+      from_uid: '555',
+      message_type: '0',
+      content: 'a message somebody else sent us',
+      payload: new Uint8Array(),
+      timestamp: NOW,
+      status: 'received',
+    });
+    h.setSendImpl(async () => okResp('s-A', 42));
+    await putOutboxEntry(h.db, row('A', { message_id: 'foreign' }));
+
+    await h.engine.flushOutbox();
+
+    // The inbound row is untouched either way — applyAckRekey refuses to
+    // overwrite a row held under another key. What the strict rule changes is
+    // the cost of the damaged link: claiming the inbound row sends the
+    // command into integrity_error, so the user's message is quarantined and
+    // never sent. Refusing to claim it lets the send complete normally.
+    const foreign = await h.db.messages.where('id').equals('foreign').first();
+    expect(foreign?.content).toBe('a message somebody else sent us');
+    expect(foreign?.from_uid).toBe('555');
+    expect(foreign?.status).toBe('received');
+    expect(foreign?.local_message_id).toBeUndefined();
+    expect(foreign?.server_message_id).toBe('inbound-1');
+
+    // The send went through: outbox drained, not quarantined.
+    expect(await getOutboxEntry(h.db, 'A')).toBeUndefined();
+    const mine = (await h.db.messages.toArray()).find(
+      (m) => m.local_message_id === 'A',
+    );
+    expect(mine?.server_message_id).toBe('s-A');
+    expect(mine?.id).not.toBe('foreign');
+  });
+
+  it('sends a lost media row to repair instead of rebuilding it as text', async () => {
+    const h = newHarness();
+    h.setSendImpl(async () => okResp('s-IMG', 42));
+    // Cold start, cache row gone, image command still queued. Its payload is
+    // structured bytes; decoding them as UTF-8 gives a garbled bubble, and
+    // the attachment's local file is not in the outbox row at all.
+    await putOutboxEntry(
+      h.db,
+      row('IMG', {
+        content_type: 'image',
+        payload: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]),
+      }),
+    );
+
+    await h.engine.flushOutbox();
+
+    const after = await getOutboxEntry(h.db, 'IMG');
+    expect(after?.status).toBe('integrity_error');
+    // Above all: no half-built message on screen.
+    expect(await h.db.messages.toArray()).toHaveLength(0);
+    expect(h.store.getMessages('100', 1)).toHaveLength(0);
+  });
+
+  it('still rebuilds a lost text row, whose payload really is the body', async () => {
+    const h = newHarness();
+    h.setSendImpl(async () => okResp('s-TXT', 43));
+    await putOutboxEntry(h.db, row('TXT'));
+
+    const result = await h.engine.flushOutbox();
+    expect(result.sent).toBe(1);
+    const rebuilt = (await h.db.messages.toArray())[0];
+    expect(rebuilt?.content).toBe('body-TXT');
+  });
+
   it('still joins on record_key for rows written before v11', async () => {
     const h = newHarness();
     h.store.upsertMessage(

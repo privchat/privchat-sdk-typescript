@@ -972,17 +972,16 @@ export class OutboxEngine {
     // A command may only resolve to a message in its own channel and, when
     // both name one, the same send.
     //
-    // Defence in depth, and labelled as such because I could not produce a
-    // test that goes red without it: cross-channel damage already ends in
-    // `integrity_error` via the unique `id` index (checked both ways), and
-    // the same-channel wrong-send case did not diverge either. The guard is
-    // kept because the index is not what states this rule — it happens to
-    // imply part of it today, and `messages_v2` changes the indexes.
+    // The match must be exact. An earlier version waved through rows with no
+    // `local_message_id`, which is every inbound message — so a damaged link
+    // could claim a message somebody else sent us. The storage layer refuses
+    // to overwrite it (applyAckRekey guards the id), but the command then
+    // dies in `integrity_error`: the corruption is contained and the user's
+    // message is lost anyway. Declining to claim it lets the send complete.
     const owns = (m: MessageRecord): boolean =>
       m.channel_id === entry.channel_id &&
       m.channel_type === entry.channel_type &&
-      (m.local_message_id === undefined ||
-        m.local_message_id === entry.local_message_id);
+      m.local_message_id === entry.local_message_id;
 
     const inChannel = this.store.getMessages(entry.channel_id, entry.channel_type);
     const memHit =
@@ -999,7 +998,14 @@ export class OutboxEngine {
       entry.message_id !== undefined
         ? await this.db.messages.where('id').equals(entry.message_id).first()
         : undefined;
-    if (cached !== undefined && !owns(cached)) cached = undefined;
+    // Two different failures wear the same shape here and must not be
+    // conflated:
+    //   - the named row exists but is not ours  -> the LINK is wrong, and
+    //     reusing that id would land right back on the row we just declined;
+    //   - the named row is absent               -> the link is plausible and
+    //     rebuilding under it keeps the command attached to what the UI shows.
+    const linkIsWrong = cached !== undefined && !owns(cached);
+    if (linkIsWrong) cached = undefined;
     if (cached === undefined) {
       const byKey = await this.db.messages.get([entry.channel_id, entry.record_key]);
       cached = byKey !== undefined && owns(byKey) ? byKey : undefined;
@@ -1016,18 +1022,31 @@ export class OutboxEngine {
         .first();
     }
     if (cached === undefined && entry.message_id !== undefined) {
-      // The command names a stable id and that row is gone. This is local
-      // data damage, not a cold start: rebuilding under a fresh identity
-      // would silently detach the command from whatever the UI still shows.
-      // Reuse the id the command already names so the rebuild converges on
-      // the row it was always about.
-      this.warn('outbox command names a message that no longer exists; rebuilding under its id', {
-        outbox_id: entry.outbox_id,
-        message_id: entry.message_id,
-      });
+      this.warn(
+        linkIsWrong
+          ? 'outbox command names a message belonging to something else; rebuilding under a new id'
+          : 'outbox command names a message that no longer exists; rebuilding under its id',
+        { outbox_id: entry.outbox_id, message_id: entry.message_id },
+      );
+    }
+    const rebuiltId = linkIsWrong
+      ? nextLocalMessageRecordId()
+      : (entry.message_id ?? nextLocalMessageRecordId());
+    if (cached === undefined && !isRebuildableFromPayload(entry.content_type)) {
+      // The row is gone and this payload cannot be turned back into one.
+      // Media payloads are structured bytes, not UTF-8: decoding them as text
+      // produces a garbled bubble, and an attachment rebuilt without its
+      // local file produces one that can never load. A broken message on
+      // screen is worse than a command the repair path can still act on, so
+      // this is surfaced as damage rather than papered over.
+      throw new MessageIdentityConflictError(
+        entry.message_id ?? entry.local_message_id,
+        entry.channel_id,
+        entry.record_key,
+      );
     }
     return {
-      id: cached?.id ?? entry.message_id ?? nextLocalMessageRecordId(),
+      id: cached?.id ?? rebuiltId,
       channel_id: entry.channel_id,
       channel_type: entry.channel_type,
       local_message_id: entry.local_message_id,
@@ -1035,6 +1054,8 @@ export class OutboxEngine {
       // Cache rows store the word form directly; the wire tag is only
       // materialised in buildRequest.
       message_type: entry.content_type,
+      // Only reached for types isRebuildableFromPayload admits, where the
+      // payload really is the UTF-8 body.
       content: new TextDecoder().decode(entry.payload),
       payload: entry.payload,
       timestamp: entry.created_at,
@@ -1044,6 +1065,19 @@ export class OutboxEngine {
 }
 
 // ----- Helpers -----
+
+/** Can a lost cache row be reconstructed from the outbox payload alone?
+ *
+ * Only for types whose payload IS the body. Everything else — image, video,
+ * voice, file, and the structured cards — encodes its content, and several
+ * additionally depend on a local file that the outbox row does not carry.
+ * Reconstructing those yields a message that renders as mojibake or never
+ * loads, which is why they are routed to repair instead.
+ */
+function isRebuildableFromPayload(contentType: string): boolean {
+  return contentType === 'text' || contentType === 'system';
+}
+
 
 function mutexKey(channel_id: string, _channel_type: number): string {
   // Conversation identity is the channel_id alone; see message-store.ts.

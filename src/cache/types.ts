@@ -231,10 +231,14 @@ export interface MessageRecord {
   /** Client snowflake from sendTextMessage (= Rust SDK's `local_message_id`).
    *  Undefined for purely-inbound history / push records. */
   local_message_id?: IdString;
-  /** Per-channel server pts. Populated from `PushMessageRequest.message_seq`
-   *  on inbound push, or `SendMessageResponse.message_seq` after a local
-   *  send is ACKed. Undefined for history rows (server's history wire
-   *  doesn't emit pts) and for pending rows (no ACK yet). */
+  /** Per-channel server pts — the authoritative display order
+   *  (SDK_ENTITY_MODEL_SPEC §2.6.2). Populated from
+   *  `PushMessageRequest.message_seq` on inbound push,
+   *  `SendMessageResponse.message_seq` after a local send is ACKed, and
+   *  `HistoricalMessage.message_seq` on history (an earlier comment here
+   *  claimed history carries no pts; it does, and
+   *  `historicalMessageToRecord` has always written it). Undefined only for
+   *  pending rows, which have no ACK yet and sort ahead of everything. */
   pts?: IdString;
   from_uid: IdString;
   /** Application content type ("text" / "image" / "voice" / ...). String

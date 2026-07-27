@@ -271,25 +271,18 @@ export class CacheDB extends Dexie {
           local_message_id?: string;
         }> = await outbox.toArray();
 
-        /** A command may only point at a message in its own channel, and —
-         *  when both sides name one — the same send. A link that fails this
-         *  is worse than a missing one: the ack would be applied to someone
-         *  else's row. */
+        /** A command may only point at the message of its own send: same
+         *  channel, same `local_message_id`. The match is exact — a row with
+         *  no local_message_id is an inbound message, i.e. one we never sent,
+         *  and letting a command claim one is how a damaged link ends up
+         *  rewriting somebody else's message into ours. */
         const owns = (
           row: { channel_id?: string; local_message_id?: string } | undefined,
           o: { channel_id?: string; local_message_id?: string },
-        ): boolean => {
-          if (row === undefined) return false;
-          if (row.channel_id !== o.channel_id) return false;
-          if (
-            row.local_message_id !== undefined &&
-            o.local_message_id !== undefined &&
-            row.local_message_id !== o.local_message_id
-          ) {
-            return false;
-          }
-          return true;
-        };
+        ): boolean =>
+          row !== undefined &&
+          row.channel_id === o.channel_id &&
+          row.local_message_id === o.local_message_id;
 
         for (const o of rows) {
           if (o.channel_id === undefined) continue;
