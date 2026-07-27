@@ -1639,7 +1639,7 @@ export class PrivchatClient {
     //    reconnect window, post-`disconnect()` state. The reconnect
     //    flush hook (5C-1d) will pick the row up later.
     if (this.state !== 'authenticated') {
-      await this.enqueueOutboxRow(localMsgId, input, payload, 'pending');
+      await this.enqueueOutboxRow(localMsgId, input, payload, 'pending', undefined, pending.id);
       return {
         status: 'queued',
         local_message_id: localMsgId,
@@ -1660,6 +1660,7 @@ export class PrivchatClient {
         payload,
         'failed',
         formatTransientError(e),
+        pending.id,
       );
       return {
         status: 'queued',
@@ -1678,6 +1679,7 @@ export class PrivchatClient {
         payload,
         'failed',
         `rejected: code=${resp.reason_code}`,
+        pending.id,
       );
       return {
         status: 'queued',
@@ -1894,11 +1896,14 @@ export class PrivchatClient {
     payload: Uint8Array,
     status: OutboxStatus,
     last_error?: string,
+    /** Stable `MessageRecord.id` of the local echo this command delivers. */
+    message_id?: string,
   ): Promise<void> {
     if (this.cacheDb === null) return;
     const now = Date.now();
     const entry: OutboxEntry = {
       outbox_id,
+      message_id,
       record_key: `l:${outbox_id}`,
       channel_id: input.channel_id,
       channel_type: input.channel_type,

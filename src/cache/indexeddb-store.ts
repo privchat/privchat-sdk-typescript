@@ -224,6 +224,46 @@ export class CacheDB extends Dexie {
             m.id = nextLocalMessageRecordId();
           });
       });
+
+    // v11: give the outbox a stable foreign key to the message it delivers.
+    //
+    // Until now the only link was `record_key`, which is derived from
+    // `local_message_id` while the send is in flight and from
+    // `server_message_id` once it lands — so the join key changed underneath
+    // the command it identified. `MessageRecord.id` does not change, and it
+    // is what SDK_ENTITY_MODEL_SPEC §2.6.1 names as the local identity of a
+    // message; the outbox should hold that, exactly as the Rust SDK's
+    // `outbox.message_id` holds `message.id`.
+    //
+    // `command_id`/`outbox_id` stays equal to `local_message_id`: a send
+    // command really is identified by the key the server dedupes on. The two
+    // are different questions and now have different fields.
+    this.version(11)
+      .stores({
+        outbox:
+          '&outbox_id, channel_id, [channel_id+created_at], status, next_attempt_at, &local_message_id, message_id',
+      })
+      .upgrade(async (tx) => {
+        // Backfill from the row each command already points at. A command
+        // whose message is gone keeps message_id undefined rather than
+        // inventing one: the engine falls back to record_key for those, and
+        // minting an id here would fabricate a link to a row that no longer
+        // exists.
+        const messages = tx.table('messages');
+        await tx
+          .table('outbox')
+          .toCollection()
+          .modify(async (o: {
+            message_id?: string;
+            channel_id?: string;
+            record_key?: string;
+          }) => {
+            if (o.message_id !== undefined) return;
+            if (o.channel_id === undefined || o.record_key === undefined) return;
+            const row = await messages.get([o.channel_id, o.record_key]);
+            if (row?.id !== undefined) o.message_id = row.id;
+          });
+      });
   }
 }
 

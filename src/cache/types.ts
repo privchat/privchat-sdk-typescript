@@ -294,20 +294,28 @@ export type OutboxStatus =
 
 /** One outgoing message awaiting (or having failed) server ACK.
  *
- * Identity:
- *   - `outbox_id` is the stable primary key. In 5C it equals
- *     `local_message_id`; the field exists separately so future code
- *     can introduce a different identity (e.g. UUID) without rewriting
- *     callers.
- *   - `local_message_id` is the canonical idempotency key against the
- *     server's dedup service. Marked unique at the schema level so the
- *     same client cannot enqueue the same logical message twice.
- *   - `record_key` is the cache MessageRecord's record_key (e.g.
- *     `"l:<local_message_id>"`) — denormalised so the engine can join
- *     to the in-memory cache without recomputing.
+ * Identity (SDK_ENTITY_MODEL_SPEC §2.6.1):
+ *   - `outbox_id` is the command's primary key. It equals
+ *     `local_message_id`, and that is correct: a send command *is*
+ *     identified by the idempotency key the server dedupes on.
+ *   - `local_message_id` is that same idempotency key against the
+ *     server's dedup service. Unique at the schema level so the same
+ *     client cannot enqueue the same logical message twice.
+ *   - `message_id` is the **stable** `MessageRecord.id` this command
+ *     will deliver. This is the link to the message, and it never
+ *     changes. Optional only because rows written before v11 predate
+ *     the field; new rows always carry it.
+ *   - `record_key` is the legacy join key, kept for those pre-v11 rows.
+ *     Do not reach for it in new code: it is derived from
+ *     `local_message_id` before the ACK and from `server_message_id`
+ *     after, so it *changes mid-flight* — joining on it means joining
+ *     on a moving target, which is what the repair machinery around
+ *     this engine exists to survive.
  */
 export interface OutboxEntry {
   outbox_id: IdString;
+  /** Stable `MessageRecord.id`. Absent only on rows written before v11. */
+  message_id?: IdString;
   record_key: string;
   channel_id: IdString;
   channel_type: number;

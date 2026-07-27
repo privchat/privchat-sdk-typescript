@@ -173,6 +173,75 @@ async function waitFor(
 
 // ----- Tests -----
 
+describe('OutboxEngine — message link is the stable id', () => {
+  // record_key is derived from local_message_id before the ACK and from
+  // server_message_id after, so a command that outlives its own ACK finds the
+  // key it stored pointing at nothing. message_id is MessageRecord.id and
+  // never moves (SDK_ENTITY_MODEL_SPEC §2.6.1) — that is the link the engine
+  // must use.
+  it('resolves the pending record after record_key has already moved on', async () => {
+    const h = newHarness();
+    // The row as it looks *after* an ack rekeyed it: same stable id, but the
+    // key the outbox row was written with no longer matches.
+    h.store.upsertMessage(
+      {
+        id: 'stable-1',
+        channel_id: '100',
+        channel_type: 1,
+        local_message_id: 'A',
+        server_message_id: 's-earlier',
+        from_uid: '999',
+        message_type: '0',
+        content: 'body-A',
+        payload: new Uint8Array(),
+        timestamp: NOW,
+        status: 'sent',
+      },
+      false,
+    );
+    h.setSendImpl(async () => okResp('s-A', 42));
+    await putOutboxEntry(h.db, row('A', { message_id: 'stable-1' }));
+
+    const result = await h.engine.flushOutbox();
+    expect(result.sent).toBe(1);
+
+    // Found and updated in place — not resurrected as a second row under a
+    // freshly minted identity, which is what a record_key-only join does when
+    // the key has moved.
+    const rows = h.store.getMessages('100', 1);
+    expect(rows.filter((m) => m.local_message_id === 'A')).toHaveLength(1);
+    expect(rows.find((m) => m.local_message_id === 'A')?.id).toBe('stable-1');
+  });
+
+  it('still joins on record_key for rows written before v11', async () => {
+    const h = newHarness();
+    h.store.upsertMessage(
+      {
+        id: 'legacy-1',
+        channel_id: '100',
+        channel_type: 1,
+        local_message_id: 'A',
+        from_uid: '999',
+        message_type: '0',
+        content: 'body-A',
+        payload: new Uint8Array(),
+        timestamp: NOW,
+        status: 'pending',
+      },
+      false,
+    );
+    h.setSendImpl(async () => okResp('s-A', 42));
+    // No message_id: exactly what an upgraded-but-not-backfilled row looks
+    // like. Dropping these on the floor would strand queued sends.
+    await putOutboxEntry(h.db, row('A'));
+
+    const result = await h.engine.flushOutbox();
+    expect(result.sent).toBe(1);
+    const rows = h.store.getMessages('100', 1);
+    expect(rows.find((m) => m.local_message_id === 'A')?.id).toBe('legacy-1');
+  });
+});
+
 describe('OutboxEngine — happy path', () => {
   it('Case 1: due pending entry → ACK → outbox row deleted', async () => {
     const h = newHarness();

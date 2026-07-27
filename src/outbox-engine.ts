@@ -877,8 +877,14 @@ export class OutboxEngine {
     /** Repair path: replacement local identity for this row. */
     overrideId?: string,
   ): Promise<boolean> {
-    const pendingKey = entry.record_key;
     const pendingRec = await this.resolvePending(entry);
+    // The key to retire is the one the row is *actually* stored under, not
+    // the one the command was written with. Those differ whenever the row
+    // has already been rekeyed once (an earlier ack, a repair): removing the
+    // stale key deletes nothing and the new record lands beside the old one
+    // — one logical message, two rows on screen. Only `message_id` survives
+    // that, which is why it is now the join (SDK_ENTITY_MODEL_SPEC §2.6.1).
+    const pendingKey = messageRecordKey(pendingRec);
     const acked: MessageRecord = {
       ...pendingRec,
       ...(overrideId !== undefined ? { id: overrideId } : {}),
@@ -956,11 +962,23 @@ export class OutboxEngine {
    * can no longer see it by then).
    */
   private async resolvePending(entry: OutboxEntry): Promise<MessageRecord> {
-    const memHit = this.store
-      .getMessages(entry.channel_id, entry.channel_type)
-      .find((m) => messageRecordKey(m) === entry.record_key);
+    // Prefer the stable link. `record_key` is derived from
+    // `local_message_id` before the ACK and `server_message_id` after, so a
+    // command that outlives its own ACK — a retry, a repair, a reload — can
+    // find the key it stored no longer matching the row it meant.
+    // `message_id` is `MessageRecord.id` and never moves
+    // (SDK_ENTITY_MODEL_SPEC §2.6.1). Rows written before v11 have no
+    // message_id, so the old join stays as the fallback.
+    const inChannel = this.store.getMessages(entry.channel_id, entry.channel_type);
+    const memHit =
+      (entry.message_id !== undefined
+        ? inChannel.find((m) => m.id === entry.message_id)
+        : undefined) ?? inChannel.find((m) => messageRecordKey(m) === entry.record_key);
     if (memHit) return memHit;
-    const cached = await this.db.messages.get([entry.channel_id, entry.record_key]);
+    const cached =
+      (entry.message_id !== undefined
+        ? await this.db.messages.where('id').equals(entry.message_id).first()
+        : undefined) ?? (await this.db.messages.get([entry.channel_id, entry.record_key]));
     return {
       id: cached?.id ?? nextLocalMessageRecordId(),
       channel_id: entry.channel_id,
