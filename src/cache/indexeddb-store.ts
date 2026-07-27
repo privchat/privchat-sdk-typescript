@@ -252,9 +252,15 @@ export class CacheDB extends Dexie {
         // discards and every assignment inside it lands after the write has
         // already been committed. That shape type-checks, runs without
         // error, and silently migrates nothing — which is exactly what the
-        // first version of this did. The outbox holds only unacked sends, so
-        // iterating it is cheap; the messages table is the big one and is
-        // never scanned here.
+        // first version of this did.
+        //
+        // Cost, stated honestly: the record_key and id probes are indexed,
+        // but the local_message_id fallback scans the channel's messages and
+        // filters in JS, so the worst case is O(outbox x channel_messages).
+        // That is acceptable for a one-shot upgrade over an outbox holding
+        // only unacked sends; it is not a pattern to reuse at runtime.
+        // `messages_v2` should carry a real [channel_id+local_message_id]
+        // index and this fallback should then use it.
         const messages = tx.table('messages');
         const outbox = tx.table('outbox');
         const rows: Array<{
@@ -265,15 +271,46 @@ export class CacheDB extends Dexie {
           local_message_id?: string;
         }> = await outbox.toArray();
 
+        /** A command may only point at a message in its own channel, and —
+         *  when both sides name one — the same send. A link that fails this
+         *  is worse than a missing one: the ack would be applied to someone
+         *  else's row. */
+        const owns = (
+          row: { channel_id?: string; local_message_id?: string } | undefined,
+          o: { channel_id?: string; local_message_id?: string },
+        ): boolean => {
+          if (row === undefined) return false;
+          if (row.channel_id !== o.channel_id) return false;
+          if (
+            row.local_message_id !== undefined &&
+            o.local_message_id !== undefined &&
+            row.local_message_id !== o.local_message_id
+          ) {
+            return false;
+          }
+          return true;
+        };
+
         for (const o of rows) {
-          if (o.message_id !== undefined) continue;
           if (o.channel_id === undefined) continue;
+
+          // An existing message_id is not evidence. Mixed-version tabs, an
+          // interrupted upgrade or plain corruption can leave one pointing at
+          // a row that is gone, in another channel, or belongs to a different
+          // send. Verify it; only a link that still checks out is kept.
+          if (o.message_id !== undefined) {
+            const named = await messages.where('id').equals(o.message_id).first();
+            if (owns(named, o)) continue;
+            // Falls through and re-derives below rather than carrying a link
+            // we just proved wrong.
+          }
 
           // record_key first — it is what the command was written with.
           let row =
             o.record_key !== undefined
               ? await messages.get([o.channel_id, o.record_key])
               : undefined;
+          if (!owns(row, o)) row = undefined;
 
           // Then local_message_id. A row that was already acked has been
           // rekeyed `l:` → `s:`, so the key its command still carries points
@@ -291,9 +328,15 @@ export class CacheDB extends Dexie {
               .first();
           }
 
-          // Still nothing: the message is gone. Leave message_id undefined
-          // rather than inventing a link to a row that does not exist.
-          if (row?.id === undefined) continue;
+          // Still nothing: the message is gone. Clear any link we disproved
+          // above and leave it undefined, rather than carrying a pointer to a
+          // row that does not exist or is not ours.
+          if (row?.id === undefined) {
+            if (o.message_id !== undefined) {
+              await outbox.update(o.outbox_id, { message_id: undefined });
+            }
+            continue;
+          }
           await outbox.update(o.outbox_id, { message_id: row.id });
         }
       });

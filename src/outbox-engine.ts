@@ -969,11 +969,27 @@ export class OutboxEngine {
     // `message_id` is `MessageRecord.id` and never moves
     // (SDK_ENTITY_MODEL_SPEC §2.6.1). Rows written before v11 have no
     // message_id, so the old join stays as the fallback.
+    // A command may only resolve to a message in its own channel and, when
+    // both name one, the same send.
+    //
+    // Defence in depth, and labelled as such because I could not produce a
+    // test that goes red without it: cross-channel damage already ends in
+    // `integrity_error` via the unique `id` index (checked both ways), and
+    // the same-channel wrong-send case did not diverge either. The guard is
+    // kept because the index is not what states this rule — it happens to
+    // imply part of it today, and `messages_v2` changes the indexes.
+    const owns = (m: MessageRecord): boolean =>
+      m.channel_id === entry.channel_id &&
+      m.channel_type === entry.channel_type &&
+      (m.local_message_id === undefined ||
+        m.local_message_id === entry.local_message_id);
+
     const inChannel = this.store.getMessages(entry.channel_id, entry.channel_type);
     const memHit =
       (entry.message_id !== undefined
-        ? inChannel.find((m) => m.id === entry.message_id)
-        : undefined) ?? inChannel.find((m) => messageRecordKey(m) === entry.record_key);
+        ? inChannel.find((m) => m.id === entry.message_id && owns(m))
+        : undefined) ??
+      inChannel.find((m) => messageRecordKey(m) === entry.record_key && owns(m));
     if (memHit) return memHit;
 
     // On disk, in the same order, plus one more probe. Minting a new identity
@@ -983,8 +999,10 @@ export class OutboxEngine {
       entry.message_id !== undefined
         ? await this.db.messages.where('id').equals(entry.message_id).first()
         : undefined;
+    if (cached !== undefined && !owns(cached)) cached = undefined;
     if (cached === undefined) {
-      cached = await this.db.messages.get([entry.channel_id, entry.record_key]);
+      const byKey = await this.db.messages.get([entry.channel_id, entry.record_key]);
+      cached = byKey !== undefined && owns(byKey) ? byKey : undefined;
     }
     if (cached === undefined && entry.message_id === undefined) {
       // Pre-v11 command whose row has already been rekeyed `l:` → `s:`, so

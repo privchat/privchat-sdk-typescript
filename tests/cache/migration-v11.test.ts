@@ -111,14 +111,14 @@ describe('v11 outbox message_id migration', () => {
     expect(three?.message_id).toBeUndefined();
   });
 
-  it('leaves a message_id that is already present alone', async () => {
+  it('keeps an existing message_id only when it still resolves to this send', async () => {
     const name = `privchat-mig11b-${Date.now()}-${Math.random()}`;
 
     const legacy = new Dexie(name);
     legacy.version(10).stores(V10_STORES);
     await legacy.open();
     await legacy.table('messages').put({
-      id: 'stable-x',
+      id: 'written-by-a-newer-tab',
       record_key: 'l:cmd-x',
       channel_id: 'c1',
       channel_type: 1,
@@ -140,5 +140,71 @@ describe('v11 outbox message_id migration', () => {
     expect((await getOutboxEntry(db, 'cmd-x'))?.message_id).toBe(
       'written-by-a-newer-tab',
     );
+  });
+
+  // An existing message_id is not evidence that it is correct. Mixed-version
+  // tabs, an interrupted upgrade or corruption can leave one pointing
+  // somewhere wrong, and a wrong link is worse than a missing one: the ack
+  // lands on another conversation's row.
+  it('re-derives a message_id that points at a row in another channel', async () => {
+    const name = `privchat-mig11c-${Date.now()}-${Math.random()}`;
+
+    const legacy = new Dexie(name);
+    legacy.version(10).stores(V10_STORES);
+    await legacy.open();
+    await legacy.table('messages').bulkPut([
+      {
+        id: 'belongs-to-c2',
+        record_key: 'l:other',
+        channel_id: 'c2',
+        channel_type: 1,
+        local_message_id: 'other',
+        from_uid: '9',
+        message_type: 'text',
+        content: 'someone else',
+        payload: new Uint8Array(),
+        timestamp: 1_000,
+        status: 'pending',
+      },
+      {
+        id: 'the-right-one',
+        record_key: 'l:cmd-y',
+        channel_id: 'c1',
+        channel_type: 1,
+        local_message_id: 'cmd-y',
+        from_uid: '9',
+        message_type: 'text',
+        content: 'y',
+        payload: new Uint8Array(),
+        timestamp: 2_000,
+        status: 'pending',
+      },
+    ]);
+    await legacy.table('outbox').put({
+      ...legacyOutboxRow('cmd-y', 'l:cmd-y'),
+      message_id: 'belongs-to-c2',
+    });
+    legacy.close();
+
+    db = new CacheDB(name);
+    expect((await getOutboxEntry(db, 'cmd-y'))?.message_id).toBe('the-right-one');
+  });
+
+  it('clears a message_id whose row is gone and cannot be re-derived', async () => {
+    const name = `privchat-mig11d-${Date.now()}-${Math.random()}`;
+
+    const legacy = new Dexie(name);
+    legacy.version(10).stores(V10_STORES);
+    await legacy.open();
+    await legacy.table('outbox').put({
+      ...legacyOutboxRow('cmd-z', 'l:cmd-z'),
+      message_id: 'points-at-nothing',
+    });
+    legacy.close();
+
+    db = new CacheDB(name);
+    // Not left dangling: carrying a pointer we just proved wrong would send
+    // resolvePending down the damaged-data path on every flush.
+    expect((await getOutboxEntry(db, 'cmd-z'))?.message_id).toBeUndefined();
   });
 });
