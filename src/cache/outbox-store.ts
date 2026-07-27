@@ -47,7 +47,7 @@ export interface OutboxStatusPatch {
   attempt_count?: number;
   local_commit_failures?: number;
   repair_attempts?: number;
-  repair_kind?: 'identity_conflict';
+  repair_kind?: 'identity_conflict' | 'message_rehydrate';
   conflicting_id?: string;
   conflicting_channel_id?: string;
   repair_lease_token?: string;

@@ -20,6 +20,7 @@ import {
   type OutboxEngineDeps,
 } from '../src/outbox-engine.js';
 import { claimOutboxEntry, updateOutboxStatus } from '../src/cache/index.js';
+import { encodeMessagePayloadEnvelope } from '../src/codec/payload.js';
 import type { OutboxStateChangedEvent } from '../src/events.js';
 import type {
   SendMessageRequest,
@@ -259,6 +260,32 @@ describe('OutboxEngine — message link is the stable id', () => {
     expect(mine?.id).not.toBe('foreign');
   });
 
+  it('rebuilds a lost reply/mention text row from its envelope, not as raw bytes', async () => {
+    const h = newHarness();
+    h.setSendImpl(async () => okResp('s-RPL', 44));
+    // Text carrying a reply or a mention is NOT raw UTF-8 — the send path
+    // encodes it into the same FlatBuffers envelope media uses, because the
+    // server only decodes the typed envelope. Treating every text payload as
+    // UTF-8 turns exactly these into mojibake on a cold-start rebuild.
+    const envelope = encodeMessagePayloadEnvelope({
+      content: 'replying to you',
+      mentioned_user_ids: ['4242'],
+      reply_to_message_id: '777',
+    });
+    await putOutboxEntry(h.db, row('RPL', { content_type: 'text', payload: envelope }));
+
+    const result = await h.engine.flushOutbox();
+    expect(result.sent).toBe(1);
+
+    const rebuilt = (await h.db.messages.toArray()).find(
+      (m) => m.local_message_id === 'RPL',
+    );
+    expect(rebuilt?.content).toBe('replying to you');
+    // And the bytes that go on the wire are still the envelope, so the reply
+    // reference survives the rebuild.
+    expect(rebuilt?.payload).toEqual(envelope);
+  });
+
   it('sends a lost media row to repair instead of rebuilding it as text', async () => {
     const h = newHarness();
     h.setSendImpl(async () => okResp('s-IMG', 42));
@@ -277,6 +304,10 @@ describe('OutboxEngine — message link is the stable id', () => {
 
     const after = await getOutboxEntry(h.db, 'IMG');
     expect(after?.status).toBe('integrity_error');
+    // A missing row is not a contested id. Recording identity_conflict here
+    // would send the repair actor off to re-mint an identity, discarding the
+    // only link the command still has instead of re-hydrating the row.
+    expect(after?.repair_kind).toBe('message_rehydrate');
     // Above all: no half-built message on screen.
     expect(await h.db.messages.toArray()).toHaveLength(0);
     expect(h.store.getMessages('100', 1)).toHaveLength(0);

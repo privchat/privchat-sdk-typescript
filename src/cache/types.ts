@@ -394,7 +394,7 @@ export interface OutboxEntry {
    * in a *different* conversation, and re-syncing this one will never
    * touch it.
    */
-  repair_kind?: 'identity_conflict';
+  repair_kind?: 'identity_conflict' | 'message_rehydrate';
   /** Local id that could not be written because another row owns it. */
   conflicting_id?: IdString;
   /** Where that other row lives — never modified by repair, only reported. */

@@ -17,6 +17,7 @@
 //     `listDueOutboxEntries` excludes them; only `retryOutboxEntry`
 //     (5C-1e) reactivates them.
 
+import { decodeMessagePayloadEnvelope } from './codec/payload.js';
 import {
   CacheDB,
   MessageStore,
@@ -31,6 +32,7 @@ import {
   deleteOutboxEntry,
   listDueOutboxEntries,
   MessageIdentityConflictError,
+  ProjectionRehydrateRequiredError,
   messageRecordKey,
   isMessageIdFree,
   nextLocalMessageRecordId,
@@ -726,11 +728,24 @@ export class OutboxEngine {
       acked_message_seq: resp.message_seq,
     };
 
-    if (error instanceof MessageIdentityConflictError) {
+    if (
+      error instanceof MessageIdentityConflictError ||
+      error instanceof ProjectionRehydrateRequiredError
+    ) {
+      // Both are local-cache faults on an already-delivered message, so both
+      // quarantine rather than retry. They are NOT the same repair, though:
+      // a conflict means two rows contest one id and ours must be re-minted;
+      // a rehydrate means our row is simply gone and re-minting would
+      // discard the only link we still have. The repair actor branches on
+      // repair_kind, so recording the wrong one sends it down the wrong path.
+      const rehydrate = error instanceof ProjectionRehydrateRequiredError;
       const last_error = `integrity: ${formatErr(error)}`;
       this.warn('local cache integrity fault; message IS delivered, row quarantined', {
         outbox_id: entry.outbox_id,
-        conflicting_id: error.id,
+        repair_kind: rehydrate ? 'message_rehydrate' : 'identity_conflict',
+        conflicting_id: rehydrate
+          ? (error as ProjectionRehydrateRequiredError).message_id
+          : (error as MessageIdentityConflictError).id,
         conflicting_channel_id: error.conflicting_channel_id,
         last_error,
       });
@@ -742,8 +757,10 @@ export class OutboxEngine {
         // the channel that holds it, it cannot tell an id collision from
         // any other fault, and re-syncing this channel would never touch
         // the row that actually owns the id.
-        repair_kind: 'identity_conflict',
-        conflicting_id: error.id,
+        repair_kind: rehydrate ? 'message_rehydrate' : 'identity_conflict',
+        conflicting_id: rehydrate
+          ? (error as ProjectionRehydrateRequiredError).message_id
+          : (error as MessageIdentityConflictError).id,
         conflicting_channel_id: error.conflicting_channel_id,
         // Not due for a send ever again; the repair pass picks it up by
         // status instead.
@@ -1039,10 +1056,10 @@ export class OutboxEngine {
       // local file produces one that can never load. A broken message on
       // screen is worse than a command the repair path can still act on, so
       // this is surfaced as damage rather than papered over.
-      throw new MessageIdentityConflictError(
-        entry.message_id ?? entry.local_message_id,
+      throw new ProjectionRehydrateRequiredError(
+        entry.message_id,
         entry.channel_id,
-        entry.record_key,
+        entry.content_type,
       );
     }
     return {
@@ -1054,9 +1071,7 @@ export class OutboxEngine {
       // Cache rows store the word form directly; the wire tag is only
       // materialised in buildRequest.
       message_type: entry.content_type,
-      // Only reached for types isRebuildableFromPayload admits, where the
-      // payload really is the UTF-8 body.
-      content: new TextDecoder().decode(entry.payload),
+      content: decodeRebuildableContent(entry.payload),
       payload: entry.payload,
       timestamp: entry.created_at,
       status: 'pending',
@@ -1068,14 +1083,43 @@ export class OutboxEngine {
 
 /** Can a lost cache row be reconstructed from the outbox payload alone?
  *
- * Only for types whose payload IS the body. Everything else — image, video,
- * voice, file, and the structured cards — encodes its content, and several
- * additionally depend on a local file that the outbox row does not carry.
- * Reconstructing those yields a message that renders as mojibake or never
- * loads, which is why they are routed to repair instead.
+ * Only for types whose payload carries the body. Everything else — image,
+ * video, voice, file, and the structured cards — additionally depends on a
+ * local file or on metadata the outbox row does not carry, so rebuilding
+ * yields a message that can never load. Those are routed to repair instead.
  */
 function isRebuildableFromPayload(contentType: string): boolean {
   return contentType === 'text' || contentType === 'system';
+}
+
+/** Recover the body from a rebuildable payload.
+ *
+ * Text is not one encoding. Plain text is raw UTF-8, but the moment it
+ * carries a reply or a mention the send path wraps it in the same
+ * FlatBuffers envelope media uses — the server only decodes the typed
+ * envelope, so a reply cannot travel any other way. Decoding those as UTF-8
+ * gives mojibake, which is what a rebuilt reply used to look like.
+ *
+ * Envelope first, raw bytes second. The reply/mention references themselves
+ * live in `payload`, which is stored unchanged, so they survive the rebuild
+ * even though `MessageRecord` has no field for them.
+ *
+ * "Did it throw" is not the test. FlatBuffers reads arbitrary bytes without
+ * complaint — raw UTF-8 decodes "successfully" into an envelope with empty
+ * content — so a non-empty body is what distinguishes a real envelope. The
+ * one case this mis-handles is a reply whose text is empty, which the send
+ * path cannot produce: content comes from user input.
+ */
+function decodeRebuildableContent(payload: Uint8Array): string {
+  try {
+    const envelope = decodeMessagePayloadEnvelope(payload);
+    if (typeof envelope.content === 'string' && envelope.content.length > 0) {
+      return envelope.content;
+    }
+  } catch {
+    // Not an envelope at all: plain text took the raw-UTF-8 branch.
+  }
+  return new TextDecoder().decode(payload);
 }
 
 

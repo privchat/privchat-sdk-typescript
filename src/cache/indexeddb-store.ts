@@ -476,6 +476,31 @@ async function stampIdentity(
  * means the invariant was already broken upstream. Surfaced as its own type
  * so callers can tell it apart from an ordinary write failure.
  */
+/** The cache row a command was delivering is gone, and its payload cannot
+ *  rebuild it — media and structured cards depend on a local file or on
+ *  metadata the outbox row never carried.
+ *
+ *  Deliberately NOT a `MessageIdentityConflictError`. Nothing here is
+ *  contested: there is no second row holding the id, so re-minting an
+ *  identity fixes nothing and throws away the one link the command still
+ *  has. What this needs is the projection re-hydrated from the server —
+ *  the message was accepted, so `syncChannel` can bring it back — after
+ *  which the original stable id is kept.
+ */
+export class ProjectionRehydrateRequiredError extends Error {
+  constructor(
+    readonly message_id: string | undefined,
+    readonly conflicting_channel_id: string,
+    readonly content_type: string,
+  ) {
+    super(
+      `message ${message_id ?? '(unlinked)'} in ${conflicting_channel_id} is missing from the cache ` +
+        `and a ${content_type} payload cannot rebuild it; needs re-hydration from the server`,
+    );
+    this.name = 'ProjectionRehydrateRequiredError';
+  }
+}
+
 export class MessageIdentityConflictError extends Error {
   readonly id: string;
   readonly conflicting_channel_id: string;

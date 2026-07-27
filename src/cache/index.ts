@@ -6,6 +6,7 @@ export {
   deleteFriendships,
   applyAckRekey,
   MessageIdentityConflictError,
+  ProjectionRehydrateRequiredError,
   isMessageIdFree,
   remintMessageIdentity,
   deleteMessageByRecordKey,
