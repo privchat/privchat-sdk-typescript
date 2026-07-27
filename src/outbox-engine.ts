@@ -953,6 +953,10 @@ export class OutboxEngine {
           entry.channel_type,
           pendingKey,
           acked,
+          // A rehydrate replaced our row with a freshly imported history one.
+          // Its id is seconds old and referenced by nothing; ours is what the
+          // outbox and the UI have pointed at all along.
+          { callerIdWins: entry.repair_kind === 'message_rehydrate' },
         );
       },
     );
@@ -1057,6 +1061,33 @@ export class OutboxEngine {
     const rebuiltId = linkIsWrong
       ? nextLocalMessageRecordId()
       : (entry.message_id ?? nextLocalMessageRecordId());
+    // Last resort before declaring damage: the row the server already has.
+    //
+    // A `message_rehydrate` repair fetches the message back by its server id,
+    // and what lands is a history row — a fresh random `id`, a
+    // `server_message_id`, and NO `local_message_id`, because history does
+    // not know which device's send it was. `owns()` therefore rejects it, and
+    // without this probe the repair would throw again on every pass until the
+    // row degraded to `local_data_error`: the rehydrate could never close.
+    //
+    // The rehydrated row is adopted, but its identity is not. The command's
+    // own `message_id` wins, because that is the id the UI, dependencies and
+    // the outbox all still point at; taking history's freshly minted one
+    // would detach every one of them.
+    if (cached === undefined && entry.acked_server_message_id !== undefined) {
+      const rehydrated = await this.db.messages
+        .where('[channel_id+server_message_id]')
+        .equals([entry.channel_id, entry.acked_server_message_id])
+        .first();
+      if (rehydrated !== undefined) {
+        return {
+          ...rehydrated,
+          id: entry.message_id ?? rehydrated.id,
+          local_message_id: entry.local_message_id,
+        };
+      }
+    }
+
     if (cached === undefined && !isRebuildableFromPayload(entry.content_type)) {
       // The row is gone and this payload cannot be turned back into one.
       // Media payloads are structured bytes, not UTF-8: decoding them as text

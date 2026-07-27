@@ -582,6 +582,16 @@ export async function applyAckRekey(
   _channel_type: number,
   pending_record_key: string,
   acked: MessageRecord,
+  opts: {
+    /** The caller's `id` is the long-lived one; anything on disk under this
+     *  key was minted more recently and has no references yet.
+     *
+     *  Set only by the `message_rehydrate` repair. There the stored row is a
+     *  history import created seconds ago, while the caller's id is what the
+     *  outbox, the UI and any dependencies have pointed at all along — the
+     *  usual precedence is exactly backwards for that one case. */
+    callerIdWins?: boolean;
+  } = {},
 ): Promise<MessageRecord> {
   return db.transaction('rw', db.messages, async () => {
     const stamped = stamp(acked);
@@ -595,7 +605,9 @@ export async function applyAckRekey(
     // then the caller's. The middle case is what happens when the pending
     // write failed but the push landed — taking the caller's freshly minted
     // id there would orphan whatever already referenced the stored row.
-    const id = pending?.id ?? selfPush?.id ?? stamped.id;
+    const id = opts.callerIdWins
+      ? stamped.id
+      : (pending?.id ?? selfPush?.id ?? stamped.id);
 
     await db.messages.delete([channel_id, pending_record_key]);
     if (selfPush !== undefined) {

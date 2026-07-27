@@ -642,10 +642,19 @@ export interface SendTextInput {
    *  Forward=10). */
   message_type?: number;
   /** Override the auto-computed payload bytes. Default:
-   *  `TextEncoder.encode(content)`. Media / structured variants set
-   *  this to a JSON-encoded `LocalMessagePayloadEnvelope` so the
-   *  receiving SDK can pull `metadata` for renderer dispatch. */
+   *  `TextEncoder.encode(content)`.
+   *
+   *  Media and structured variants set this to a FlatBuffers
+   *  `MessagePayloadEnvelope` — NOT the JSON envelope an earlier version of
+   *  this comment described; the server only decodes the typed one.
+   *
+   *  Supplying it requires declaring [`payload_encoding`]. Recovery has to
+   *  know how to read these bytes back, and an earlier version simply
+   *  assumed any caller-supplied payload was an envelope — an assumption
+   *  nothing checked, on a field any caller can set to any bytes. */
   payload?: Uint8Array;
+  /** How [`payload`] is encoded. Required whenever `payload` is set. */
+  payload_encoding?: 'raw_utf8' | 'message_envelope';
   /** Quote/reply target — the server_message_id of the original
    *  message this one replies to. When set, the SDK switches the wire
    *  payload to a JSON `LocalMessagePayloadEnvelope` so the receiver
@@ -1572,8 +1581,16 @@ export class PrivchatClient {
     let payloadEncoding: 'raw_utf8' | 'message_envelope';
     if (input.payload !== undefined) {
       payload = input.payload;
-      // Pre-encoded by a media/structured caller — always an envelope.
-      payloadEncoding = 'message_envelope';
+      if (input.payload_encoding === undefined) {
+        // Refuse rather than assume. A wrong guess here is not caught
+        // anywhere downstream: it decides how a cold-start rebuild reads
+        // these bytes back, so the failure surfaces as mojibake in someone's
+        // conversation long after the send.
+        throw new TypeError(
+          'sendTextMessage: payload_encoding is required when payload is supplied',
+        );
+      }
+      payloadEncoding = input.payload_encoding;
     } else if (
       embeddedEnvelope !== undefined ||
       input.reply_to_message_id !== undefined ||
@@ -1868,6 +1885,11 @@ export class PrivchatClient {
       content: src.content,
       message_type: tag,
       payload,
+      // Forward always carries the source row's typed envelope through
+      // verbatim; text forwards fall out above with payload undefined.
+      ...(payload !== undefined
+        ? { payload_encoding: 'message_envelope' as const }
+        : {}),
     });
   }
 
@@ -2764,7 +2786,9 @@ export class PrivchatClient {
   }> {
     const { db, store } = this.requireCache();
     const resp = await this.messageHistoryAround(
-      Number(channel_id),
+      // String all the way down: `Number(channel_id)` silently changed the
+      // value for any channel past 2^53.
+      channel_id,
       message_id,
       opts.beforeLimit,
       opts.afterLimit,

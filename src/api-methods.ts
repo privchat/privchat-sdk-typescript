@@ -215,7 +215,7 @@ declare module './client.js' {
     /** jump-to-message context (spec §5). Full messages; prefer the client
      *  wrapper `jumpToMessageContext` which also backfills the cache. */
     messageHistoryAround(
-      channelId: number,
+      channelId: number | string,
       messageId: number | string,
       beforeLimit?: number,
       afterLimit?: number,
@@ -594,9 +594,11 @@ proto.messageHistorySearch = function (query, opts = {}) {
 };
 
 proto.messageHistoryAround = function (channelId, messageId, beforeLimit, afterLimit) {
-  // snowflake id 超出 Number 安全整数,必须以 RawU64 裸字面量上线
+  // snowflake id 超出 Number 安全整数,必须以 RawU64 裸字面量上线。
+  // channel_id 也是 u64,同样不能走 JS number —— 这里曾经漏包,而正上方的注释
+  // 说的就是它,只是当时只应用到了 message_id。
   return this.rpcCallTyped(Routes.message_history.AROUND, {
-    channel_id: channelId,
+    channel_id: new RawU64(channelId),
     message_id: new RawU64(messageId),
     before_limit: beforeLimit,
     after_limit: afterLimit,
