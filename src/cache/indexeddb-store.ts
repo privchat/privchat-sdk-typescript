@@ -244,25 +244,58 @@ export class CacheDB extends Dexie {
           '&outbox_id, channel_id, [channel_id+created_at], status, next_attempt_at, &local_message_id, message_id',
       })
       .upgrade(async (tx) => {
-        // Backfill from the row each command already points at. A command
-        // whose message is gone keeps message_id undefined rather than
-        // inventing one: the engine falls back to record_key for those, and
-        // minting an id here would fabricate a link to a row that no longer
-        // exists.
+        // Backfill the link for commands written before this version.
+        //
+        // Iterate the outbox and await each lookup. Do NOT reach for
+        // `.modify(async ...)`: Dexie's modifier is typed `void | boolean`
+        // and is not awaited, so an async one returns a promise Dexie
+        // discards and every assignment inside it lands after the write has
+        // already been committed. That shape type-checks, runs without
+        // error, and silently migrates nothing — which is exactly what the
+        // first version of this did. The outbox holds only unacked sends, so
+        // iterating it is cheap; the messages table is the big one and is
+        // never scanned here.
         const messages = tx.table('messages');
-        await tx
-          .table('outbox')
-          .toCollection()
-          .modify(async (o: {
-            message_id?: string;
-            channel_id?: string;
-            record_key?: string;
-          }) => {
-            if (o.message_id !== undefined) return;
-            if (o.channel_id === undefined || o.record_key === undefined) return;
-            const row = await messages.get([o.channel_id, o.record_key]);
-            if (row?.id !== undefined) o.message_id = row.id;
-          });
+        const outbox = tx.table('outbox');
+        const rows: Array<{
+          outbox_id: string;
+          message_id?: string;
+          channel_id?: string;
+          record_key?: string;
+          local_message_id?: string;
+        }> = await outbox.toArray();
+
+        for (const o of rows) {
+          if (o.message_id !== undefined) continue;
+          if (o.channel_id === undefined) continue;
+
+          // record_key first — it is what the command was written with.
+          let row =
+            o.record_key !== undefined
+              ? await messages.get([o.channel_id, o.record_key])
+              : undefined;
+
+          // Then local_message_id. A row that was already acked has been
+          // rekeyed `l:` → `s:`, so the key its command still carries points
+          // at nothing — and those are precisely the commands this field
+          // exists to rescue, so missing them would leave the worst case
+          // uncovered.
+          if (row === undefined && o.local_message_id !== undefined) {
+            row = await messages
+              .where('[channel_id+record_key]')
+              .between([o.channel_id, ''], [o.channel_id, '\uffff'])
+              .filter(
+                (m: { local_message_id?: string }) =>
+                  m.local_message_id === o.local_message_id,
+              )
+              .first();
+          }
+
+          // Still nothing: the message is gone. Leave message_id undefined
+          // rather than inventing a link to a row that does not exist.
+          if (row?.id === undefined) continue;
+          await outbox.update(o.outbox_id, { message_id: row.id });
+        }
       });
   }
 }

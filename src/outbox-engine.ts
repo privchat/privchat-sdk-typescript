@@ -975,12 +975,41 @@ export class OutboxEngine {
         ? inChannel.find((m) => m.id === entry.message_id)
         : undefined) ?? inChannel.find((m) => messageRecordKey(m) === entry.record_key);
     if (memHit) return memHit;
-    const cached =
-      (entry.message_id !== undefined
+
+    // On disk, in the same order, plus one more probe. Minting a new identity
+    // is the last resort, not the first miss: a re-mint on a row that does
+    // exist produces a second row for one logical message.
+    let cached =
+      entry.message_id !== undefined
         ? await this.db.messages.where('id').equals(entry.message_id).first()
-        : undefined) ?? (await this.db.messages.get([entry.channel_id, entry.record_key]));
+        : undefined;
+    if (cached === undefined) {
+      cached = await this.db.messages.get([entry.channel_id, entry.record_key]);
+    }
+    if (cached === undefined && entry.message_id === undefined) {
+      // Pre-v11 command whose row has already been rekeyed `l:` → `s:`, so
+      // its record_key resolves to nothing. `local_message_id` still
+      // identifies the row — the migration uses the same probe, and this
+      // covers commands that were queued between the upgrade and now.
+      cached = await this.db.messages
+        .where('[channel_id+record_key]')
+        .between([entry.channel_id, ''], [entry.channel_id, '\uffff'])
+        .filter((m) => m.local_message_id === entry.local_message_id)
+        .first();
+    }
+    if (cached === undefined && entry.message_id !== undefined) {
+      // The command names a stable id and that row is gone. This is local
+      // data damage, not a cold start: rebuilding under a fresh identity
+      // would silently detach the command from whatever the UI still shows.
+      // Reuse the id the command already names so the rebuild converges on
+      // the row it was always about.
+      this.warn('outbox command names a message that no longer exists; rebuilding under its id', {
+        outbox_id: entry.outbox_id,
+        message_id: entry.message_id,
+      });
+    }
     return {
-      id: cached?.id ?? nextLocalMessageRecordId(),
+      id: cached?.id ?? entry.message_id ?? nextLocalMessageRecordId(),
       channel_id: entry.channel_id,
       channel_type: entry.channel_type,
       local_message_id: entry.local_message_id,
