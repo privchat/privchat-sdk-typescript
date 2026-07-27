@@ -22,6 +22,26 @@ const advance = async (ms: number) => {
   await vi.advanceTimersByTimeAsync(ms);
 };
 
+/**
+ * Wait for a condition instead of draining a fixed number of microtasks.
+ *
+ * `for (…8…) await Promise.resolve()` only works while the implementation's
+ * promise chain happens to be shorter than the guess; add one `await`
+ * anywhere in authenticate and the assertion starts failing at random.
+ *
+ * Microtasks ONLY — deliberately never touches the fake clock. Advancing
+ * time here, even by zero, fires backoff timers the test is trying to
+ * observe as still pending, which turns a wait into a nondeterministic
+ * nudge (it made the next reconnect attempt land early, ~1 run in 5).
+ */
+const settle = async (predicate: () => boolean, label: string): Promise<void> => {
+  for (let i = 0; i < 500; i += 1) {
+    if (predicate()) return;
+    await Promise.resolve();
+  }
+  throw new Error(`condition never became true: ${label}`);
+};
+
 // Dexie/IndexedDB completion scheduling is intentionally not modeled by
 // these reconnect fake-timer tests. Authenticate under real timers so the
 // cache-owner transaction can settle, then restore the fake clock used for
@@ -550,6 +570,12 @@ describe('reconnect storm control (P0-12 parity with the Rust SDK)', () => {
   });
 
   it('keeps the backoff cycle alive after a transient authenticate failure', async () => {
+    // Backoff carries ±30% jitter by design (anti-reconnect-storm, mirrors
+    // the Rust SDK), so a 50ms base actually fires somewhere in 35–65ms.
+    // Two attempts can therefore fit inside an 80ms window, which made this
+    // test fail about 1 run in 5 — the assertion, not the SDK, was wrong.
+    // Pin the jitter so the schedule is exactly the configured 50ms.
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5);
     const t = new FakeTransport();
     let authCount = 0;
     t.responder = () => {
@@ -569,14 +595,14 @@ describe('reconnect storm control (P0-12 parity with the Rust SDK)', () => {
 
     t.fireClose();
     await advance(80);
-    for (let i = 0; i < 8; i++) await Promise.resolve();
+    await settle(() => authCount >= 2, 'first reconnect attempt');
     expect(authCount).toBe(2);
     // Old behaviour: cancelReconnect() → stuck. New behaviour: still cycling.
     expect(client.connectionState()).toBe('reconnecting');
 
     await advance(120);
-    for (let i = 0; i < 8; i++) await Promise.resolve();
+    await settle(() => client.connectionState() === 'authenticated', 're-authenticated');
     expect(authCount).toBe(3);
-    expect(client.connectionState()).toBe('authenticated');
+    randomSpy.mockRestore();
   });
 });

@@ -20,10 +20,21 @@
 import {
   CacheDB,
   MessageStore,
+  applyAckRekey as cacheApplyAckRekey,
+  claimOutboxEntry,
+  claimRepairRow,
+  commitOutboxTransition,
+  commitRepairTransition,
+  deleteOutboxEntryIfOwner,
+  deleteOutboxEntryIfRepairOwner,
   deleteMessageByRecordKey as cacheDeleteMessageByRecordKey,
   deleteOutboxEntry,
   listDueOutboxEntries,
+  MessageIdentityConflictError,
   messageRecordKey,
+  isMessageIdFree,
+  nextLocalMessageRecordId,
+  remintMessageIdentity,
   updateOutboxStatus,
   upsertMessage as cacheUpsertMessage,
   type MessageRecord,
@@ -71,6 +82,16 @@ export interface OutboxEngineConfig {
    *  (`next_attempt_at = MAX_SAFE_INTEGER`) and only `retryOutboxEntry`
    *  reactivates it. Default 8. */
   maxAttempts?: number;
+  /** How long a `sending` claim stays valid. After this the row is
+   *  reclaimable, which is what unsticks an attempt whose process died.
+   *  Must comfortably exceed a realistic send round-trip. Default 60s. */
+  leaseMs?: number;
+  /** Cap on one send round-trip. MUST stay below `leaseMs`, so an attempt
+   *  gives up before its own lease can be reclaimed under it. Default 30s. */
+  sendTimeoutMs?: number;
+  /** Repair passes an `integrity_error` row gets before it is declared
+   *  `local_data_error`. Default 3. */
+  maxRepairAttempts?: number;
 }
 
 /**
@@ -85,6 +106,35 @@ export interface OutboxEngineHooks {
    *  L1 `outbox_state_changed` emit AND a snapshot push to
    *  `observeOutbox` listeners. */
   onStateChanged?: (event: OutboxStateChangedEvent) => void;
+  /**
+   * The local cache is inconsistent in a way retrying cannot fix.
+   *
+   * The host is expected to attempt repair (resync the channel, and if
+   * that does not clear it, rebuild the cache) and to report the fault —
+   * this is a corrupted database or a broken migration, not a hiccup.
+   * Without it the row would sit in `integrity_error` and the UI would
+   * show "syncing" forever, which is a worse lie than an error.
+   */
+  onIntegrityFault?: (fault: OutboxIntegrityFault) => void | Promise<void>;
+}
+
+/** Context for [`OutboxEngineHooks.onIntegrityFault`]. */
+export interface OutboxIntegrityFault {
+  outbox_id: string;
+  local_message_id: string;
+  channel_id: string;
+  channel_type: number;
+  /** The message IS on the server — recovery must not re-send it. */
+  server_message_id: string;
+  /** Local row id that could not be reconciled. */
+  conflicting_id?: string;
+  /** Channel holding the row that already owns that id. Reported for
+   *  diagnosis only — repair must never delete it. */
+  conflicting_channel_id?: string;
+  error: string;
+  /** 1 on the first pass. Compare against the configured cap to know how
+   *  close this row is to being declared unrecoverable. */
+  repair_attempt?: number;
 }
 
 export interface OutboxEngineDeps {
@@ -110,6 +160,16 @@ export interface OutboxEngineDeps {
 const DEFAULT_INITIAL_DELAY_MS = 1_000;
 const DEFAULT_MAX_DELAY_MS = 30_000;
 const DEFAULT_MAX_ATTEMPTS = 8;
+const DEFAULT_LEASE_MS = 60_000;
+const DEFAULT_SEND_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_REPAIR_ATTEMPTS = 3;
+
+/** Opaque per-attempt owner id. Only ever compared for equality. */
+function newLeaseToken(): string {
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
 
 /** Row freezes with this `next_attempt_at` — far enough in the future
  *  that no realistic `Date.now()` can mark it due. IndexedDB stores it
@@ -129,6 +189,9 @@ export class OutboxEngine {
   private readonly initialDelayMs: number;
   private readonly maxDelayMs: number;
   private readonly maxAttempts: number;
+  private readonly leaseMs: number;
+  private readonly sendTimeoutMs: number;
+  private readonly maxRepairAttempts: number;
   private readonly warn: (msg: string, ctx?: Record<string, unknown>) => void;
   private readonly hooks: OutboxEngineHooks;
 
@@ -141,6 +204,15 @@ export class OutboxEngine {
     this.initialDelayMs = deps.config?.initialDelayMs ?? DEFAULT_INITIAL_DELAY_MS;
     this.maxDelayMs = deps.config?.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
     this.maxAttempts = deps.config?.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
+    this.leaseMs = deps.config?.leaseMs ?? DEFAULT_LEASE_MS;
+    // Clamped, not merely warned about. The API says the timeout must be
+    // shorter than the lease; honouring a configuration that breaks that
+    // would let attempts routinely outlive their lease, and while fencing
+    // keeps local state correct it cannot stop the redundant network sends
+    // that follow.
+    const requestedTimeout = deps.config?.sendTimeoutMs ?? DEFAULT_SEND_TIMEOUT_MS;
+    this.sendTimeoutMs = Math.min(requestedTimeout, Math.floor(this.leaseMs / 2));
+    this.maxRepairAttempts = deps.config?.maxRepairAttempts ?? DEFAULT_MAX_REPAIR_ATTEMPTS;
     this.warn =
       deps.warn ??
       ((msg, ctx) => {
@@ -148,6 +220,13 @@ export class OutboxEngine {
         console.warn(`[privchat:outbox] ${msg}`, ctx ?? {});
       });
     this.hooks = deps.hooks ?? {};
+    if (requestedTimeout !== this.sendTimeoutMs) {
+      this.warn('sendTimeoutMs clamped to stay below leaseMs', {
+        requested: requestedTimeout,
+        applied: this.sendTimeoutMs,
+        leaseMs: this.leaseMs,
+      });
+    }
   }
 
   /**
@@ -163,6 +242,12 @@ export class OutboxEngine {
    */
   async flushOutbox(options: OutboxFlushOptions = {}): Promise<OutboxFlushResult> {
     const startNow = this.now();
+    // Quarantined rows are never `due` — they are frozen — so repair has to
+    // be driven by status. Running it here (and from `recoverLocalState`
+    // at startup) is what makes it survive a reload: a fault reported once
+    // via a hook and then forgotten leaves the row stuck forever if the
+    // page dies before the host acts on it.
+    await this.repairIntegrityRows();
     let due = await listDueOutboxEntries(this.db, startNow);
 
     if (options.channel_id !== undefined) {
@@ -244,53 +329,304 @@ export class OutboxEngine {
     }
   }
 
+  /**
+   * Public entry for startup: converge everything that needs no network.
+   *
+   * Repairs quarantined rows and replays stored ACKs. Deliberately callable
+   * before (and without) a connection — both states describe messages the
+   * server already has.
+   */
+  async recoverLocalState(): Promise<void> {
+    await this.repairIntegrityRows();
+    const due = await listDueOutboxEntries(this.db, this.now());
+    const counters = { attempted: 0, sent: 0, failed: 0, skipped: 0 };
+    for (const entry of due) {
+      if (entry.status === 'ack_pending') {
+        await this.retryLocalCommit(entry, counters);
+      }
+    }
+  }
+
+  /**
+   * Drive `integrity_error` rows to a real end state.
+   *
+   * The message is on the server; what is broken is this device's ability
+   * to reconcile it. Each pass asks the host to repair the cache (resync,
+   * rebuild) and then replays the stored ACK — the conflict may well be
+   * gone afterwards, and the row converges to `sent` like any other.
+   *
+   * When repair keeps failing the row moves to `local_data_error`. That is
+   * the honest end state: "delivered, and this device cannot show it
+   * correctly". Leaving it in `integrity_error` would mean a permanent
+   * "syncing" spinner for something that will never converge.
+   */
+  private async repairIntegrityRows(): Promise<void> {
+    const rows = await this.db.outbox
+      .filter((r) => r.status === 'integrity_error')
+      .toArray();
+    if (rows.length === 0) return;
+
+    for (const row of rows) {
+      const token = newLeaseToken();
+      // Claim first — the counter lives inside the claim, so it measures
+      // repairs actually performed rather than flushes that happened to
+      // race. A row already being repaired, or still backing off, is left
+      // alone.
+      const entry = await claimRepairRow(
+        this.db,
+        row.outbox_id,
+        token,
+        this.now(),
+        this.leaseMs,
+      );
+      if (entry === undefined) continue;
+      const attempts = entry.repair_attempts ?? 1;
+
+      const repaired = await this.attemptRepair(entry, attempts, token);
+      if (repaired) continue;
+
+      // Back off before the next pass, and give up only after the budget
+      // is spent on real attempts.
+      const delay = Math.min(
+        this.initialDelayMs * Math.pow(2, attempts - 1),
+        this.maxDelayMs,
+      );
+      if (attempts >= this.maxRepairAttempts) {
+        const last_error = `local-data-error: repair failed ${attempts}x; ${entry.last_error ?? ''}`;
+        const stored = await commitRepairTransition(this.db, entry.outbox_id, token, {
+          status: 'local_data_error',
+          repair_lease_until: 0,
+          last_error,
+          updated_at: this.now(),
+        });
+        if (stored) {
+          this.emit({ ...identityOf(entry), status: 'local_data_error', last_error });
+        }
+      } else {
+        await commitRepairTransition(this.db, entry.outbox_id, token, {
+          repair_lease_until: 0,
+          repair_next_attempt_at: this.now() + delay,
+          updated_at: this.now(),
+        });
+      }
+    }
+  }
+
+  /**
+   * One repair pass. Returns whether the row converged.
+   *
+   * For an id collision the fix is to re-mint OUR row's local id, not to
+   * delete whichever row currently holds it — that row belongs to another
+   * conversation and may be perfectly valid; deleting it to free an
+   * arbitrary number would destroy a real message. `id` means nothing
+   * except "unique", so re-minting ours is lossless.
+   *
+   * The host hook still runs: some faults are database-level damage that
+   * only a resync or rebuild can address, and it is also where telemetry
+   * belongs. It is awaited, so a repair that needs the network completes
+   * before the replay below.
+   */
+  private async attemptRepair(
+    entry: OutboxEntry,
+    attempt: number,
+    repairToken: string,
+  ): Promise<boolean> {
+    try {
+      await this.hooks.onIntegrityFault?.({
+        outbox_id: entry.outbox_id,
+        local_message_id: entry.local_message_id,
+        channel_id: entry.channel_id,
+        channel_type: entry.channel_type,
+        server_message_id: entry.acked_server_message_id ?? '',
+        conflicting_id: entry.conflicting_id,
+        conflicting_channel_id: entry.conflicting_channel_id,
+        error: entry.last_error ?? 'integrity fault',
+        repair_attempt: attempt,
+      });
+    } catch (e) {
+      this.warn('onIntegrityFault hook threw', { error: formatErr(e) });
+    }
+
+    let overrideId: string | undefined;
+    if (entry.repair_kind === 'identity_conflict') {
+      try {
+        // Mint a replacement identity for OUR message and use it for both
+        // the stored pending row (when there is one) and the ACK below, so
+        // the two cannot disagree. The row that currently holds the
+        // contested id is never touched: it belongs to another
+        // conversation and may be a perfectly good message.
+        let candidate = nextLocalMessageRecordId();
+        for (let i = 0; i < 4 && !(await isMessageIdFree(this.db, candidate)); i += 1) {
+          candidate = nextLocalMessageRecordId();
+        }
+        overrideId = candidate;
+        // The pending row may not be on disk at all (the collision can
+        // arise from an id carried only in memory), in which case there is
+        // nothing to re-mint and the override alone does the job.
+        const reminted = await remintMessageIdentity(
+          this.db,
+          entry.channel_id,
+          entry.record_key,
+          candidate,
+        );
+        if (reminted !== undefined) {
+          this.store.upsertMessage(reminted, false);
+        }
+      } catch (e) {
+        this.warn('identity re-mint failed', {
+          outbox_id: entry.outbox_id,
+          error: formatErr(e),
+        });
+        return false;
+      }
+    }
+
+    const server_message_id = entry.acked_server_message_id;
+    if (server_message_id === undefined) return false;
+    try {
+      const owned = await this.applyAck(
+        entry,
+        {
+          client_seq: 0,
+          server_message_id,
+          message_seq: entry.acked_message_seq ?? 0,
+          reason_code: 0,
+        },
+        { kind: 'repair', token: repairToken },
+        overrideId,
+      );
+      if (owned) {
+        this.emit({ ...identityOf(entry), status: 'sent', server_message_id });
+        return true;
+      }
+    } catch (e) {
+      this.warn('integrity repair replay failed', {
+        outbox_id: entry.outbox_id,
+        repair_attempts: attempt,
+        error: formatErr(e),
+      });
+    }
+    return false;
+  }
+
   private async processRow(
     entry: OutboxEntry,
     counters: { attempted: number; sent: number; failed: number; skipped: number },
   ): Promise<void> {
+    // Already delivered, only the local commit outstanding: recover WITHOUT
+    // touching the network. The server has this message; sending it again
+    // would rely on server-side idempotency records that do not live
+    // forever, and if one ever expired the user would see their message
+    // twice. The ACK we already received is persisted on the row, so the
+    // retry is purely local.
+    //
+    // Checked BEFORE the connection gate on purpose: this work needs no
+    // network, so blocking it while offline would leave a delivered message
+    // showing as unsettled until connectivity returns, for no reason. It is
+    // likewise not counted as an `attempted` send — nothing is sent.
+    if (entry.status === 'ack_pending') {
+      await this.retryLocalCommit(entry, counters);
+      return;
+    }
+
     if (this.getConnectionState() !== 'authenticated') {
       counters.skipped += 1;
       return;
     }
 
-    counters.attempted += 1;
+    // Claim the row for this attempt. Compare-and-set inside one
+    // transaction: if another tab already holds a live lease we back off
+    // rather than send the same message twice. The lease also bounds the
+    // `sending` state — a process that dies mid-send would otherwise strand
+    // the row there forever, since the due query is the only way back and
+    // it skips leased rows.
+    const token = newLeaseToken();
+    const claimed = await claimOutboxEntry(
+      this.db,
+      entry.outbox_id,
+      token,
+      this.now(),
+      this.leaseMs,
+    );
+    if (claimed === undefined) {
+      // Someone else owns this attempt, or the row moved to a state that
+      // must not be re-sent (it is already delivered).
+      counters.skipped += 1;
+      return;
+    }
+    entry = claimed;
 
-    // Mark as `sending` so a concurrent flush (or future cold-start
-    // sweep) can recognise the in-flight state. listDueOutboxEntries
-    // already filters out `sending`, so a parallel pass won't double-
-    // attempt the row.
-    await updateOutboxStatus(this.db, entry.outbox_id, {
-      status: 'sending',
-      updated_at: this.now(),
-    });
+    counters.attempted += 1;
     this.emit({ ...identityOf(entry), status: 'sending' });
 
     const req = this.buildRequest(entry);
 
     let resp: SendMessageResponse;
     try {
-      resp = await this.sendMessage(req);
+      // Bounded by design, and the bound is shorter than the lease: a send
+      // that outlives its own lease is exactly how two owners end up
+      // writing the same row. The timeout does not make fencing optional —
+      // a suspended tab can exceed any timeout — it just makes the overlap
+      // rare instead of routine.
+      resp = await this.sendWithTimeout(req);
     } catch (e) {
-      const lastError = await this.handleTransient(entry, e);
+      const lastError = await this.handleTransient(entry, token, e);
+      if (lastError === undefined) return; // lease lost; not ours to report
       this.emit({ ...identityOf(entry), status: 'failed', last_error: lastError });
       counters.failed += 1;
       return;
     }
 
     if (resp.reason_code !== 0) {
-      const lastError = await this.handleRejected(entry, resp.reason_code);
+      const lastError = await this.handleRejected(entry, token, resp.reason_code);
+      if (lastError === undefined) return;
       this.emit({ ...identityOf(entry), status: 'failed', last_error: lastError });
       counters.failed += 1;
       return;
     }
 
-    await this.applyAck(entry, resp);
+    try {
+      const owned = await this.applyAck(entry, resp, { kind: 'send', token });
+      if (!owned) return; // another owner took over; it will converge
+    } catch (e) {
+      // The server took the message, but the local commit — cache rekey plus
+      // the outbox-row delete — did not land. The row is therefore still in
+      // the outbox, so reporting `sent` here would be a lie the next flush
+      // immediately contradicts.
+      await this.handleLocalCommitFailure(entry, resp, token, e, counters);
+      return;
+    }
     this.emit({
       ...identityOf(entry),
       status: 'sent',
       server_message_id: resp.server_message_id,
     });
     counters.sent += 1;
+  }
+
+  /**
+   * Send, bounded by `sendTimeoutMs`.
+   *
+   * The bound exists so an attempt cannot routinely outlive its own lease
+   * and end up writing over a successor's state. It is a mitigation, not a
+   * guarantee — a suspended tab blows through any timeout — which is why
+   * every terminal transition is fenced on the lease token regardless.
+   */
+  private async sendWithTimeout(req: SendMessageRequest): Promise<SendMessageResponse> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.sendMessage(req),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(`send timed out after ${this.sendTimeoutMs}ms`)),
+            this.sendTimeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
   private buildRequest(entry: OutboxEntry): SendMessageRequest {
@@ -308,9 +644,16 @@ export class OutboxEngine {
     };
   }
 
-  /** Returns the `last_error` string written to the row (for the
-   *  state-changed event payload). */
-  private async handleTransient(entry: OutboxEntry, error: unknown): Promise<string> {
+  /**
+   * Returns the `last_error` written to the row, or `undefined` when the
+   * lease was lost — meaning another attempt now owns this row and this
+   * one must write nothing and publish nothing.
+   */
+  private async handleTransient(
+    entry: OutboxEntry,
+    token: string,
+    error: unknown,
+  ): Promise<string | undefined> {
     const newAttempts = entry.attempt_count + 1;
     let next_attempt_at: number;
     let last_error: string;
@@ -330,26 +673,172 @@ export class OutboxEngine {
       next_attempt_at = this.now() + delay;
       last_error = `transient: ${formatErr(error)}`;
     }
-    await updateOutboxStatus(this.db, entry.outbox_id, {
+    const owned = await commitOutboxTransition(this.db, entry.outbox_id, token, {
       status: 'failed',
       attempt_count: newAttempts,
       next_attempt_at,
       last_error,
       updated_at: this.now(),
     });
+    if (!owned) {
+      this.warn('lease lost before recording the failure; another attempt owns the row', {
+        outbox_id: entry.outbox_id,
+      });
+      return undefined;
+    }
     return last_error;
   }
 
-  private async handleRejected(entry: OutboxEntry, code: number): Promise<string> {
+  /**
+   * The send succeeded but the local commit did not.
+   *
+   * Two outcomes, split by whether retrying can possibly help:
+   *
+   *   - **transient storage failure** → `ack_pending`. The server's ACK is
+   *     persisted on the row, so recovery replays it locally and never
+   *     goes back on the wire. Deliberately NOT `handleTransient`: that
+   *     counter measures how many times the *server* refused the message
+   *     and freezes the row when exhausted — spending it here would
+   *     eventually freeze a message that was successfully delivered.
+   *   - **[`MessageIdentityConflictError`]** → `integrity_error`. Its own
+   *     contract says it means a broken migration, a corrupted database,
+   *     or a reused id. Retrying cannot fix any of those, so the row is
+   *     quarantined: no network, no retry loop, reported for repair.
+   */
+  private async handleLocalCommitFailure(
+    entry: OutboxEntry,
+    resp: SendMessageResponse,
+    token: string | undefined,
+    error: unknown,
+    counters: { failed: number },
+  ): Promise<void> {
+    /** Fenced write when this attempt holds a lease; plain write when the
+     *  caller is the lease-free local recovery path. */
+    const write = async (patch: Parameters<typeof updateOutboxStatus>[2]): Promise<boolean> => {
+      if (token === undefined) {
+        await updateOutboxStatus(this.db, entry.outbox_id, patch);
+        return true;
+      }
+      return commitOutboxTransition(this.db, entry.outbox_id, token, patch);
+    };
+    const ackFields = {
+      acked_server_message_id: resp.server_message_id,
+      acked_message_seq: resp.message_seq,
+    };
+
+    if (error instanceof MessageIdentityConflictError) {
+      const last_error = `integrity: ${formatErr(error)}`;
+      this.warn('local cache integrity fault; message IS delivered, row quarantined', {
+        outbox_id: entry.outbox_id,
+        conflicting_id: error.id,
+        conflicting_channel_id: error.conflicting_channel_id,
+        last_error,
+      });
+      const stored = await write({
+        status: 'integrity_error',
+        ...ackFields,
+        // Persist WHAT is broken, not just that something is. A repair pass
+        // after a restart only has the row: without the conflicting id and
+        // the channel that holds it, it cannot tell an id collision from
+        // any other fault, and re-syncing this channel would never touch
+        // the row that actually owns the id.
+        repair_kind: 'identity_conflict',
+        conflicting_id: error.id,
+        conflicting_channel_id: error.conflicting_channel_id,
+        // Not due for a send ever again; the repair pass picks it up by
+        // status instead.
+        next_attempt_at: FROZEN_NEXT_ATTEMPT_AT,
+        repair_next_attempt_at: this.now(),
+        last_error,
+        updated_at: this.now(),
+      });
+      if (!stored) return; // lease lost; the new owner owns the outcome
+      this.emit({ ...identityOf(entry), status: 'integrity_error', last_error });
+      // No repair from here. Repair is the persistent actor's job only —
+      // a fire-and-forget call at this point would run concurrently with
+      // the actor's own pass on the very next flush, giving one row two
+      // uncoordinated repair drivers.
+      counters.failed += 1;
+      return;
+    }
+
+    const failures = (entry.local_commit_failures ?? 0) + 1;
+    const delay = Math.min(
+      this.initialDelayMs * Math.pow(2, failures - 1),
+      this.maxDelayMs,
+    );
+    const last_error = `local-commit: ${formatErr(error)}`;
+    this.warn('ACK could not be committed locally; message IS delivered', {
+      outbox_id: entry.outbox_id,
+      local_commit_failures: failures,
+      last_error,
+    });
+    const stored = await write({
+      status: 'ack_pending',
+      ...ackFields,
+      // `attempt_count` deliberately untouched.
+      local_commit_failures: failures,
+      next_attempt_at: this.now() + delay,
+      last_error,
+      updated_at: this.now(),
+    });
+    if (!stored) return;
+    this.emit({ ...identityOf(entry), status: 'ack_pending', last_error });
+    counters.failed += 1;
+  }
+
+  /**
+   * Replay a persisted ACK locally. No network: the message is already
+   * delivered, and `acked_server_message_id` is the server's own answer
+   * for it, captured when the send succeeded.
+   */
+  private async retryLocalCommit(
+    entry: OutboxEntry,
+    counters: { sent: number; failed: number },
+  ): Promise<void> {
+    const server_message_id = entry.acked_server_message_id;
+    if (server_message_id === undefined) {
+      // Cannot happen through `handleLocalCommitFailure`, which always
+      // writes the ids alongside the status. Guard rather than silently
+      // re-send: putting a delivered message back on the wire is the one
+      // outcome this state exists to prevent.
+      this.warn('ack_pending row has no stored ACK; leaving it for repair', {
+        outbox_id: entry.outbox_id,
+      });
+      counters.failed += 1;
+      return;
+    }
+    const resp: SendMessageResponse = {
+      client_seq: 0,
+      server_message_id,
+      message_seq: entry.acked_message_seq ?? 0,
+      reason_code: 0,
+    };
+    try {
+      await this.applyAck(entry, resp, { kind: 'none' });
+    } catch (e) {
+      await this.handleLocalCommitFailure(entry, resp, undefined, e, counters);
+      return;
+    }
+    this.emit({ ...identityOf(entry), status: 'sent', server_message_id });
+    counters.sent += 1;
+  }
+
+  /** As `handleTransient`: `undefined` means the lease was lost. */
+  private async handleRejected(
+    entry: OutboxEntry,
+    token: string,
+    code: number,
+  ): Promise<string | undefined> {
     const last_error = `rejected: code=${code}`;
-    await updateOutboxStatus(this.db, entry.outbox_id, {
+    const owned = await commitOutboxTransition(this.db, entry.outbox_id, token, {
       status: 'failed',
       attempt_count: entry.attempt_count + 1,
       next_attempt_at: FROZEN_NEXT_ATTEMPT_AT,
       last_error,
       updated_at: this.now(),
     });
-    return last_error;
+    return owned ? last_error : undefined;
   }
 
   private emit(
@@ -370,16 +859,78 @@ export class OutboxEngine {
    * sequence, just sourced from the persisted outbox entry instead of
    * the live request.
    */
-  private async applyAck(entry: OutboxEntry, resp: SendMessageResponse): Promise<void> {
+  private async applyAck(
+    entry: OutboxEntry,
+    resp: SendMessageResponse,
+    /**
+     * Which lease authorises this commit. `send` is the claim taken before
+     * going on the wire; `repair` is the one the repair actor holds. They
+     * are separate fields on the row and must never be conflated — a
+     * repair pass validating against the send token (or against nothing)
+     * can delete a row a *different* owner is working on.
+     *
+     * `none` is only for the local ACK replay of an `ack_pending` row,
+     * which no lease guards because it is not contended: the row cannot be
+     * claimed for sending in that state.
+     */
+    lease: { kind: 'send' | 'repair'; token: string } | { kind: 'none' },
+    /** Repair path: replacement local identity for this row. */
+    overrideId?: string,
+  ): Promise<boolean> {
     const pendingKey = entry.record_key;
-    const pendingRec = this.resolvePending(entry);
+    const pendingRec = await this.resolvePending(entry);
     const acked: MessageRecord = {
       ...pendingRec,
+      ...(overrideId !== undefined ? { id: overrideId } : {}),
       server_message_id: resp.server_message_id,
       local_message_id: entry.local_message_id,
       pts: String(resp.message_seq),
       status: 'sent',
     };
+
+    // IDB first: single rw transaction across messages + outbox so a tab
+    // refresh can't observe a half-applied ACK. The rekey is atomic and
+    // returns what it stored, so memory publishes what is durable — not an
+    // optimistic `sent` that a crash could roll back to forever-pending.
+    //
+    // A failure propagates to the caller, which turns it into a transient
+    // retry. Catching it here and continuing would publish `sent` for a row
+    // still sitting in the outbox table.
+    //
+    // The outbox delete is fenced on the lease: if this attempt's lease
+    // expired and another owner took over, the row is theirs and deleting
+    // it here would erase their state. Losing the race is not an error —
+    // the new owner converges — but this attempt must then publish nothing.
+    let durable = acked;
+    let owned = true;
+    await this.db.transaction(
+      'rw',
+      this.db.messages,
+      this.db.outbox,
+      async () => {
+        if (lease.kind === 'send') {
+          owned = await deleteOutboxEntryIfOwner(this.db, entry.outbox_id, lease.token);
+        } else if (lease.kind === 'repair') {
+          owned = await deleteOutboxEntryIfRepairOwner(this.db, entry.outbox_id, lease.token);
+        } else {
+          await deleteOutboxEntry(this.db, entry.outbox_id);
+        }
+        if (!owned) return;
+        durable = await cacheApplyAckRekey(
+          this.db,
+          entry.channel_id,
+          entry.channel_type,
+          pendingKey,
+          acked,
+        );
+      },
+    );
+    if (!owned) {
+      this.warn('lease lost before the ACK could be committed; leaving it to the new owner', {
+        outbox_id: entry.outbox_id,
+      });
+      return false;
+    }
 
     // Memory: pending → sent. Patches carry removed=[oldKey] when the
     // record_key changes (always the case here: l: → s:).
@@ -387,29 +938,10 @@ export class OutboxEngine {
       entry.channel_id,
       entry.channel_type,
       pendingKey,
-      acked,
+      durable,
       false,
     );
-
-    // IDB: single rw transaction across messages + outbox so a tab
-    // refresh can't observe a half-applied ACK.
-    await this.db
-      .transaction('rw', this.db.messages, this.db.outbox, async () => {
-        await cacheDeleteMessageByRecordKey(
-          this.db,
-          entry.channel_id,
-          entry.channel_type,
-          pendingKey,
-        );
-        await cacheUpsertMessage(this.db, acked);
-        await deleteOutboxEntry(this.db, entry.outbox_id);
-      })
-      .catch((e) => {
-        this.warn('applyAck IDB tx failed', {
-          outbox_id: entry.outbox_id,
-          error: formatErr(e),
-        });
-      });
+    return true;
   }
 
   /**
@@ -417,13 +949,20 @@ export class OutboxEngine {
    * else reconstruct from the outbox row. Reconstruction only happens
    * on cold-start paths (5C-1f) where the in-process MessageStore is
    * fresh; for in-session flushes the memory hit is the common case.
+   *
+   * On the reconstruction path the cached row is consulted for its `id`:
+   * the record identity must survive a cold start, not be re-minted (the
+   * ACK deletes the pending row, so the store-level assign-once fallback
+   * can no longer see it by then).
    */
-  private resolvePending(entry: OutboxEntry): MessageRecord {
+  private async resolvePending(entry: OutboxEntry): Promise<MessageRecord> {
     const memHit = this.store
       .getMessages(entry.channel_id, entry.channel_type)
       .find((m) => messageRecordKey(m) === entry.record_key);
     if (memHit) return memHit;
+    const cached = await this.db.messages.get([entry.channel_id, entry.record_key]);
     return {
+      id: cached?.id ?? nextLocalMessageRecordId(),
       channel_id: entry.channel_id,
       channel_type: entry.channel_type,
       local_message_id: entry.local_message_id,

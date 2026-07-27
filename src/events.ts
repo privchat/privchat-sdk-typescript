@@ -141,10 +141,26 @@ export interface OutboxStateChangedEvent {
   local_message_id: string;
   channel_id: string;
   channel_type: number;
-  /** Five-state surface — `pending` / `sending` / `failed` are
-   *  persisted; `sent` / `discarded` are transient (the row is gone
-   *  by the time this event fires). */
-  status: 'pending' | 'sending' | 'sent' | 'failed' | 'discarded';
+  /**
+   * `pending` / `sending` / `failed` / `ack_pending` / `integrity_error`
+   * are persisted; `sent` / `discarded` are transient (the row is gone by
+   * the time this event fires).
+   *
+   * `ack_pending` and `integrity_error` mean the message **was delivered**
+   * and only local convergence is outstanding. Render them as "syncing",
+   * never as a send failure with a retry button: a retry that mints a new
+   * `local_message_id` sends the message a second time.
+   */
+  status:
+    | 'pending'
+    | 'sending'
+    | 'sent'
+    | 'failed'
+    | 'discarded'
+    | 'ack_pending'
+    | 'integrity_error'
+    /** Repair exhausted: delivered remotely, unreconcilable locally. */
+    | 'local_data_error';
   /** Populated for `'sent'`. */
   server_message_id?: string;
   /** Populated for `'failed'`. Free-form; prefix discriminates

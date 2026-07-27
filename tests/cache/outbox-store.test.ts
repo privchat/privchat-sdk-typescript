@@ -160,16 +160,46 @@ describe('per-channel FIFO ordering', () => {
 // ----- Case 4: listDueOutboxEntries (status + next_attempt_at filter) -----
 
 describe('listDueOutboxEntries', () => {
-  it('returns only pending/failed rows whose next_attempt_at <= now', async () => {
+  it('excludes a sending row while its lease is live', async () => {
     const db = newDb();
     await putOutboxEntry(db, entry('p-due', { status: 'pending', next_attempt_at: NOW - 100 }));
     await putOutboxEntry(db, entry('p-future', { status: 'pending', next_attempt_at: NOW + 1000 }));
     await putOutboxEntry(db, entry('f-due', { status: 'failed', next_attempt_at: NOW - 50 }));
-    await putOutboxEntry(db, entry('s-due', { status: 'sending', next_attempt_at: NOW - 100 }));
+    await putOutboxEntry(
+      db,
+      entry('s-leased', {
+        status: 'sending',
+        next_attempt_at: NOW - 100,
+        lease_token: 'someone-else',
+        lease_until: NOW + 30_000,
+      }),
+    );
 
     const due = await listDueOutboxEntries(db, NOW);
-    const ids = due.map((r) => r.outbox_id).sort();
-    expect(ids).toEqual(['f-due', 'p-due']); // sending excluded; future excluded
+    expect(due.map((r) => r.outbox_id).sort()).toEqual(['f-due', 'p-due']);
+  });
+
+  it('reclaims a sending row whose lease expired', async () => {
+    // The owner died mid-send. Nothing else selects `sending`, so without
+    // this the message would stay there forever.
+    const db = newDb();
+    await putOutboxEntry(
+      db,
+      entry('s-expired', {
+        status: 'sending',
+        next_attempt_at: NOW - 100,
+        lease_token: 'dead-tab',
+        lease_until: NOW - 1,
+      }),
+    );
+    // A row written before leases existed, or by a build without them.
+    await putOutboxEntry(
+      db,
+      entry('s-legacy', { status: 'sending', next_attempt_at: NOW - 100 }),
+    );
+
+    const due = await listDueOutboxEntries(db, NOW);
+    expect(due.map((r) => r.outbox_id).sort()).toEqual(['s-expired', 's-legacy']);
   });
 
   it('treats next_attempt_at === now as due (boundary)', async () => {
@@ -290,6 +320,7 @@ describe('Dexie v2 migration', () => {
     await upsertChannels(db, [channel]);
 
     const msg: MessageRecord = {
+      id: 'r-s-1',
       channel_id: 'c1',
       channel_type: 1,
       server_message_id: 's-1',

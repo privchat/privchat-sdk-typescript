@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   CacheDB,
+  applyAckRekey,
   clearAll,
   deleteMessageByRecordKey,
   deleteMessageByServerId,
@@ -16,7 +17,11 @@ import {
   upsertMessages,
   upsertSyncState,
 } from '../../src/cache/indexeddb-store.js';
-import type { ChannelRecord, MessageRecord } from '../../src/cache/types.js';
+import {
+  nextLocalMessageRecordId,
+  type ChannelRecord,
+  type MessageRecord,
+} from '../../src/cache/types.js';
 
 const sampleChannel = (overrides: Partial<ChannelRecord> = {}): ChannelRecord => ({
   channel_id: '12345',
@@ -38,6 +43,9 @@ const sampleMessage = (
   id: string,
   overrides: Partial<MessageRecord> = {},
 ): MessageRecord => ({
+  // 本地稳定行身份（§3.3）：account 内全局唯一，所以按真实生成器铸，
+  // 不能按入参派生 —— 不同频道的同名样本会撞唯一索引。
+  id: nextLocalMessageRecordId(),
   channel_id: '12345',
   channel_type: 1,
   server_message_id: `s-${id}`,
@@ -144,6 +152,7 @@ describe('messages table', () => {
 
   it('deleteMessageByRecordKey removes pending row by its local key', async () => {
     const pending: MessageRecord = {
+      id: 'r-local-1',
       channel_id: '12345',
       channel_type: 1,
       local_message_id: 'local-1',
@@ -158,6 +167,135 @@ describe('messages table', () => {
     expect(await getMessageWindow(db, '12345', 1, 10)).toHaveLength(1);
     await deleteMessageByRecordKey(db, '12345', 1, 'l:local-1');
     expect(await getMessageWindow(db, '12345', 1, 10)).toEqual([]);
+  });
+
+  // CONVERSATION_DEPENDENCY_READINESS §3.3: `id` is the identity that
+  // pending dependencies and projections are keyed by. `record_key` flips
+  // `l:` → `s:` on ACK, so anything keyed by it loses its row at that
+  // moment — `id` must not move with it.
+  describe('stable local id', () => {
+    const pending: MessageRecord = {
+      id: 'r-local-1',
+      channel_id: '12345',
+      channel_type: 1,
+      local_message_id: 'local-1',
+      from_uid: '999',
+      message_type: 'text',
+      content: 'hi',
+      payload: new Uint8Array(),
+      timestamp: 999,
+      status: 'pending',
+    };
+
+    /** What the ACK path builds: a fresh record for the same message,
+     *  carrying a newly minted id because the caller rebuilt it. The store
+     *  must ignore that id and keep the pending row's. */
+    const ackedFor = (serverId: string): MessageRecord => ({
+      ...pending,
+      id: nextLocalMessageRecordId(),
+      server_message_id: serverId,
+      status: 'sent',
+    });
+
+    it('survives the ACK record_key flip even when the caller re-mints it', async () => {
+      await upsertMessage(db, pending);
+      const stored = await applyAckRekey(db, '12345', 1, 'l:local-1', ackedFor('srv-1'));
+
+      const win = await getMessageWindow(db, '12345', 1, 10);
+      expect(win).toHaveLength(1);
+      expect(win[0]!.server_message_id).toBe('srv-1');
+      expect(win[0]!.id).toBe('r-local-1');
+      // The returned row is what callers publish — it must match disk.
+      expect(stored.id).toBe('r-local-1');
+    });
+
+    it('is not re-minted when the same message is cached again', async () => {
+      // A re-opened conversation re-fetches history and rebuilds records,
+      // minting a fresh id each time. The stored identity must win, or the
+      // row either duplicates or fails its unique index.
+      const first: MessageRecord = { ...pending, server_message_id: 'srv-2', id: 'r-first' };
+      await upsertMessages(db, [first]);
+      await upsertMessages(db, [{ ...first, id: 'r-second-mint', content: 'edited' }]);
+
+      const win = await getMessageWindow(db, '12345', 1, 10);
+      expect(win).toHaveLength(1);
+      expect(win[0]!.id).toBe('r-first');
+      expect(win[0]!.content).toBe('edited');
+    });
+
+    it('pending identity wins when the self-push beat the ACK', async () => {
+      // The server echoes our own message back before the ACK for it
+      // returns. That push row is keyed `s:srv-3` with an id of its own,
+      // while the UI has been showing the pending row since send. If the
+      // push id won, every dependency recorded against the pending row
+      // would dangle.
+      await upsertMessage(db, pending);
+      await upsertMessage(db, {
+        ...pending,
+        id: 'r-from-push',
+        local_message_id: undefined,
+        server_message_id: 'srv-3',
+        status: 'received',
+      });
+      expect(await getMessageWindow(db, '12345', 1, 10)).toHaveLength(2);
+
+      await applyAckRekey(db, '12345', 1, 'l:local-1', ackedFor('srv-3'));
+
+      const win = await getMessageWindow(db, '12345', 1, 10);
+      expect(win).toHaveLength(1);
+      expect(win[0]!.id).toBe('r-local-1');
+      expect(win[0]!.status).toBe('sent');
+    });
+
+    it('leaves one row when the ACK lands before the self-push', async () => {
+      await upsertMessage(db, pending);
+      await applyAckRekey(db, '12345', 1, 'l:local-1', ackedFor('srv-4'));
+      // Push arrives afterwards for the same server id: a plain upsert on
+      // an existing key, so it must merge, not duplicate or re-mint.
+      await upsertMessage(db, {
+        ...pending,
+        id: 'r-late-push',
+        local_message_id: undefined,
+        server_message_id: 'srv-4',
+        status: 'received',
+      });
+
+      const win = await getMessageWindow(db, '12345', 1, 10);
+      expect(win).toHaveLength(1);
+      expect(win[0]!.id).toBe('r-local-1');
+    });
+
+    it('a failed ACK leaves the pending row intact and is retryable', async () => {
+      await upsertMessage(db, pending);
+      // A record with neither id is unwritable — `messageRecordKey` throws
+      // inside the transaction, which must roll the whole thing back.
+      const broken = { ...pending, local_message_id: undefined } as MessageRecord;
+      await expect(
+        applyAckRekey(db, '12345', 1, 'l:local-1', broken),
+      ).rejects.toThrow();
+
+      const afterFailure = await getMessageWindow(db, '12345', 1, 10);
+      expect(afterFailure).toHaveLength(1);
+      expect(afterFailure[0]!.status).toBe('pending');
+      expect(afterFailure[0]!.id).toBe('r-local-1');
+
+      // Retry succeeds and still carries the original identity.
+      await applyAckRekey(db, '12345', 1, 'l:local-1', ackedFor('srv-5'));
+      const afterRetry = await getMessageWindow(db, '12345', 1, 10);
+      expect(afterRetry).toHaveLength(1);
+      expect(afterRetry[0]!.id).toBe('r-local-1');
+      expect(afterRetry[0]!.status).toBe('sent');
+    });
+
+    it('rejects the same id in a different channel (account-global)', async () => {
+      // `pending_dependency` names a consumer by a bare `message.id`, with
+      // no channel beside it. An id unique only within its channel would
+      // resolve to two rows.
+      await upsertMessage(db, pending);
+      await expect(
+        upsertMessage(db, { ...pending, channel_id: 'other-channel' }),
+      ).rejects.toThrow();
+    });
   });
 
   it('messages from different (channel, type) are isolated', async () => {

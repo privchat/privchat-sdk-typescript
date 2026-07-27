@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Packet, PacketType } from '@msgtrans/client';
 import {
   MessageType,
@@ -195,7 +195,17 @@ describe('sendTextMessage — cache-enabled, online happy path', () => {
       content: '发送后立即可见',
       local_message_id: '9007199254740993',
     });
+    // Local echo is published in the same tick as the call — the pending
+    // row's durable write happens before the wire send, never before this.
     expect(snapshots.at(-1)).toEqual(['发送后立即可见']);
+
+    // The race under test is push-vs-ACK, so wait until the send has
+    // actually reached the transport. Firing the push before that would be
+    // a different scenario (push for a message we hadn't sent yet) and the
+    // echoed `local_message_id` wouldn't be known yet.
+    await vi.waitFor(() => {
+      expect(sentLocalId).not.toBe('');
+    });
 
     t.fireMessage(new Packet({
       packetType: PacketType.OneWay,

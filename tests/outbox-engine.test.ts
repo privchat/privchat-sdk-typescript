@@ -7,9 +7,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CacheDB,
   MessageStore,
+  getMessageWindow,
   getOutboxEntry,
   listOutboxEntries,
   putOutboxEntry,
+  upsertMessage,
   type OutboxEntry,
 } from '../src/cache/index.js';
 import {
@@ -17,6 +19,8 @@ import {
   OutboxEngine,
   type OutboxEngineDeps,
 } from '../src/outbox-engine.js';
+import { claimOutboxEntry, updateOutboxStatus } from '../src/cache/index.js';
+import type { OutboxStateChangedEvent } from '../src/events.js';
 import type {
   SendMessageRequest,
   SendMessageResponse,
@@ -190,6 +194,7 @@ describe('OutboxEngine — happy path', () => {
     // sendTextMessage would have done).
     h.store.upsertMessage(
       {
+        id: 'r-A',
         channel_id: '100',
         channel_type: 1,
         local_message_id: 'A',
@@ -259,16 +264,25 @@ describe('OutboxEngine — gating', () => {
     expect(h.sendCalls).toHaveLength(0);
   });
 
-  it('Case 5: sending entry is excluded (caller already in-flight)', async () => {
+  it('Case 5: sending entry with a live lease is excluded (attempt in flight)', async () => {
     const h = newHarness();
     h.setSendImpl(async () => okResp('s'));
-    await putOutboxEntry(h.db, row('IN-FLIGHT', { status: 'sending' }));
+    await putOutboxEntry(
+      h.db,
+      row('IN-FLIGHT', {
+        status: 'sending',
+        lease_token: 'another-tab',
+        lease_until: NOW + 30_000,
+      }),
+    );
 
     const result = await h.engine.flushOutbox();
     expect(result.attempted).toBe(0);
-    // Row stays sending; nothing changed.
+    expect(h.sendCalls).toHaveLength(0);
+    // Row stays sending, still owned by the other attempt.
     const after = await getOutboxEntry(h.db, 'IN-FLIGHT');
     expect(after?.status).toBe('sending');
+    expect(after?.lease_token).toBe('another-tab');
   });
 
   it('frozen entry (next_attempt_at = MAX_SAFE_INTEGER) is excluded', async () => {
@@ -518,5 +532,817 @@ describe('OutboxEngine — sendMessage request shape', () => {
     expect(req.local_message_id).toBe('REQ');
     expect(req.message_type).toBe(0); // text
     expect(new TextDecoder().decode(req.payload)).toBe('hello world');
+  });
+});
+
+/**
+ * A cache integrity fault is permanent — quarantine, never retry.
+ *
+ * `MessageIdentityConflictError` means a broken migration, a corrupted
+ * database, or a reused id. Retrying cannot fix any of those, and the
+ * message is already delivered, so the row must stop moving entirely
+ * rather than loop forever or go back on the wire.
+ */
+describe('OutboxEngine — permanent integrity fault quarantines the row', () => {
+  async function seedConflict(h: Harness): Promise<void> {
+    h.store.upsertMessage(
+      {
+        id: 'r-A',
+        channel_id: '100',
+        channel_type: 1,
+        local_message_id: 'A',
+        from_uid: '999',
+        message_type: 'text',
+        content: 'body-A',
+        payload: new Uint8Array(),
+        timestamp: NOW,
+        status: 'pending',
+      },
+      false,
+    );
+    // Park the pending row's identity on an unrelated row: the rekey then
+    // refuses to overwrite it and raises the integrity error.
+    await upsertMessage(h.db, {
+      id: 'r-A',
+      channel_id: 'someone-elses-channel',
+      channel_type: 1,
+      server_message_id: 'foreign-1',
+      from_uid: '1',
+      message_type: 'text',
+      content: 'unrelated message',
+      payload: new Uint8Array(),
+      timestamp: NOW,
+      status: 'received',
+    });
+    h.setSendImpl(async () => okResp('s-A', 42));
+    await putOutboxEntry(h.db, row('A'));
+  }
+
+  it('freezes the row and records the delivered ACK', async () => {
+    const h = newHarness();
+    await seedConflict(h);
+
+    await h.engine.flushOutbox();
+
+    const entry = await getOutboxEntry(h.db, 'A');
+    expect(entry?.status).toBe('integrity_error');
+    expect(entry?.next_attempt_at).toBe(FROZEN_NEXT_ATTEMPT_AT);
+    expect(entry?.last_error).toMatch(/^integrity:/);
+    // The message IS delivered — the ACK is kept so repair never has to
+    // ask the network again.
+    expect(entry?.acked_server_message_id).toBe('s-A');
+    expect(entry?.acked_message_seq).toBe(42);
+  });
+
+  it('never touches the network again', async () => {
+    const h = newHarness();
+    await seedConflict(h);
+
+    for (let i = 0; i < 4; i += 1) {
+      h.setNow(NOW + i * 3_600_000);
+      await h.engine.flushOutbox();
+    }
+
+    // Exactly one send, on the first pass. Frozen rows are not even due.
+    expect(h.sendCalls).toHaveLength(1);
+  });
+
+  it('reports integrity_error rather than a plain send failure', async () => {
+    const db = newDb();
+    const store = new MessageStore();
+    const events: string[] = [];
+    const engine = new OutboxEngine({
+      db,
+      store,
+      sendMessage: async () => okResp('s-A', 42),
+      getConnectionState: () => 'authenticated',
+      now: () => NOW,
+      warn: () => {},
+      hooks: { onStateChanged: (e) => events.push(e.status) },
+    });
+    store.upsertMessage(
+      {
+        id: 'r-A',
+        channel_id: '100',
+        channel_type: 1,
+        local_message_id: 'A',
+        from_uid: '999',
+        message_type: 'text',
+        content: 'body-A',
+        payload: new Uint8Array(),
+        timestamp: NOW,
+        status: 'pending',
+      },
+      false,
+    );
+    await upsertMessage(db, {
+      id: 'r-A',
+      channel_id: 'someone-elses-channel',
+      channel_type: 1,
+      server_message_id: 'foreign-1',
+      from_uid: '1',
+      message_type: 'text',
+      content: 'unrelated message',
+      payload: new Uint8Array(),
+      timestamp: NOW,
+      status: 'received',
+    });
+    await putOutboxEntry(db, row('A'));
+
+    await engine.flushOutbox();
+
+    // Never `sent` (untrue locally) and never plain `failed` (which a UI
+    // renders with a retry button — and a retry would double-send).
+    expect(events).not.toContain('sent');
+    expect(events).not.toContain('failed');
+    expect(events.at(-1)).toBe('integrity_error');
+    db.close();
+  });
+
+  it('does not destroy the unrelated row that held the identity', async () => {
+    const h = newHarness();
+    await seedConflict(h);
+
+    await h.engine.flushOutbox();
+
+    const foreign = await getMessageWindow(h.db, 'someone-elses-channel', 1, 10);
+    expect(foreign).toHaveLength(1);
+    expect(foreign[0]!.content).toBe('unrelated message');
+  });
+
+  it('leaves the in-memory row pending rather than publishing sent', async () => {
+    const h = newHarness();
+    await seedConflict(h);
+
+    await h.engine.flushOutbox();
+
+    const cached = h.store.getMessages('100', 1);
+    expect(cached).toHaveLength(1);
+    expect(cached[0]!.status).toBe('pending');
+    expect(cached[0]!.server_message_id).toBeUndefined();
+  });
+});
+
+/**
+ * `sending` must be a state the row can always leave.
+ *
+ * The due query is the only path back, and it skips leased rows — so a
+ * process that dies mid-attempt would strand the message there forever
+ * without an expiry. The same lease is what keeps two tabs from sending
+ * one message twice.
+ */
+describe('OutboxEngine — sending lease', () => {
+  it('claims the row with a lease before sending', async () => {
+    const h = newHarness();
+    let observed: OutboxEntry | undefined;
+    h.setSendImpl(async () => {
+      // Read the row as it stands *during* the send.
+      observed = await getOutboxEntry(h.db, 'A');
+      return okResp('s-A', 42);
+    });
+    await putOutboxEntry(h.db, row('A'));
+
+    await h.engine.flushOutbox();
+
+    expect(observed?.status).toBe('sending');
+    expect(observed?.lease_token).toMatch(/^[0-9a-f]{32}$/);
+    expect(observed?.lease_until).toBeGreaterThan(NOW);
+  });
+
+  it('recovers a row stranded in sending by a crash', async () => {
+    // What a tab killed between claiming and finishing leaves behind.
+    const h = newHarness();
+    h.setSendImpl(async () => okResp('s-A', 42));
+    await putOutboxEntry(
+      h.db,
+      row('A', {
+        status: 'sending',
+        lease_token: 'dead-tab',
+        lease_until: NOW - 1,
+      }),
+    );
+
+    const result = await h.engine.flushOutbox();
+
+    expect(result.sent).toBe(1);
+    // Retried under the SAME local_message_id, so a send the server already
+    // saw is deduped rather than delivered a second time.
+    expect(h.sendCalls.map((c) => c.local_message_id)).toEqual(['A']);
+    expect(await getOutboxEntry(h.db, 'A')).toBeUndefined();
+  });
+
+  it('recovers a row whose server ACK landed before the crash', async () => {
+    // Killed after the server accepted but before `ack_pending` was
+    // written: the row is still `sending` with no stored ACK, so recovery
+    // has to go through the network again — and the server dedupes on the
+    // unchanged local_message_id.
+    const h = newHarness();
+    h.setSendImpl(async () => okResp('s-A', 42));
+    await putOutboxEntry(
+      h.db,
+      row('A', { status: 'sending', lease_token: 'dead-tab', lease_until: NOW - 1 }),
+    );
+    h.store.upsertMessage(
+      {
+        id: 'r-A',
+        channel_id: '100',
+        channel_type: 1,
+        local_message_id: 'A',
+        from_uid: '999',
+        message_type: 'text',
+        content: 'body-A',
+        payload: new Uint8Array(),
+        timestamp: NOW,
+        status: 'pending',
+      },
+      false,
+    );
+
+    await h.engine.flushOutbox();
+
+    const cached = h.store.getMessages('100', 1);
+    expect(cached).toHaveLength(1);
+    expect(cached[0]!.status).toBe('sent');
+    expect(cached[0]!.server_message_id).toBe('s-A');
+    expect(cached[0]!.id).toBe('r-A');
+  });
+
+  // Same caveat as the sync-engine cross-tab case: under fake-indexeddb the
+  // two flushes end up serialised, so this passes against the pre-lease
+  // implementation too (verified) — it does not reproduce a real race. Kept
+  // as a regression guard on the single-send outcome. The guarantee itself
+  // is `claimOutboxEntry`'s compare-and-set inside one transaction.
+  it('two engines on one row send it exactly once', async () => {
+    // Two tabs, one account, one shared database.
+    const dbName = `outbox-race-${Math.random().toString(36).slice(2, 8)}`;
+    const dbA = new CacheDB(dbName);
+    const dbB = new CacheDB(dbName);
+    const sends: string[] = [];
+    const mk = (db: CacheDB) =>
+      new OutboxEngine({
+        db,
+        store: new MessageStore(),
+        sendMessage: async (req) => {
+          sends.push(req.local_message_id);
+          // Hold the wire open so both engines are inside the send window.
+          await new Promise((r) => setTimeout(r, 20));
+          return okResp('s-A', 42);
+        },
+        getConnectionState: () => 'authenticated',
+        now: () => NOW,
+        warn: () => {},
+      });
+    await putOutboxEntry(dbA, row('A'));
+
+    await Promise.all([mk(dbA).flushOutbox(), mk(dbB).flushOutbox()]);
+
+    expect(sends).toEqual(['A']);
+    dbA.close();
+    dbB.close();
+  });
+});
+
+/**
+ * An integrity fault has to reach someone who can act on it.
+ *
+ * The row stops moving by design, so if nothing else happens the message
+ * is stuck showing "syncing" indefinitely — a worse outcome than saying
+ * plainly that local data is broken.
+ */
+describe('OutboxEngine — integrity faults are escalated', () => {
+  it('reports the fault from the repair pass, with enough context to fix it', async () => {
+    const db = newDb();
+    const store = new MessageStore();
+    const faults: Array<Record<string, unknown>> = [];
+    const engine = new OutboxEngine({
+      db,
+      store,
+      sendMessage: async () => okResp('s-A', 42),
+      getConnectionState: () => 'authenticated',
+      now: () => NOW,
+      warn: () => {},
+      hooks: {
+        onIntegrityFault: (f) => {
+          faults.push({ ...f });
+        },
+      },
+    });
+    store.upsertMessage(
+      {
+        id: 'r-A',
+        channel_id: '100',
+        channel_type: 1,
+        local_message_id: 'A',
+        from_uid: '999',
+        message_type: 'text',
+        content: 'body-A',
+        payload: new Uint8Array(),
+        timestamp: NOW,
+        status: 'pending',
+      },
+      false,
+    );
+    await upsertMessage(db, {
+      id: 'r-A',
+      channel_id: 'someone-elses-channel',
+      channel_type: 1,
+      server_message_id: 'foreign-1',
+      from_uid: '1',
+      message_type: 'text',
+      content: 'unrelated message',
+      payload: new Uint8Array(),
+      timestamp: NOW,
+      status: 'received',
+    });
+    await putOutboxEntry(db, row('A'));
+
+    // First flush quarantines the row; repair is the actor's job, so the
+    // fault is reported by the next pass — one driver, not two.
+    await engine.flushOutbox();
+    expect(faults).toEqual([]);
+    await engine.flushOutbox();
+
+    expect(faults).toHaveLength(1);
+    expect(faults[0]).toMatchObject({
+      outbox_id: 'A',
+      local_message_id: 'A',
+      channel_id: '100',
+      // The message IS delivered — repair must not re-send it.
+      server_message_id: 's-A',
+      // Which id collided, and where the row holding it lives. Without
+      // these a restarted repair cannot tell what to fix.
+      conflicting_id: 'r-A',
+      conflicting_channel_id: 'someone-elses-channel',
+      repair_attempt: 1,
+    });
+    db.close();
+  });
+
+  it('a throwing hook does not break the flush', async () => {
+    const db = newDb();
+    const store = new MessageStore();
+    const engine = new OutboxEngine({
+      db,
+      store,
+      sendMessage: async () => okResp('s-A', 42),
+      getConnectionState: () => 'authenticated',
+      now: () => NOW,
+      warn: () => {},
+      hooks: {
+        onIntegrityFault: () => {
+          throw new Error('host blew up');
+        },
+      },
+    });
+    store.upsertMessage(
+      {
+        id: 'r-A',
+        channel_id: '100',
+        channel_type: 1,
+        local_message_id: 'A',
+        from_uid: '999',
+        message_type: 'text',
+        content: 'body-A',
+        payload: new Uint8Array(),
+        timestamp: NOW,
+        status: 'pending',
+      },
+      false,
+    );
+    await upsertMessage(db, {
+      id: 'r-A',
+      channel_id: 'someone-elses-channel',
+      channel_type: 1,
+      server_message_id: 'foreign-1',
+      from_uid: '1',
+      message_type: 'text',
+      content: 'unrelated',
+      payload: new Uint8Array(),
+      timestamp: NOW,
+      status: 'received',
+    });
+    await putOutboxEntry(db, row('A'));
+
+    const result = await engine.flushOutbox();
+    expect(result.failed).toBe(1);
+    expect((await getOutboxEntry(db, 'A'))?.status).toBe('integrity_error');
+    db.close();
+  });
+});
+
+/**
+ * `integrity_error` has to reach a real end state.
+ *
+ * Repair runs off the row's status, not off a one-shot callback: a fault
+ * announced once and then forgotten leaves the row frozen forever if the
+ * page dies before the host acts. And when repair genuinely cannot work,
+ * the row must say so — a permanent "syncing" spinner is a worse lie than
+ * an error.
+ */
+describe('OutboxEngine — integrity repair closes the loop', () => {
+  async function seedQuarantined(h: Harness): Promise<void> {
+    h.store.upsertMessage(
+      {
+        id: 'r-A',
+        channel_id: '100',
+        channel_type: 1,
+        local_message_id: 'A',
+        from_uid: '999',
+        message_type: 'text',
+        content: 'body-A',
+        payload: new Uint8Array(),
+        timestamp: NOW,
+        status: 'pending',
+      },
+      false,
+    );
+    await upsertMessage(h.db, {
+      id: 'r-A',
+      channel_id: 'someone-elses-channel',
+      channel_type: 1,
+      server_message_id: 'foreign-1',
+      from_uid: '1',
+      message_type: 'text',
+      content: 'unrelated message',
+      payload: new Uint8Array(),
+      timestamp: NOW,
+      status: 'received',
+    });
+    h.setSendImpl(async () => okResp('s-A', 42));
+    await putOutboxEntry(h.db, row('A'));
+    await h.engine.flushOutbox(); // → integrity_error
+  }
+
+  it('re-attempts repair on a later flush, after a reload', async () => {
+    const h = newHarness();
+    const attempts: number[] = [];
+    await seedQuarantined(h);
+    // A fresh engine, as a reloaded page would build. The frozen row is not
+    // due, so only a status-driven pass can find it.
+    const reborn = new OutboxEngine({
+      db: h.db,
+      store: h.store,
+      sendMessage: async () => okResp('s-A', 42),
+      getConnectionState: () => 'authenticated',
+      now: () => NOW + 60_000,
+      warn: () => {},
+      hooks: {
+        onIntegrityFault: (f) => {
+          attempts.push(f.repair_attempt ?? 0);
+        },
+      },
+    });
+
+    await reborn.flushOutbox();
+
+    // Quarantining is not itself a repair pass, so this is attempt 1 — the
+    // point is that a brand-new engine finds the frozen row at all.
+    expect(attempts).toEqual([1]);
+  });
+
+  it('converges to sent by re-minting, with no host repair at all', async () => {
+    const h = newHarness();
+    await seedQuarantined(h);
+
+    const repairing = new OutboxEngine({
+      db: h.db,
+      store: h.store,
+      sendMessage: async () => {
+        throw new Error('repair must not touch the network');
+      },
+      getConnectionState: () => 'authenticated',
+      now: () => NOW + 600_000,
+      warn: () => {},
+    });
+
+    await repairing.flushOutbox();
+
+    // Replayed the stored ACK — no network — and the row is done.
+    expect(await getOutboxEntry(h.db, 'A')).toBeUndefined();
+    const cached = h.store.getMessages('100', 1);
+    expect(cached).toHaveLength(1);
+    expect(cached[0]!.status).toBe('sent');
+    expect(cached[0]!.server_message_id).toBe('s-A');
+    // A replacement identity, because the old one was taken.
+    expect(cached[0]!.id).not.toBe('r-A');
+    expect(cached[0]!.id).toMatch(/^\d+$/);
+  });
+
+  it('recoverLocalState repairs without a connection', async () => {
+    const h = newHarness();
+    await seedQuarantined(h);
+
+    const offline = new OutboxEngine({
+      db: h.db,
+      store: h.store,
+      sendMessage: async () => {
+        throw new Error('must not touch the network');
+      },
+      getConnectionState: () => 'disconnected',
+      now: () => NOW + 600_000,
+      warn: () => {},
+    });
+
+    await offline.recoverLocalState();
+
+    expect(await getOutboxEntry(h.db, 'A')).toBeUndefined();
+    expect(h.store.getMessages('100', 1)[0]!.status).toBe('sent');
+  });
+});
+
+/**
+ * Fencing: a lease that expired mid-flight must not let the old owner
+ * write over its successor.
+ *
+ * Deterministic here — A's send is held open by hand, the clock is pushed
+ * past the lease, B takes over, and only then is A released.
+ */
+describe('OutboxEngine — expired owner cannot clobber the new owner', () => {
+  interface Rig {
+    db: CacheDB;
+    store: MessageStore;
+    releaseA: (outcome: 'ok' | 'fail') => void;
+    engineA: OutboxEngine;
+    engineB: OutboxEngine;
+    events: OutboxStateChangedEvent[];
+    setNow: (n: number) => void;
+  }
+
+  function rig(): Rig {
+    const db = newDb();
+    const store = new MessageStore();
+    const events: OutboxStateChangedEvent[] = [];
+    let now = NOW;
+    let release!: (outcome: 'ok' | 'fail') => void;
+    const aInFlight = new Promise<'ok' | 'fail'>((resolve) => {
+      release = resolve;
+    });
+
+    const engineA = new OutboxEngine({
+      db,
+      store,
+      sendMessage: async () => {
+        const outcome = await aInFlight;
+        if (outcome === 'fail') throw new Error('A: transport died');
+        return okResp('s-A', 42);
+      },
+      getConnectionState: () => 'authenticated',
+      now: () => now,
+      warn: () => {},
+      config: { leaseMs: 1_000, sendTimeoutMs: 500 },
+      hooks: { onStateChanged: (e) => events.push(e) },
+    });
+    const engineB = new OutboxEngine({
+      db,
+      store,
+      sendMessage: async () => okResp('s-B', 43),
+      getConnectionState: () => 'authenticated',
+      now: () => now,
+      warn: () => {},
+      config: { leaseMs: 1_000, sendTimeoutMs: 500 },
+      hooks: { onStateChanged: (e) => events.push(e) },
+    });
+
+    return {
+      db,
+      store,
+      releaseA: release,
+      engineA,
+      engineB,
+      events,
+      setNow: (n) => {
+        now = n;
+      },
+    };
+  }
+
+  it('the stale owner cannot write failed over the new owner state', async () => {
+    const r = rig();
+    await putOutboxEntry(r.db, row('A'));
+
+    const aFlush = r.engineA.flushOutbox();
+    await waitFor(async () => (await getOutboxEntry(r.db, 'A'))?.status === 'sending', 500);
+    const tokenA = (await getOutboxEntry(r.db, 'A'))!.lease_token;
+
+    // A's lease expires and B takes over — B's own attempt is still in
+    // progress, so the row is present and owned by B. (If B had already
+    // finished and deleted the row, A would be blocked simply by its
+    // absence, which would prove nothing about fencing.)
+    r.setNow(NOW + 5_000);
+    const claimed = await claimOutboxEntry(r.db, 'A', 'token-B', NOW + 5_000, 1_000);
+    expect(claimed?.lease_token).toBe('token-B');
+    expect(tokenA).not.toBe('token-B');
+
+    // Now A comes back and fails; it would write `failed` + backoff.
+    r.releaseA('fail');
+    await aFlush;
+
+    const after = await getOutboxEntry(r.db, 'A');
+    expect(after?.lease_token).toBe('token-B');
+    expect(after?.status).toBe('sending');
+    expect(after?.attempt_count).toBe(0);
+    // And A published nothing — the state it would have described is no
+    // longer the truth about this row.
+    expect(r.events.filter((e) => e.status === 'failed')).toEqual([]);
+  });
+
+  it('the stale owner cannot delete the row the new owner is working on', async () => {
+    const r = rig();
+    await putOutboxEntry(r.db, row('A'));
+    r.store.upsertMessage(
+      {
+        id: 'r-A',
+        channel_id: '100',
+        channel_type: 1,
+        local_message_id: 'A',
+        from_uid: '999',
+        message_type: 'text',
+        content: 'body-A',
+        payload: new Uint8Array(),
+        timestamp: NOW,
+        status: 'pending',
+      },
+      false,
+    );
+
+    const aFlush = r.engineA.flushOutbox();
+    await waitFor(async () => (await getOutboxEntry(r.db, 'A'))?.status === 'sending', 500);
+
+    // A's lease expires and B claims it, but B's own attempt is not
+    // finished yet — simulate by claiming directly.
+    r.setNow(NOW + 5_000);
+    const claimed = await claimOutboxEntry(r.db, 'A', 'token-B', NOW + 5_000, 1_000);
+    expect(claimed?.lease_token).toBe('token-B');
+
+    // A returns successfully and would delete the row + publish `sent`.
+    r.releaseA('ok');
+    await aFlush;
+
+    // The row still belongs to B.
+    const after = await getOutboxEntry(r.db, 'A');
+    expect(after?.lease_token).toBe('token-B');
+    expect(after?.status).toBe('sending');
+    // And A published nothing about it.
+    expect(r.events.filter((e) => e.status === 'sent')).toEqual([]);
+  });
+});
+
+/**
+ * Claiming is a strict state transition, not "is the lease free?".
+ *
+ * A caller's `due` snapshot can be stale by the time it claims: another tab
+ * may have sent the message and moved the row to a delivered state in
+ * between. Trusting the snapshot sends that message a second time.
+ */
+describe('OutboxEngine — claim refuses already-delivered rows', () => {
+  it('cannot claim ack_pending, even with no live lease', async () => {
+    const db = newDb();
+    await putOutboxEntry(
+      db,
+      row('A', {
+        status: 'ack_pending',
+        acked_server_message_id: 's-A',
+        acked_message_seq: 42,
+        next_attempt_at: 0,
+      }),
+    );
+
+    const claimed = await claimOutboxEntry(db, 'A', 'token-B', NOW, 60_000);
+
+    expect(claimed).toBeUndefined();
+    const after = await getOutboxEntry(db, 'A');
+    expect(after?.status).toBe('ack_pending');
+  });
+
+  it('cannot claim integrity_error', async () => {
+    const db = newDb();
+    await putOutboxEntry(
+      db,
+      row('A', { status: 'integrity_error', acked_server_message_id: 's-A' }),
+    );
+
+    expect(await claimOutboxEntry(db, 'A', 'token-B', NOW, 60_000)).toBeUndefined();
+    expect((await getOutboxEntry(db, 'A'))?.status).toBe('integrity_error');
+  });
+
+  it('does not re-send a row another tab moved to ack_pending mid-flush', async () => {
+    // The exact stale-snapshot race: this engine picked the row up as
+    // `pending`, and by the time it claims, the row is delivered.
+    const db = newDb();
+    const store = new MessageStore();
+    const sends: string[] = [];
+    const engine = new OutboxEngine({
+      db,
+      store,
+      sendMessage: async (req) => {
+        sends.push(req.local_message_id);
+        return okResp('s-A', 42);
+      },
+      getConnectionState: () => 'authenticated',
+      now: () => NOW,
+      warn: () => {},
+    });
+    await putOutboxEntry(db, row('A'));
+    const stale = (await getOutboxEntry(db, 'A'))!;
+
+    // Another tab: sent it, local commit failed, row is now delivered.
+    await updateOutboxStatus(db, 'A', {
+      status: 'ack_pending',
+      acked_server_message_id: 's-A',
+      acked_message_seq: 42,
+      next_attempt_at: NOW + 60_000,
+    });
+
+    // Now this engine acts on its stale snapshot.
+    await engine['processRow'](stale, { attempted: 0, sent: 0, failed: 0, skipped: 0 });
+
+    expect(sends).toEqual([]);
+    expect((await getOutboxEntry(db, 'A'))?.status).toBe('ack_pending');
+    db.close();
+  });
+});
+
+/**
+ * The repair for an id collision is to re-mint OUR id — never to delete
+ * the row that holds it. That row belongs to another conversation and may
+ * be a perfectly good message; freeing an arbitrary number by destroying
+ * it trades a recoverable fault for real data loss.
+ */
+describe('OutboxEngine — identity conflict repairs by re-minting', () => {
+  async function seedQuarantinedRow(h: Harness): Promise<void> {
+    h.store.upsertMessage(
+      {
+        id: 'r-A',
+        channel_id: '100',
+        channel_type: 1,
+        local_message_id: 'A',
+        from_uid: '999',
+        message_type: 'text',
+        content: 'body-A',
+        payload: new Uint8Array(),
+        timestamp: NOW,
+        status: 'pending',
+      },
+      false,
+    );
+    await upsertMessage(h.db, {
+      id: 'r-A',
+      channel_id: 'someone-elses-channel',
+      channel_type: 1,
+      server_message_id: 'foreign-1',
+      from_uid: '1',
+      message_type: 'text',
+      content: 'a real message in another conversation',
+      payload: new Uint8Array(),
+      timestamp: NOW,
+      status: 'received',
+    });
+    h.setSendImpl(async () => okResp('s-A', 42));
+    await putOutboxEntry(h.db, row('A'));
+    await h.engine.flushOutbox(); // → integrity_error
+  }
+
+  it('persists what collided so a restarted repair knows what to fix', async () => {
+    const h = newHarness();
+    await seedQuarantinedRow(h);
+
+    const entry = await getOutboxEntry(h.db, 'A');
+    expect(entry?.repair_kind).toBe('identity_conflict');
+    expect(entry?.conflicting_id).toBe('r-A');
+    expect(entry?.conflicting_channel_id).toBe('someone-elses-channel');
+  });
+
+  it('repairs with no host hook at all, and keeps the other message', async () => {
+    const h = newHarness();
+    await seedQuarantinedRow(h);
+
+    // No onIntegrityFault: the SDK must be able to fix an id collision on
+    // its own. A resync of our channel could never clear a row that lives
+    // in a different one.
+    const repairing = new OutboxEngine({
+      db: h.db,
+      store: h.store,
+      sendMessage: async () => {
+        throw new Error('repair must not touch the network');
+      },
+      getConnectionState: () => 'authenticated',
+      now: () => NOW + 600_000,
+      warn: () => {},
+    });
+
+    await repairing.flushOutbox();
+
+    // Converged.
+    expect(await getOutboxEntry(h.db, 'A')).toBeUndefined();
+    const ours = await getMessageWindow(h.db, '100', 1, 10);
+    expect(ours).toHaveLength(1);
+    expect(ours[0]!.server_message_id).toBe('s-A');
+    expect(ours[0]!.id).not.toBe('r-A'); // re-minted
+
+    // The other conversation is untouched.
+    const foreign = await getMessageWindow(h.db, 'someone-elses-channel', 1, 10);
+    expect(foreign).toHaveLength(1);
+    expect(foreign[0]!.id).toBe('r-A');
+    expect(foreign[0]!.content).toBe('a real message in another conversation');
   });
 });

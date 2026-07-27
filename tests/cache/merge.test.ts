@@ -9,6 +9,7 @@ const PEER_UID = 'peer-2';
 
 function rec(overrides: Partial<MessageRecord> = {}): MessageRecord {
   return {
+    id: 'r-1',
     channel_id: '12345',
     channel_type: 1,
     server_message_id: 's-1',

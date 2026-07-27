@@ -26,6 +26,8 @@ const msg = (
   id: string,
   overrides: Partial<MessageRecord> = {},
 ): MessageRecord => ({
+  // 本地稳定行身份（§3.3）：测试里由入参派生，保持断言直观。
+  id: `r-${id}`,
   channel_id: '12345',
   channel_type: 1,
   server_message_id: `s-${id}`,
@@ -169,6 +171,7 @@ describe('replaceMessage (local-echo ack flow)', () => {
 
     // Pending insert keyed by local_message_id (record_key = "l:local-1").
     const pending: MessageRecord = {
+      id: 'r-local-1',
       channel_id: '12345',
       channel_type: 1,
       local_message_id: 'local-1',
@@ -217,6 +220,7 @@ describe('replaceMessage (local-echo ack flow)', () => {
     const s = new MessageStore();
     // Step 1: push lands first.
     const pushed: MessageRecord = {
+      id: 'r-srv-100',
       channel_id: '12345',
       channel_type: 1,
       server_message_id: 'srv-100',
@@ -231,6 +235,7 @@ describe('replaceMessage (local-echo ack flow)', () => {
 
     // Step 2: local echo (pending) lands.
     const pending: MessageRecord = {
+      id: 'r-local-1',
       channel_id: '12345',
       channel_type: 1,
       local_message_id: 'local-1',

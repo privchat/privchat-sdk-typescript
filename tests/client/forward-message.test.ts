@@ -51,10 +51,9 @@ function sendCaptureFake(captured: Array<ReturnType<typeof decodeSendMessageRequ
       captured.push(req);
       return encodeSendMessageResponse({
         reason_code: 0,
-        message_id: String(800_000 + captured.length),
+        client_seq: req.client_seq,
+        server_message_id: String(800_000 + captured.length),
         message_seq: 10 + captured.length,
-        expire: 0,
-        server_timestamp: 1_700_001,
       });
     }
     return undefined;

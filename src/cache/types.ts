@@ -1,8 +1,12 @@
 // Cache record shapes for Phase 4. Mirrors the Rust `privchat-sdk`
 // terminology where it exists: `pts` for the per-channel sequence,
 // `server_message_id` and `local_message_id` as distinct identities
-// (the TS web cache has no equivalent of Rust SDK's local DB primary
-// `message_id`, so that field is intentionally absent here).
+// Local row identity: `MessageRecord.id` is this cache's equivalent of the
+// Rust SDK's SQLite `message.id` (CONVERSATION_DEPENDENCY_READINESS_SPEC
+// §3.3). It is generated locally, never changes across the ack, and never
+// goes on the wire. `record_key` stays a dedup index and is allowed to move
+// from `l:` to `s:`; a pending dependency keyed by a value that flips on ack
+// would simply lose its consumer.
 //
 // Authority rules (don't move):
 //   - server pts always wins on conflict; cache is read-through, not authoritative
@@ -204,6 +208,12 @@ export interface ChannelRecord {
  * but timestamp is the authoritative sort key for UI display.
  */
 export interface MessageRecord {
+  /** Stable local row identity. Assigned once on insert, unchanged by the
+   *  ack, never serialized to the wire. Equivalent to Rust's SQLite
+   *  `message.id`; the two SDKs agree on semantics and decimal encoding, not
+   *  on the value. Use it — never `local_message_id`, never `record_key` —
+   *  as the projection/dependency identity of a message. */
+  id: IdString;
   channel_id: IdString;
   channel_type: number;
   /** Server-assigned snowflake (= Rust SDK's `server_message_id`).
@@ -258,7 +268,29 @@ export type MessageStatus =
 // before/at emit time and never persist.
 
 /** Persisted outbox row state. See PHASE5C_OUTBOUND_QUEUE_PLAN.md. */
-export type OutboxStatus = 'pending' | 'sending' | 'failed';
+/**
+ * Outbox row lifecycle.
+ *
+ * `ack_pending` and `integrity_error` both mean **the server already has
+ * this message**; only the local commit is outstanding. Neither may go back
+ * on the wire — re-sending a delivered message is how one send becomes two
+ * messages. They are distinct because the recovery differs: `ack_pending`
+ * retries the local write, `integrity_error` cannot be fixed by retrying
+ * at all and needs cache repair.
+ */
+export type OutboxStatus =
+  | 'pending'
+  | 'sending'
+  | 'failed'
+  /** Delivered; the local ACK commit failed and will be retried locally. */
+  | 'ack_pending'
+  /** Delivered; the local commit hit an integrity fault. A repair pass
+   *  retries it; see `repair_attempts`. */
+  | 'integrity_error'
+  /** Delivered, and repair gave up. The message is on the server but this
+   *  device cannot reconcile it — surface it as broken local data, never
+   *  as an endless "syncing". */
+  | 'local_data_error';
 
 /** One outgoing message awaiting (or having failed) server ACK.
  *
@@ -299,6 +331,58 @@ export interface OutboxEntry {
   /** Optional error description from the most recent failed attempt.
    *  Free-form for now; 5C-1c may upgrade this to a structured kind. */
   last_error?: string;
+  /**
+   * Attempts that reached the server successfully but could not be
+   * committed locally (the ACK rekey + row delete transaction failed).
+   *
+   * Counted apart from `attempt_count` on purpose: that budget exists to
+   * stop retrying a send the server keeps refusing, and freezing the row
+   * at `maxAttempts` is the right end state for it. A local storage
+   * failure is the opposite situation — the message IS delivered — so
+   * spending the send budget on it would eventually freeze a message that
+   * was successfully sent, leaving it stuck locally forever.
+   */
+  local_commit_failures?: number;
+  /** Server identity captured when the send was acknowledged. Present from
+   *  `ack_pending` onwards so recovery can re-apply the ACK **without going
+   *  back to the network** — the message is already delivered. */
+  acked_server_message_id?: IdString;
+  acked_message_seq?: number;
+  /**
+   * Owner of the current `sending` attempt, and when that ownership
+   * expires.
+   *
+   * `sending` is otherwise a state nothing can leave: the due query skips
+   * it, so a tab that crashed between marking the row and finishing the
+   * send would strand the message forever. The lease bounds that — once it
+   * expires the row becomes claimable again, and the retry reuses the same
+   * `local_message_id` so the server dedupes it.
+   *
+   * It is also what stops two tabs sending the same row: claiming is a
+   * compare-and-set inside one IndexedDB transaction, so exactly one wins.
+   */
+  lease_token?: string;
+  lease_until?: number;
+  /** Repair passes spent on an `integrity_error` row before giving up. */
+  repair_attempts?: number;
+  /**
+   * What went wrong, in enough detail to repair it after a restart.
+   *
+   * A repair pass that only knows "this row is broken" and which channel
+   * it belongs to cannot fix an id collision: the row holding the id lives
+   * in a *different* conversation, and re-syncing this one will never
+   * touch it.
+   */
+  repair_kind?: 'identity_conflict';
+  /** Local id that could not be written because another row owns it. */
+  conflicting_id?: IdString;
+  /** Where that other row lives — never modified by repair, only reported. */
+  conflicting_channel_id?: IdString;
+  /** Repair ownership, same discipline as the send lease. */
+  repair_lease_token?: string;
+  repair_lease_until?: number;
+  /** Earliest wall-clock for the next repair pass (exponential backoff). */
+  repair_next_attempt_at?: number;
   status: OutboxStatus;
 }
 
@@ -358,6 +442,32 @@ export interface ConversationPatch {
  * exposed in `ConversationPatch.removed` so observers can discard rows
  * that were swapped (e.g. pending → sent).
  */
+/**
+ * Mint a local row identity for a message.
+ *
+ * 128 random bits rendered as decimal. Decimal because the two SDKs agree
+ * on the encoding of `MessageRecord.id` (spec §3.3); random because the
+ * generator has no usable coordination scope on the web. A clock+counter
+ * scheme is per-JS-context, and this SDK runs in several at once —
+ * multiple tabs of the same account, plus workers, plus a fresh context
+ * after every reload. Two of them starting inside the same millisecond
+ * would mint the same id and silently merge two unrelated rows, or fail
+ * the unique index. Random 128-bit collides at a probability no schedule
+ * of tabs can reach.
+ *
+ * The id carries no ordering. Nothing may sort by it — use `pts` /
+ * `timestamp`. It exists to be a name that never changes, including
+ * across the ACK, so pending dependencies and projections keep pointing
+ * at the same row.
+ */
+export function nextLocalMessageRecordId(): IdString {
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  let value = 0n;
+  for (const b of bytes) value = (value << 8n) | BigInt(b);
+  return value.toString();
+}
+
 export function messageRecordKey(record: MessageRecord): string {
   if (record.server_message_id !== undefined) {
     return `s:${record.server_message_id}`;
@@ -385,6 +495,7 @@ export function messageRecordKey(record: MessageRecord): string {
  */
 export function pushToMessageRecord(push: PushMessageRequest): MessageRecord {
   return {
+    id: nextLocalMessageRecordId(),
     channel_id: push.channel_id,
     channel_type: push.channel_type,
     server_message_id: push.server_message_id,

@@ -259,6 +259,7 @@ describe('SyncEngine', () => {
       // to confirm the persisted pending row is deleted alongside the
       // memory row, not just shadowed by the new acked row).
       const pending: MessageRecord = {
+        id: 'r-9',
         channel_id: CHANNEL_ID,
         channel_type: CHANNEL_TYPE,
         local_message_id: '9',
@@ -290,8 +291,6 @@ describe('SyncEngine', () => {
       );
 
       const res = await h.engine.syncChannel(CHANNEL_ID, CHANNEL_TYPE);
-      // Wait for the fire-and-forget IndexedDB transaction to settle.
-      await new Promise((r) => setTimeout(r, 20));
 
       expect(res.commits_applied).toBe(0); // ACK swap is NOT a newly inserted commit
       expect(patches).toHaveLength(1);
@@ -345,6 +344,7 @@ describe('SyncEngine', () => {
     it('drops buffer, fires openConversation, resets latest_pts to 0', async () => {
       const remoteRefill: MessageRecord[] = [
         {
+          id: 'r-99',
           channel_id: CHANNEL_ID,
           channel_type: CHANNEL_TYPE,
           server_message_id: '99',
@@ -473,6 +473,7 @@ describe('SyncEngine', () => {
       seedChannel(h.store, { read_pts: '0', unread_count: 0 });
 
       const pending: MessageRecord = {
+        id: 'r-99',
         channel_id: CHANNEL_ID,
         channel_type: CHANNEL_TYPE,
         local_message_id: '99',
@@ -606,5 +607,177 @@ describe('commitToMessageRecord', () => {
   it('falls back to JSON.stringify for non-extractable content', () => {
     const c = commit(1, { content: { foo: 'bar' } });
     expect(commitToMessageRecord(c, '100', 1).content).toBe('{"foo":"bar"}');
+  });
+});
+
+/**
+ * What memory shows must be what the database holds
+ * (CONVERSATION_DEPENDENCY_READINESS §3.3), including under concurrency.
+ *
+ * Two independent `CacheDB` handles on the same database name is what two
+ * browser tabs of one account actually are.
+ */
+describe('SyncEngine — durable state is the published state', () => {
+  it('publishes the stored id on content drift, not a freshly minted one', async () => {
+    const h = newHarness({ selfUid: SELF_UID });
+    seedChannel(h.store);
+    const { upsertMessage: persistOne } = await import('../src/cache/index.js');
+
+    // A row already on disk with a stable identity — as a previous sync,
+    // a history page, or another tab would have left it.
+    await persistOne(h.db, {
+      id: 'r-established',
+      channel_id: CHANNEL_ID,
+      channel_type: CHANNEL_TYPE,
+      server_message_id: '4242',
+      from_uid: PEER_UID,
+      message_type: 'text',
+      content: 'original',
+      payload: new Uint8Array(),
+      timestamp: 1_700_000_000_500,
+      status: 'received',
+    });
+
+    // Server-side mutation of the same message: commitToMessageRecord
+    // mints a brand-new id for it.
+    h.pageQueue.push(
+      okPage([commit(7, { server_msg_id: '4242', sender_id: PEER_UID, content: 'edited' })], 7),
+    );
+    await h.engine.syncChannel(CHANNEL_ID, CHANNEL_TYPE);
+
+    const persisted = await h.db.messages.toArray();
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]!.id).toBe('r-established');
+
+    const inMemory = h.store.getMessages(CHANNEL_ID, CHANNEL_TYPE);
+    expect(inMemory).toHaveLength(1);
+    // The whole point: memory must not disagree with disk about identity.
+    expect(inMemory[0]!.id).toBe(persisted[0]!.id);
+    expect(inMemory[0]!.content).toBe('edited');
+  });
+
+  // NOTE ON WHAT THIS DOES AND DOES NOT PROVE: under fake-indexeddb the
+  // two engines end up serialised, so this does not reproduce a genuine
+  // interleaving — it passes against the stale-snapshot implementation too
+  // (verified). It is kept as a convergence regression guard: two engines
+  // on one database must agree on the final unread/pts, and a future change
+  // that drops an increment or rolls the cursor back fails here. The actual
+  // guarantee lives in the implementation: every input to the projection is
+  // read inside the transaction, so IndexedDB's own serialisation covers
+  // the read-modify-write.
+  it('two engines on one database converge on unread and pts', async () => {
+    // Two engines, two CacheDB handles, one underlying database.
+    const dbName = `sync-concurrent-${++dbCounter}-${Math.random().toString(36).slice(2, 8)}`;
+    const dbA = new CacheDB(dbName);
+    const dbB = new CacheDB(dbName);
+    dbs.push(dbA, dbB);
+    const { upsertChannels } = await import('../src/cache/index.js');
+    await upsertChannels(dbA, [
+      {
+        channel_id: CHANNEL_ID,
+        channel_type: CHANNEL_TYPE,
+        title: 'chan',
+        latest_pts: '0',
+        read_pts: '0',
+        unread_count: 0,
+        last_message_preview: '',
+        updated_at: 0,
+        sync_version: 1,
+      },
+    ]);
+
+    const stores: MessageStore[] = [];
+    const build = (db: CacheDB, page: GetDifferenceResponse) => {
+      const store = new MessageStore();
+      stores.push(store);
+      return new SyncEngine({
+        db,
+        store,
+        callDifference: async () => page,
+        openConversation: async () => [],
+        getCurrentUserId: () => SELF_UID,
+        emit: () => {},
+        warn: () => {},
+      });
+    };
+
+    const engineA = build(dbA, okPage([commit(1, { server_msg_id: '1', sender_id: PEER_UID })], 1));
+    const engineB = build(dbB, okPage([commit(2, { server_msg_id: '2', sender_id: PEER_UID })], 2));
+
+    await Promise.all([
+      engineA.syncChannel(CHANNEL_ID, CHANNEL_TYPE),
+      engineB.syncChannel(CHANNEL_ID, CHANNEL_TYPE),
+    ]);
+
+    const channel = await dbA.channels.get(CHANNEL_ID);
+    // Both messages are unread. A projection computed from a snapshot
+    // taken before the transaction would have both tabs writing 1.
+    expect(channel?.unread_count).toBe(2);
+    // And the higher pts must not be rolled back by the slower writer.
+    expect(channel?.latest_pts).toBe('2');
+    expect((await dbA.messages.toArray()).length).toBe(2);
+  });
+
+  it('gives BOTH tabs the message the other one stored', async () => {
+    // Convergence of the shared database is not the user-visible property.
+    // Each tab renders from its own MessageStore, so a tab that skipped the
+    // write because the row was already on disk must still publish it —
+    // otherwise its timeline is missing a message that the database has.
+    const dbName = `sync-crosstab-${++dbCounter}-${Math.random().toString(36).slice(2, 8)}`;
+    const dbA = new CacheDB(dbName);
+    const dbB = new CacheDB(dbName);
+    dbs.push(dbA, dbB);
+    const { upsertChannels } = await import('../src/cache/index.js');
+    await upsertChannels(dbA, [
+      {
+        channel_id: CHANNEL_ID,
+        channel_type: CHANNEL_TYPE,
+        title: 'chan',
+        latest_pts: '0',
+        read_pts: '0',
+        unread_count: 0,
+        last_message_preview: '',
+        updated_at: 0,
+        sync_version: 1,
+      },
+    ]);
+
+    const page = okPage([commit(1, { server_msg_id: '777', sender_id: PEER_UID })], 1);
+    const mk = (db: CacheDB) => {
+      const store = new MessageStore();
+      const engine = new SyncEngine({
+        db,
+        store,
+        callDifference: async () => page,
+        openConversation: async () => [],
+        getCurrentUserId: () => SELF_UID,
+        emit: () => {},
+        warn: () => {},
+      });
+      return { store, engine };
+    };
+    const tabA = mk(dbA);
+    const tabB = mk(dbB);
+
+    // Tab A syncs first and stores the row. Tab B then syncs the same page
+    // and finds it already persisted — nothing to write.
+    await tabA.engine.syncChannel(CHANNEL_ID, CHANNEL_TYPE);
+    await tabB.engine.syncChannel(CHANNEL_ID, CHANNEL_TYPE);
+
+    for (const tab of [tabA, tabB]) {
+      const msgs = tab.store.getMessages(CHANNEL_ID, CHANNEL_TYPE);
+      expect(msgs.map((m) => m.server_message_id)).toEqual(['777']);
+    }
+    // Identity agrees across tabs and with disk.
+    const onDisk = (await dbA.messages.toArray())[0]!;
+    expect(tabA.store.getMessages(CHANNEL_ID, CHANNEL_TYPE)[0]!.id).toBe(onDisk.id);
+    expect(tabB.store.getMessages(CHANNEL_ID, CHANNEL_TYPE)[0]!.id).toBe(onDisk.id);
+
+    // And both see the same channel projection.
+    for (const tab of [tabA, tabB]) {
+      const ch = tab.store.getChannel(CHANNEL_ID, CHANNEL_TYPE);
+      expect(ch?.latest_pts).toBe('1');
+      expect(ch?.unread_count).toBe(1);
+    }
   });
 });

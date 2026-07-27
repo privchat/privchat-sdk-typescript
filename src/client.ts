@@ -25,6 +25,7 @@ import {
   UserStore,
   ensureCacheOwner,
   deleteFriendships as cacheDeleteFriendships,
+  applyAckRekey as cacheApplyAckRekey,
   deleteMessageByRecordKey as cacheDeleteMessageByRecordKey,
   deleteOutboxEntry as cacheDeleteOutboxEntry,
   getMessageWindow as cacheGetMessageWindow,
@@ -40,6 +41,7 @@ import {
   maxUserSyncVersion as cacheMaxUserSyncVersion,
   mergeOnPushAbsorb,
   messageRecordKey,
+  nextLocalMessageRecordId,
   putOutboxEntry as cachePutOutboxEntry,
   updateOutboxStatus as cacheUpdateOutboxStatus,
   pushToMessageRecord,
@@ -599,6 +601,7 @@ function historicalMessageToRecord(
       )
     : new Uint8Array();
   return {
+    id: nextLocalMessageRecordId(),
     channel_id,
     channel_type,
     server_message_id: String(msg.message_id),
@@ -822,6 +825,21 @@ export class PrivchatClient {
             },
             hooks: {
               onStateChanged: (event) => this.onOutboxMutation(event),
+              onIntegrityFault: async (fault) => {
+                // The engine calls this on every repair pass, then replays
+                // the stored ACK — so this must be the repair itself, and
+                // must finish before it returns. A channel resync re-reads
+                // the authoritative timeline, which is what can clear the
+                // conflicting row.
+                // eslint-disable-next-line no-console
+                console.error('[privchat] local cache integrity fault', fault);
+                try {
+                  await this.syncChannel(fault.channel_id, fault.channel_type);
+                } catch (e) {
+                  // eslint-disable-next-line no-console
+                  console.error('[privchat] integrity repair sync failed', e);
+                }
+              },
             },
           });
     } else {
@@ -1287,6 +1305,20 @@ export class PrivchatClient {
         throw new CacheOwnershipError(user_id, error);
       }
     }
+    // Converge whatever the last session could not finish locally, before
+    // anything else touches the cache. `ack_pending` and `integrity_error`
+    // rows describe messages the SERVER already has: they need no network,
+    // and left unattended they show as forever-sending. Nothing here is
+    // allowed to fail the login — the periodic flush retries it all.
+    if (this.outboxEngine !== null) {
+      try {
+        await this.outboxEngine.recoverLocalState();
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn('[privchat] local outbox recovery failed', e);
+      }
+    }
+
     this.lastAuth = { user_id, access_token: token, device_id };
     this.setState('authenticated');
     return resp;
@@ -1566,6 +1598,9 @@ export class PrivchatClient {
     //    and the UI should not regress to `failed` while a retry is
     //    pending.
     const pending: MessageRecord = {
+      // Stable for the whole life of this row: the ack fills in
+      // server_message_id and flips record_key, but never touches `id`.
+      id: nextLocalMessageRecordId(),
       channel_id: input.channel_id,
       channel_type: input.channel_type,
       local_message_id: localMsgId,
@@ -1576,9 +1611,28 @@ export class PrivchatClient {
       timestamp: Date.now(),
       status: 'pending',
     };
-    this.cacheStore.upsertMessage(pending, false);
     const pendingKey = messageRecordKey(pending);
-    void cacheUpsertMessage(this.cacheDb, pending).catch(() => {});
+    // Memory first, so the local echo is on screen in the same tick the user
+    // hit send — publishing it costs nothing and risks nothing.
+    this.cacheStore.upsertMessage(pending, false);
+    // But the row must be DURABLE before the message goes anywhere. If the
+    // write were left in flight and failed, the server could end up holding
+    // a message whose local row does not exist: the ACK would have no
+    // pending identity to inherit, and a reload would mint a new one — the
+    // row loses the name every dependency and projection refers to it by. A
+    // send we cannot record locally is a send we must not make.
+    try {
+      await cacheUpsertMessage(this.cacheDb, pending);
+    } catch (err) {
+      // Roll the echo back. Nothing owns this row otherwise: it was never
+      // sent, never queued in the outbox, and no sync will ever hear about
+      // it — leaving it on screen would be a message stuck at "sending"
+      // forever with no path to resolution. Removing it puts the UI back
+      // where it was before the call, and the thrown error is what tells
+      // the caller the send did not happen.
+      this.cacheStore.removeMessage(input.channel_id, input.channel_type, pendingKey);
+      throw new LocalMessagePersistError(localMsgId, err);
+    }
 
     // 2. Offline gate. If we are not authenticated, skip the wire and
     //    enqueue immediately. Catches: never-connected client, mid-
@@ -1636,12 +1690,45 @@ export class PrivchatClient {
     //    record's identity is `server_message_id`, so its record_key
     //    differs from the pending one — the patch carries the old
     //    record_key in `removed` so observers drop the stale row.
-    const acked: MessageRecord = {
+    let acked: MessageRecord = {
       ...pending,
       server_message_id: resp.server_message_id,
       pts: String(resp.message_seq),
       status: 'sent',
     };
+    // Durable first, then publish. Nothing below this may run unless the
+    // transaction committed — publishing `sent` over a database that still
+    // holds the pending row means the message comes back as forever-sending
+    // after a reload, and `refreshChannelOnSend` below would additionally
+    // push `latest_pts` past this commit, so the sync that was supposed to
+    // reconcile it would never fetch it again. Leaving the cursor where it
+    // is keeps that recovery path open.
+    try {
+      acked = await cacheApplyAckRekey(
+        this.cacheDb,
+        input.channel_id,
+        input.channel_type,
+        pendingKey,
+        acked,
+      );
+    } catch (err) {
+      // The send succeeded — the server has the message — but locally it is
+      // still pending, which is the truthful state and the one a reload will
+      // find. The next `syncChannel` sees the commit (cursor unmoved, and
+      // the commit echoes our local_message_id) and applies the rekey then.
+      //
+      // Kick that reconciliation off now rather than waiting for the next
+      // reconnect or conversation open; it is the actual repair for this
+      // state. Failure to even start it is not worth masking the original
+      // error for — the periodic sync will get there.
+      void this.syncChannel(input.channel_id, input.channel_type).catch(() => {});
+      throw new AckPersistenceError(
+        localMsgId,
+        resp.server_message_id,
+        resp.message_seq,
+        err,
+      );
+    }
     this.cacheStore.replaceMessage(
       input.channel_id,
       input.channel_type,
@@ -1649,18 +1736,6 @@ export class PrivchatClient {
       acked,
       false,
     );
-    // IndexedDB: delete pending row + put acked (different record_key).
-    void this.cacheDb
-      .transaction('rw', this.cacheDb.messages, async () => {
-        await cacheDeleteMessageByRecordKey(
-          this.cacheDb!,
-          input.channel_id,
-          input.channel_type,
-          pendingKey,
-        );
-        await cacheUpsertMessage(this.cacheDb!, acked);
-      })
-      .catch(() => {});
 
     // Refresh channel-list view fields off this just-sent message: the
     // preview should mirror the row the user just put in the timeline,
@@ -4218,6 +4293,80 @@ export class CacheDisabledError extends Error {
       'Cache is disabled. Pass `cache: { enabled: true }` to the PrivchatClient constructor to use cache APIs.',
     );
     this.name = 'CacheDisabledError';
+  }
+}
+
+/**
+ * A local write the operation depends on did not commit.
+ *
+ * Raised instead of proceeding on a best-effort basis: silently continuing
+ * would leave the server holding a message the local database does not
+ * know about, whose stable identity is re-minted on reload — see
+ * CONVERSATION_DEPENDENCY_READINESS §3.3.
+ *
+ * Always inspect [`remoteAccepted`]: the two subclasses describe opposite
+ * delivery states, and treating them alike is how a retry button turns one
+ * message into two.
+ */
+export abstract class LocalPersistenceError extends Error {
+  /** Whether the server already has this message. */
+  abstract readonly remoteAccepted: boolean;
+  readonly local_message_id: string;
+  override readonly cause: unknown;
+
+  constructor(message: string, local_message_id: string, cause: unknown) {
+    super(message);
+    this.local_message_id = local_message_id;
+    this.cause = cause;
+  }
+}
+
+/**
+ * The outgoing message could not be recorded locally, so it was never sent.
+ *
+ * `remoteAccepted = false`: nothing reached the server and no local row
+ * survives. Retrying is safe and is the correct response — a fresh send
+ * with a new `local_message_id` cannot duplicate anything.
+ */
+export class LocalMessagePersistError extends LocalPersistenceError {
+  override readonly remoteAccepted = false as const;
+
+  constructor(local_message_id: string, cause: unknown) {
+    super('the outgoing message could not be stored locally; it was not sent', local_message_id, cause);
+    this.name = 'LocalMessagePersistError';
+  }
+}
+
+/**
+ * The server accepted the message, but the acknowledgement could not be
+ * written locally.
+ *
+ * `remoteAccepted = true`. **Do not re-send.** The message exists remotely;
+ * only the local row is behind, still `pending`. Re-sending it as a new
+ * message would deliver it twice. The repair is reconciliation — the SDK
+ * starts a `syncChannel` before throwing, and the commit is still ahead of
+ * the cursor, so a later sync fixes it too. The server ids are carried here
+ * so a host that wants to reconcile on its own terms can.
+ */
+export class AckPersistenceError extends LocalPersistenceError {
+  override readonly remoteAccepted = true as const;
+  readonly server_message_id: string;
+  readonly message_seq: number;
+
+  constructor(
+    local_message_id: string,
+    server_message_id: string,
+    message_seq: number,
+    cause: unknown,
+  ) {
+    super(
+      'the message was sent, but its acknowledgement could not be stored locally; do not re-send',
+      local_message_id,
+      cause,
+    );
+    this.name = 'AckPersistenceError';
+    this.server_message_id = server_message_id;
+    this.message_seq = message_seq;
   }
 }
 

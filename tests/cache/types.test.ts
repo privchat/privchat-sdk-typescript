@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { pushToMessageRecord } from '../../src/cache/types.js';
+import { describe, expect, it, vi } from 'vitest';
+import { nextLocalMessageRecordId, pushToMessageRecord } from '../../src/cache/types.js';
 import {
   encodeMessagePayloadEnvelope,
   type PushMessageRequest,
@@ -71,5 +71,49 @@ describe('pushToMessageRecord', () => {
     });
     const rec = pushToMessageRecord(samplePush({ payload }));
     expect(rec.content).toBe('带回复的消息');
+  });
+});
+
+/**
+ * CONVERSATION_DEPENDENCY_READINESS §3.3.
+ *
+ * The generator's hard requirement is that no two rows ever share an id,
+ * account-wide. It has no coordination scope to lean on: this SDK runs in
+ * several JS contexts at once for the same account (tabs, workers) and gets
+ * a fresh one on every reload, so any clock+counter scheme is per-context
+ * and collides whenever two of them start in the same millisecond.
+ */
+describe('nextLocalMessageRecordId', () => {
+  it('does not repeat within one context', () => {
+    const ids = new Set<string>();
+    for (let i = 0; i < 20_000; i += 1) ids.add(nextLocalMessageRecordId());
+    expect(ids.size).toBe(20_000);
+  });
+
+  it('does not collide across contexts started in the same millisecond', async () => {
+    // Two tabs, or a tab and a worker, or the same tab before and after a
+    // reload. Re-importing the module gives each a fresh module state; the
+    // clock is pinned so a time-seeded generator would hand both the same
+    // opening ids.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-27T00:00:00.000Z'));
+    try {
+      vi.resetModules();
+      const tabA = await import('../../src/cache/types.js');
+      vi.resetModules();
+      const tabB = await import('../../src/cache/types.js');
+
+      const idsA = Array.from({ length: 500 }, () => tabA.nextLocalMessageRecordId());
+      const idsB = Array.from({ length: 500 }, () => tabB.nextLocalMessageRecordId());
+      expect(new Set([...idsA, ...idsB]).size).toBe(1000);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('is decimal, matching the encoding the Rust SDK stores', () => {
+    for (let i = 0; i < 100; i += 1) {
+      expect(nextLocalMessageRecordId()).toMatch(/^\d+$/);
+    }
   });
 });

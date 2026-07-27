@@ -24,6 +24,7 @@
 import Dexie, { type Table } from 'dexie';
 import {
   messageRecordKey,
+  nextLocalMessageRecordId,
   type ChannelRecord,
   type FriendshipRecord,
   type GroupRecord,
@@ -186,6 +187,43 @@ export class CacheDB extends Dexie {
             if (!friendIds.has(String(u.user_id))) u.username = '';
           });
       });
+
+    // v10 (CONVERSATION_DEPENDENCY_READINESS §3.3): messages get a stable
+    // local `id`. `record_key` flips from `l:{local_message_id}` to
+    // `s:{server_message_id}` on ack, so anything keyed by it (pending
+    // dependencies, projections) loses its row at that moment; `id` is the
+    // identity that survives.
+    //
+    // `record_key` stays the primary key: it is what dedups a row across the
+    // ack and what callers delete by. `id` is assigned exactly once per row
+    // on first insert — see `stampIdentity`, which reuses the stored id when
+    // the same row is written again. A caller that re-builds a record from
+    // the network must not be able to mint a second identity for a message
+    // that already exists locally.
+    //
+    // `&id` is account-global, not per-channel: `pending_dependency` records
+    // a consumer as a bare `message.id` with no channel beside it, so an id
+    // that is only unique within its channel would resolve to two rows.
+    //
+    // Legacy rows get a freshly minted id. Deriving it from
+    // `server_message_id` / `local_message_id` would alias the three ids
+    // CODEX-2 deliberately separated (UI identity / idempotency / wire), and
+    // a row holding neither — a locally injected system card — would collapse
+    // onto the empty string and take the unique index down with it.
+    this.version(10)
+      .stores({
+        messages:
+          '&[channel_id+record_key], &id, [channel_id+timestamp], [channel_id+server_message_id]',
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table('messages')
+          .toCollection()
+          .modify((m: { id?: string }) => {
+            if (m.id) return;
+            m.id = nextLocalMessageRecordId();
+          });
+      });
   }
 }
 
@@ -266,19 +304,184 @@ export async function getChannel(
 
 // ----- Message ops -----
 
+/**
+ * Write rows, returning them **as stored**.
+ *
+ * The returned records are not always the ones passed in: `stampIdentity`
+ * replaces a caller-minted `id` with the one already on disk. Callers that
+ * publish to an in-memory store must publish THESE rows — publishing their
+ * own copies re-introduces the identity split this whole mechanism exists
+ * to prevent (the database keeps the stable id, memory shows a fresh one).
+ */
 export async function upsertMessages(
   db: CacheDB,
   records: MessageRecord[],
-): Promise<void> {
-  if (records.length === 0) return;
-  await db.messages.bulkPut(records.map(stamp));
+): Promise<MessageRecord[]> {
+  if (records.length === 0) return [];
+  return db.transaction('rw', db.messages, async () => {
+    const stamped: StoredMessage[] = [];
+    for (const record of records) stamped.push(await stampIdentity(db, record));
+    await db.messages.bulkPut(stamped);
+    return stamped.map(strip);
+  });
 }
 
+/** Single-row [`upsertMessages`]; likewise returns the row as stored. */
 export async function upsertMessage(
   db: CacheDB,
   record: MessageRecord,
-): Promise<void> {
-  await db.messages.put(stamp(record));
+): Promise<MessageRecord> {
+  return db.transaction('rw', db.messages, async () => {
+    const stamped = await stampIdentity(db, record);
+    await db.messages.put(stamped);
+    return strip(stamped);
+  });
+}
+
+/**
+ * Give the row its persistent identity, reusing the one already on disk.
+ *
+ * Callers rebuild `MessageRecord`s from the network freely — a re-opened
+ * conversation re-fetches the same history — and each rebuild mints a fresh
+ * `id`. Left alone that would either duplicate the row or, since `id` is a
+ * unique index, fail the write outright. The stored id wins over the incoming
+ * one; only a genuinely new row keeps the caller's.
+ *
+ * This is the plain-write path only. The ACK does NOT go through here: it
+ * changes the row's key, which needs the deletes and the write to be one
+ * atomic step — see `applyAckRekey`.
+ */
+async function stampIdentity(
+  db: CacheDB,
+  record: MessageRecord,
+): Promise<StoredMessage> {
+  const stamped = stamp(record);
+  const existing = await db.messages.get([stamped.channel_id, stamped.record_key]);
+  return existing === undefined ? stamped : { ...stamped, id: existing.id };
+}
+
+/**
+ * A row other than the one being written already owns this `id`.
+ *
+ * Not recoverable locally: the identity is account-global, so a duplicate
+ * means the invariant was already broken upstream. Surfaced as its own type
+ * so callers can tell it apart from an ordinary write failure.
+ */
+export class MessageIdentityConflictError extends Error {
+  readonly id: string;
+  readonly conflicting_channel_id: string;
+  readonly conflicting_record_key: string;
+
+  constructor(id: string, channel_id: string, record_key: string) {
+    super(
+      `message id ${id} is already held by ${channel_id}/${record_key}; ` +
+        'refusing to overwrite an unrelated row',
+    );
+    this.name = 'MessageIdentityConflictError';
+    this.id = id;
+    this.conflicting_channel_id = channel_id;
+    this.conflicting_record_key = record_key;
+  }
+}
+
+/**
+ * Give one row a fresh local identity, atomically.
+ *
+ * The repair for an id collision. The alternative — deleting whichever row
+ * currently holds the id — destroys a message that may be perfectly valid
+ * and belongs to a different conversation. Re-minting touches only the row
+ * that cannot currently be written, and `id` carries no meaning beyond
+ * being unique, so nothing else depends on its value.
+ *
+ * Returns the row as stored, or `undefined` if it is gone.
+ *
+ * DEPENDENCY MIGRATION: once `pending_dependency` exists, its rows
+ * referencing this message as a consumer must be re-keyed to the new id
+ * INSIDE this transaction. Splitting the two would leave dependencies
+ * pointing at an id no row has — precisely the dangling reference the
+ * readiness spec forbids.
+ */
+export async function remintMessageIdentity(
+  db: CacheDB,
+  channel_id: string,
+  record_key: string,
+  id: string,
+): Promise<MessageRecord | undefined> {
+  return db.transaction('rw', db.messages, async () => {
+    const row = await db.messages.get([channel_id, record_key]);
+    if (row === undefined) return undefined;
+    const clash = await db.messages.get({ id });
+    if (clash !== undefined && clash.record_key !== record_key) {
+      throw new MessageIdentityConflictError(id, clash.channel_id, clash.record_key);
+    }
+    const next: StoredMessage = { ...row, id };
+    await db.messages.put(next);
+    return strip(next);
+  });
+}
+
+/** True when no row holds this id. Used to pick a replacement identity. */
+export async function isMessageIdFree(db: CacheDB, id: string): Promise<boolean> {
+  return (await db.messages.get({ id })) === undefined;
+}
+
+/**
+ * Move a pending row onto its server key when the ACK lands. Atomic.
+ *
+ * The pending row's `id` wins, unconditionally. The competing row is the
+ * self-push: the server can echo our own message back to us before the ACK
+ * for it returns, creating a row under `s:{serverId}` with an id of its own.
+ * If that id were allowed to win, every dependency and projection recorded
+ * against the pending row — which is what the UI has been showing since the
+ * moment the user hit send — would dangle. So the push-created row is
+ * discarded and the pending identity is carried onto the server key.
+ *
+ * Both deletes and the write are one transaction. A crash mid-way must not
+ * be able to leave the message twice in the timeline (pending + acked) or
+ * zero times.
+ *
+ * Returns the row as persisted, so callers publish exactly what is durable.
+ */
+export async function applyAckRekey(
+  db: CacheDB,
+  channel_id: string,
+  _channel_type: number,
+  pending_record_key: string,
+  acked: MessageRecord,
+): Promise<MessageRecord> {
+  return db.transaction('rw', db.messages, async () => {
+    const stamped = stamp(acked);
+    const pending = await db.messages.get([channel_id, pending_record_key]);
+    const selfPush =
+      stamped.record_key === pending_record_key
+        ? undefined
+        : await db.messages.get([channel_id, stamped.record_key]);
+
+    // Precedence: the pending row, then a self-push row already on disk,
+    // then the caller's. The middle case is what happens when the pending
+    // write failed but the push landed — taking the caller's freshly minted
+    // id there would orphan whatever already referenced the stored row.
+    const id = pending?.id ?? selfPush?.id ?? stamped.id;
+
+    await db.messages.delete([channel_id, pending_record_key]);
+    if (selfPush !== undefined) {
+      await db.messages.delete([channel_id, stamped.record_key]);
+    }
+
+    // `id` is account-global. Anything else still holding it is not a race
+    // this function can resolve — it means a broken migration, a corrupted
+    // database, or a caller reusing an id. Deleting that row to make room
+    // would silently destroy an unrelated message, possibly in another
+    // conversation. Throw and let the transaction roll back.
+    const clash = await db.messages.get({ id });
+    if (clash !== undefined) {
+      throw new MessageIdentityConflictError(id, clash.channel_id, clash.record_key);
+    }
+
+    const row: StoredMessage = { ...stamped, id };
+    await db.messages.put(row);
+    return strip(row);
+  });
 }
 
 /** Latest `limit` messages for a channel, ordered ascending by timestamp. */

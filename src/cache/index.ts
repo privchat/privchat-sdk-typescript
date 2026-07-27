@@ -4,6 +4,10 @@ export {
   clearAll,
   clearChannelMessages,
   deleteFriendships,
+  applyAckRekey,
+  MessageIdentityConflictError,
+  isMessageIdFree,
+  remintMessageIdentity,
   deleteMessageByRecordKey,
   deleteMessageByServerId,
   getChannel,
@@ -28,6 +32,12 @@ export {
   upsertUsers,
 } from './indexeddb-store.js';
 export {
+  claimOutboxEntry,
+  claimRepairRow,
+  commitRepairTransition,
+  commitOutboxTransition,
+  deleteOutboxEntryIfOwner,
+  deleteOutboxEntryIfRepairOwner,
   deleteOutboxEntry,
   getOutboxByLocalMessageId,
   getOutboxEntry,
@@ -56,4 +66,4 @@ export type {
   SyncStateRecord,
   UserRecord,
 } from './types.js';
-export { messageRecordKey, pushToMessageRecord } from './types.js';
+export { messageRecordKey, nextLocalMessageRecordId, pushToMessageRecord } from './types.js';

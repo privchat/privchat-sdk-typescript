@@ -569,6 +569,7 @@ describe('peer_read_pts_updated persists to ChannelRecord.peer_read_pts', () => 
       1,
       [
         {
+          id: 'r-s1',
           channel_id: '100',
           channel_type: 1,
           server_message_id: 's1',
