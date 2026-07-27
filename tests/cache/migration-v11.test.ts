@@ -94,8 +94,8 @@ describe('v11 outbox message_id migration', () => {
     await legacy.table('outbox').bulkPut([
       legacyOutboxRow('cmd-1', 'l:cmd-1'),
       legacyOutboxRow('cmd-2', 'l:cmd-2'),
-      // Command whose message is gone. It must not be handed a fabricated
-      // link to a row that does not exist.
+      // Command whose message is gone. Its payload is text, so the row is
+      // rebuilt from it rather than left orphaned — see below.
       legacyOutboxRow('cmd-3', 'l:cmd-3'),
     ]);
     legacy.close();
@@ -108,7 +108,14 @@ describe('v11 outbox message_id migration', () => {
     expect(one?.message_id).toBe('stable-pending');
     // Backfilled via local_message_id, because record_key has already moved.
     expect(two?.message_id).toBe('stable-rekeyed');
-    expect(three?.message_id).toBeUndefined();
+    // v12 rebuilds it: an unlinked command is not a neutral state — every
+    // flush would treat it as damaged data forever, and the user would watch
+    // a send that neither completes nor fails. The payload carries the whole
+    // body for text, so the message is recoverable exactly.
+    expect(three?.message_id).toBeDefined();
+    const rebuilt = await db.messages_v2.get(three!.message_id!);
+    expect(rebuilt?.local_message_id).toBe('cmd-3');
+    expect(rebuilt?.channel_id).toBe('c1');
   });
 
   it('keeps an existing message_id only when it still resolves to this send', async () => {
@@ -203,8 +210,11 @@ describe('v11 outbox message_id migration', () => {
     legacy.close();
 
     db = new CacheDB(name);
-    // Not left dangling: carrying a pointer we just proved wrong would send
-    // resolvePending down the damaged-data path on every flush.
-    expect((await getOutboxEntry(db, 'cmd-z'))?.message_id).toBeUndefined();
+    // The disproved pointer is not carried forward; the command is relinked
+    // to a row rebuilt from its own payload instead.
+    const row = await getOutboxEntry(db, 'cmd-z');
+    expect(row?.message_id).toBeDefined();
+    expect(row?.message_id).not.toBe('points-at-nothing');
+    expect((await db.messages_v2.get(row!.message_id!))?.local_message_id).toBe('cmd-z');
   });
 });

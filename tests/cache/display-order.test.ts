@@ -7,6 +7,7 @@
 // and gets them wrong differently on each client — which is how one
 // conversation ends up rendering in two orders.
 
+import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   CacheDB,
@@ -39,34 +40,61 @@ function msg(over: Partial<MessageRecord> & { id: string }): MessageRecord {
 }
 
 /**
- * The shared fixture. Deliberately adversarial:
- *   - arrives 30, 10, 20 — out of order
- *   - `t-same-a` / `t-same-b` share a timestamp
- *   - `t-backwards` has a timestamp far in the past but the highest pts,
- *     i.e. a sender whose clock is wrong
- *   - one pending row with no pts at all
+ * The shared fixture — the same JSON the Rust SDK's parity test reads
+ * (privchat-docs/fixtures/display-order.json). Loaded rather than duplicated:
+ * two copies of "the expected order" are two things that can drift, and the
+ * whole point of the case is that both SDKs produce one ordering.
  *
- * Expected order is by pts, with the pending row last. Rust orders the same
- * input by `(pending_group, pts, server_message_id, message.id)` where its id
- * is a monotonic rowid; TypeScript substitutes `local_order_seq` for that last
- * element, which is why the two agree.
+ * It is deliberately adversarial: rows arrive 30, 10, 20; `t-same-a` and
+ * `t-same-b` share a timestamp; `t-backwards` has the highest pts and a
+ * timestamp far in the past (a sender whose clock is wrong); and one pending
+ * row has no pts at all.
+ *
+ * Rust orders it by `(pending_group, pts, server_message_id, message.id)`
+ * where its id is a monotonic rowid; TypeScript substitutes `local_order_seq`
+ * for that last element, which is why the two agree.
  */
+interface Fixture {
+  channel_id: number;
+  channel_type: number;
+  from_uid: number;
+  confirmed: Array<{
+    label: string;
+    server_message_id: number;
+    pts: number;
+    timestamp: number;
+  }>;
+  pending: Array<{ label: string; local_message_id: number; timestamp: number }>;
+  expected_order: string[];
+}
+
+const FIXTURE = JSON.parse(
+  readFileSync(
+    new URL('../../../privchat-docs/fixtures/display-order.json', import.meta.url),
+    'utf8',
+  ),
+) as Fixture;
+
 const SHUFFLED: MessageRecord[] = [
-  msg({ id: 'r30', server_message_id: '30', pts: '30', timestamp: 5_000 }),
-  msg({ id: 'r10', server_message_id: '10', pts: '10', timestamp: 9_000 }),
-  msg({ id: 'r20', server_message_id: '20', pts: '20', timestamp: 1_000 }),
-  msg({ id: 't-same-a', server_message_id: '40', pts: '40', timestamp: 7_000 }),
-  msg({ id: 't-same-b', server_message_id: '41', pts: '41', timestamp: 7_000 }),
-  msg({ id: 't-backwards', server_message_id: '50', pts: '50', timestamp: 1 }),
-  msg({
-    id: 'p-pending',
-    local_message_id: 'cmd-1',
-    status: 'pending',
-    timestamp: 2,
-  }),
+  ...FIXTURE.confirmed.map((r) =>
+    msg({
+      id: r.label,
+      server_message_id: String(r.server_message_id),
+      pts: String(r.pts),
+      timestamp: r.timestamp,
+    }),
+  ),
+  ...FIXTURE.pending.map((r) =>
+    msg({
+      id: r.label,
+      local_message_id: String(r.local_message_id),
+      status: 'pending',
+      timestamp: r.timestamp,
+    }),
+  ),
 ];
 
-const EXPECTED = ['r10', 'r20', 'r30', 't-same-a', 't-same-b', 't-backwards', 'p-pending'];
+const EXPECTED = FIXTURE.expected_order;
 
 describe('display order', () => {
   it('persists and reads back in tuple order, whatever the arrival order', async () => {

@@ -296,9 +296,12 @@ describe('messages table', () => {
   });
 
   it('messages from different (channel, type) are isolated', async () => {
+    // Distinct server ids: one network identity names one message, and
+    // reusing 's-1' across channels is the conflict case, tested separately.
+    // What is under test here is channel isolation.
     await upsertMessages(db, [
       sampleMessage('1', { channel_id: 'a' }),
-      sampleMessage('1', { channel_id: 'b' }),
+      sampleMessage('2', { channel_id: 'b' }),
     ]);
     expect(await getMessageWindow(db, 'a', 1, 10)).toHaveLength(1);
     expect(await getMessageWindow(db, 'b', 1, 10)).toHaveLength(1);

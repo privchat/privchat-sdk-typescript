@@ -9,7 +9,14 @@
 
 import Dexie from 'dexie';
 import { afterEach, describe, expect, it } from 'vitest';
-import { CacheDB, getMessageWindow } from '../../src/cache/indexeddb-store.js';
+import {
+  CacheDB,
+  ServerMessageIdConflictError,
+  getChannelOrderMode,
+  getMessageWindow,
+  upsertMessages,
+} from '../../src/cache/indexeddb-store.js';
+import { MessageStore } from '../../src/cache/message-store.js';
 import { getOutboxEntry } from '../../src/cache/outbox-store.js';
 
 let db: CacheDB | undefined;
@@ -81,22 +88,12 @@ describe('v12 messages_v2 migration', () => {
     expect(rows.map((r) => r.local_order_seq)).toEqual([1, 2, 3]);
   });
 
-  // KNOWN GAP, deliberately documented rather than papered over.
-  //
-  // SDK_ENTITY_MODEL_SPEC §2.6.2 says a channel falls back to
-  // server_message_id ordering while ANY confirmed row still lacks pts. That
-  // rule is per-channel and stateful; the persisted `sort_key` is static, and
-  // in it a missing pts encodes as zeros — so a confirmed row without pts
-  // sorts ahead of every row that has one, which is the inversion the rule
-  // exists to prevent. `local_order_seq` cannot rescue it either: it is the
-  // fourth tuple element and is never reached.
-  //
-  // The migration does number these channels correctly, so the data is right;
-  // what is missing is a comparator that honours it. Closing this needs
-  // either a per-channel degraded flag consulted at read time, or a targeted
-  // pts backfill before the canonical index goes live. Until then this test
-  // records what actually happens.
-  it.fails('orders a channel by server_message_id while any confirmed row lacks pts', async () => {
+  // The degraded-order rule (SDK_ENTITY_MODEL_SPEC §2.6.2): while ANY
+  // confirmed row in a channel still lacks pts, that channel is ordered by
+  // server_message_id alone. A missing pts encodes as zeros, so keeping pts
+  // order would sort the pts-less row ahead of the whole conversation —
+  // which is the inversion the rule exists to prevent.
+  it('orders a channel by server_message_id while any confirmed row lacks pts', async () => {
     const name = `mig12b-${Date.now()}-${Math.random()}`;
     const legacy = new Dexie(name);
     legacy.version(11).stores(V11_STORES);
@@ -108,6 +105,7 @@ describe('v12 messages_v2 migration', () => {
         server_message_id: '100',
         pts: '10',
       }),
+      // Fetched through message/history, which carries no pts.
       legacyMessage({
         id: 'newer-without-pts',
         record_key: 's:300',
@@ -119,6 +117,116 @@ describe('v12 messages_v2 migration', () => {
     db = new CacheDB(name);
     const rows = await getMessageWindow(db, 'c1', 1, 10);
     expect(rows.map((r) => r.id)).toEqual(['older-with-pts', 'newer-without-pts']);
+    expect(await getChannelOrderMode(db, 'c1')).toBe('server_id');
+
+    // And the in-memory comparator sorts it the same way — one ordering, not
+    // two. Told the mode the rows were keyed under, as the client does.
+    const store = new MessageStore();
+    store.setChannelOrderMode('c1', await getChannelOrderMode(db, 'c1'));
+    store.upsertMessages('c1', 1, rows, true);
+    expect(store.getMessages('c1', 1).map((r) => r.id)).toEqual([
+      'older-with-pts',
+      'newer-without-pts',
+    ]);
+  });
+
+  it('returns to pts order once sync fills the missing pts in', async () => {
+    // The flag is not a one-way door: server_message_id only approximates the
+    // channel order, so the moment pts is complete the authoritative order
+    // has to come back — and every persisted key with it, or the two
+    // disagree.
+    const name = `mig12b2-${Date.now()}-${Math.random()}`;
+    const legacy = new Dexie(name);
+    legacy.version(11).stores(V11_STORES);
+    await legacy.open();
+    await legacy.table('messages').bulkPut([
+      legacyMessage({ id: 'a', record_key: 's:100', server_message_id: '100', pts: '10' }),
+      legacyMessage({ id: 'b', record_key: 's:300', server_message_id: '300' }),
+    ]);
+    legacy.close();
+
+    db = new CacheDB(name);
+    expect(await getChannelOrderMode(db, 'c1')).toBe('server_id');
+
+    // Sync delivers the pts for the row that was missing one.
+    const [gap] = (await getMessageWindow(db, 'c1', 1, 10)).filter((r) => r.id === 'b');
+    await upsertMessages(db, [{ ...gap!, pts: '30' }]);
+
+    expect(await getChannelOrderMode(db, 'c1')).toBe('pts');
+    expect((await getMessageWindow(db, 'c1', 1, 10)).map((r) => r.id)).toEqual(['a', 'b']);
+  });
+
+  it('keeps one network identity in one channel, quarantining the intruder', async () => {
+    // server_message_id is globally unique: the same id in two channels is
+    // corruption, and merging it would put someone's message in a
+    // conversation it was never sent to. The loser is preserved rather than
+    // deleted — it is user data, and the only evidence of the bug.
+    const name = `mig12e-${Date.now()}-${Math.random()}`;
+    const legacy = new Dexie(name);
+    legacy.version(11).stores(V11_STORES);
+    await legacy.open();
+    await legacy.table('messages').bulkPut([
+      legacyMessage({ id: 'right', record_key: 's:777', server_message_id: '777', pts: '1' }),
+      legacyMessage({
+        id: 'intruder',
+        channel_id: 'c2',
+        record_key: 's:777',
+        server_message_id: '777',
+        pts: '1',
+      }),
+    ]);
+    legacy.close();
+
+    db = new CacheDB(name);
+    // The upgrade completed at all — a ConstraintError inside it would abort
+    // the whole thing and leave the database unopenable.
+    expect((await getMessageWindow(db, 'c1', 1, 10)).map((r) => r.id)).toEqual(['right']);
+    expect(await getMessageWindow(db, 'c2', 1, 10)).toEqual([]);
+    const held = await db.quarantine.toArray();
+    expect(held.map((r) => r.id)).toEqual(['intruder']);
+
+    // And the live path refuses the same thing rather than corrupting.
+    await expect(
+      upsertMessages(db, [
+        {
+          id: 'later',
+          channel_id: 'c3',
+          channel_type: 1,
+          server_message_id: '777',
+          from_uid: '9',
+          message_type: 'text',
+          content: 'x',
+          payload: new Uint8Array(),
+          timestamp: 1,
+          status: 'received',
+        },
+      ]),
+    ).rejects.toThrow(ServerMessageIdConflictError);
+  });
+
+  it('collapses a duplicated row within one channel, keeping the more complete one', async () => {
+    const name = `mig12f-${Date.now()}-${Math.random()}`;
+    const legacy = new Dexie(name);
+    legacy.version(11).stores(V11_STORES);
+    await legacy.open();
+    await legacy.table('messages').bulkPut([
+      // Written twice for one message: a network copy, and our own row that
+      // the outbox and the UI point at.
+      legacyMessage({ id: 'network-copy', record_key: 's:888', server_message_id: '888' }),
+      legacyMessage({
+        id: 'ours',
+        record_key: 'l:cmd-dup',
+        server_message_id: '888',
+        local_message_id: 'cmd-dup',
+        pts: '5',
+      }),
+    ]);
+    legacy.close();
+
+    db = new CacheDB(name);
+    const rows = await getMessageWindow(db, 'c1', 1, 10);
+    expect(rows.map((r) => r.id)).toEqual(['ours']);
+    expect(await db.quarantine.count()).toBe(0);
   });
 
   it('moves outbox references across in the same upgrade', async () => {
@@ -156,6 +264,57 @@ describe('v12 messages_v2 migration', () => {
     // Migrating messages first and outbox later would leave a window where a
     // crash strands the command pointing at a table that no longer exists.
     expect((await getOutboxEntry(db, 'cmd-1'))?.message_id).toBe('msg-for-cmd');
+  });
+
+  it('rebuilds a text command whose message row is gone, and routes media to repair', async () => {
+    // No outbox row may come out of the upgrade unlinked. An unlinked command
+    // is not a neutral state: `resolvePending` treats it as damaged data on
+    // every flush, forever, and the user watches a send that neither
+    // completes nor fails. Text carries its whole body in the payload, so the
+    // row is rebuilt exactly; media depends on a local file and on metadata
+    // the command never held, so it is marked as broken local data — a state
+    // the host can act on.
+    const name = `mig12g-${Date.now()}-${Math.random()}`;
+    const legacy = new Dexie(name);
+    legacy.version(11).stores(V11_STORES);
+    await legacy.open();
+    const orphan = (outbox_id: string, content_type: string, extra = {}) => ({
+      outbox_id,
+      channel_id: 'c1',
+      channel_type: 1,
+      local_message_id: outbox_id,
+      from_uid: '9',
+      content_type,
+      payload: new Uint8Array(),
+      created_at: 1_000,
+      updated_at: 1_000,
+      attempt_count: 0,
+      next_attempt_at: 0,
+      status: 'pending',
+      ...extra,
+    });
+    await legacy.table('outbox').bulkPut([
+      orphan('cmd-text', 'text', {
+        payload: new TextEncoder().encode('rebuild me'),
+        payload_encoding: 'raw_utf8',
+      }),
+      orphan('cmd-image', 'image', { payload_encoding: 'message_envelope' }),
+    ]);
+    legacy.close();
+
+    db = new CacheDB(name);
+    const text = await getOutboxEntry(db, 'cmd-text');
+    expect(text?.message_id).toBeDefined();
+    const rebuilt = await db.messages_v2.get(text!.message_id!);
+    expect(rebuilt?.content).toBe('rebuild me');
+    expect(rebuilt?.status).toBe('pending');
+    // The rebuilt row is in the timeline, not floating unreachable.
+    expect((await getMessageWindow(db, 'c1', 1, 10)).map((r) => r.id)).toEqual([rebuilt!.id]);
+
+    const image = await getOutboxEntry(db, 'cmd-image');
+    expect(image?.message_id).toBeUndefined();
+    expect(image?.status).toBe('local_data_error');
+    expect(image?.last_error).toContain('image');
   });
 
   it('leaves each account database numbering independently', async () => {

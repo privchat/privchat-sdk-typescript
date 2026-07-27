@@ -23,13 +23,20 @@ vi.mock('../../src/cache/index.js', async () => {
   );
   return {
     ...actual,
-    upsertMessage: async (...args: Parameters<typeof actual.upsertMessage>) => {
+    // The two atomic entry points the send path actually uses. Injecting on
+    // `upsertMessage`/`applyAck` instead would prove nothing: the send path
+    // writes the message and its command together, and applies the ack and
+    // retires the command together, so those are the transactions that can
+    // fail as a unit.
+    createLocalMessageQueued: async (
+      ...args: Parameters<typeof actual.createLocalMessageQueued>
+    ) => {
       if (fail.pendingWrite) throw new Error('injected: pending write failed');
-      return actual.upsertMessage(...args);
+      return actual.createLocalMessageQueued(...args);
     },
-    applyAck: async (...args: Parameters<typeof actual.applyAck>) => {
-      if (fail.ackRekey) throw new Error('injected: ack rekey failed');
-      return actual.applyAck(...args);
+    commitAck: async (...args: Parameters<typeof actual.commitAck>) => {
+      if (fail.ackRekey) throw new Error('injected: ack commit failed');
+      return actual.commitAck(...args);
     },
   };
 });
@@ -165,6 +172,13 @@ describe('sendTextMessage — pending row cannot be persisted', () => {
     // Nothing owns such a row — not the outbox, not the wire, not a sync.
     // Left in place it would say "sending" forever.
     expect(client!.getCachedMessages('12345', 1)).toEqual([]);
+
+    // And the command did not survive on its own either: the pair is one
+    // transaction, so a failure leaves neither half behind.
+    const reopened = new CacheDB(dbName);
+    expect(await reopened.messages_v2.count()).toBe(0);
+    expect(await reopened.outbox.count()).toBe(0);
+    reopened.close();
   });
 
   it('never puts the message on the wire', async () => {
@@ -226,6 +240,9 @@ describe('sendTextMessage — ACK cannot be persisted', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.local_message_id).toBe('9007199254740994');
     expect(rows[0]!.status).toBe('pending');
+    // The command is still there too — an ack that did not commit must not
+    // retire the command that would otherwise recover it.
+    expect(await reopened.outbox.count()).toBe(1);
     reopened.close();
   });
 });

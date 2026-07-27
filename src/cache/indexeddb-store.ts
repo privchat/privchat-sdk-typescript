@@ -34,7 +34,13 @@ import {
   compareDisplayOrder,
   displaySortKey,
   encodeSortKey,
+  hasPtsGap,
+  type ChannelOrderMode,
 } from './types.js';
+import {
+  decodeRebuildableContent,
+  isRebuildableFromPayload,
+} from './rebuild.js';
 
 /** Persisted shape — adds the derived, fixed-width `sort_key` so IndexedDB
  *  can range-scan a channel in display order without loading and re-sorting
@@ -42,6 +48,19 @@ import {
  *  module. */
 interface StoredMessage extends MessageRecord {
   sort_key: string;
+  /** 1 when this row is confirmed but has no pts — the condition that forces
+   *  its channel into `server_id` ordering. Stored and indexed so recovery is
+   *  an indexed count rather than a full channel scan on every write. */
+  pts_gap: 0 | 1;
+}
+
+/** A row that could not be admitted under the unique `server_message_id`
+ *  index: two different local rows claiming one network identity. Kept rather
+ *  than deleted — it is user data, and the conflict is evidence of a bug we
+ *  would otherwise destroy the only record of. */
+export interface QuarantinedMessage extends MessageRecord {
+  quarantine_reason: string;
+  quarantined_at: number;
 }
 
 interface CacheMetadataRecord {
@@ -54,6 +73,9 @@ const CACHE_OWNER_KEY = 'owner_user_id';
  *  read, bumped and used inside one transaction, because allocating outside
  *  the write is how two tabs hand out the same number. */
 const LOCAL_ORDER_SEQ_KEY = 'local_order_seq_high_water';
+/** Per-channel display-order mode, `pts` unless recorded otherwise. */
+const ORDER_MODE_PREFIX = 'channel_order_mode:';
+const orderModeKey = (channel_id: string): string => ORDER_MODE_PREFIX + channel_id;
 
 export class CacheDB extends Dexie {
   channels!: Table<ChannelRecord, string>;
@@ -74,6 +96,8 @@ export class CacheDB extends Dexie {
    * authenticated user; hosts must never be able to hydrate another user's
    * rows merely by reusing a database name. */
   cache_metadata!: Table<CacheMetadataRecord, string>;
+  /** Rows evicted by an identity conflict. Never read by the timeline. */
+  quarantine!: Table<QuarantinedMessage, string>;
 
   constructor(dbName: string) {
     super(dbName);
@@ -359,8 +383,16 @@ export class CacheDB extends Dexie {
     // survive that. None of them are needed once the key stops moving.
     this.version(12)
       .stores({
+        // `&server_message_id` is account-global, not per channel: a network
+        // identity names one message, and the same id appearing in two
+        // channels is corruption, not two messages. Per-channel uniqueness
+        // could not see it — which is how a message ended up rendered in a
+        // conversation it was never sent to. Channel ownership is verified
+        // after the lookup instead.
         messages_v2:
-          '&id, [channel_id+sort_key], &[channel_id+server_message_id], [channel_id+local_message_id], channel_id',
+          '&id, [channel_id+sort_key], &server_message_id, [channel_id+server_message_id], ' +
+          '[channel_id+local_message_id], [channel_id+pts_gap], channel_id',
+        quarantine: '&id, channel_id',
         // Old store stays declared so the upgrade can read it; dropped in v13.
         messages:
           '&[channel_id+record_key], &id, [channel_id+timestamp], [channel_id+server_message_id]',
@@ -368,6 +400,7 @@ export class CacheDB extends Dexie {
       .upgrade(async (tx) => {
         const oldMessages = tx.table('messages');
         const v2 = tx.table('messages_v2');
+        const quarantine = tx.table('quarantine');
         const outbox = tx.table('outbox');
         const meta = tx.table('cache_metadata');
 
@@ -378,7 +411,9 @@ export class CacheDB extends Dexie {
         // channel's confirmed rows are ordered by server_message_id alone —
         // a server-issued snowflake needing no local inference. Ordering them
         // by "has pts" would claim the local write path tells us the server's
-        // order, which it does not.
+        // order, which it does not. The same condition is recorded as the
+        // channel's order mode, so the runtime comparator and the sort keys
+        // written here stay one ordering.
         const byChannel = new Map<string, Array<Record<string, unknown>>>();
         for (const r of rows) {
           const cid = String(r.channel_id ?? '');
@@ -394,8 +429,8 @@ export class CacheDB extends Dexie {
         };
 
         let seq = 0;
-        const ordered: Array<Record<string, unknown>> = [];
-        for (const list of byChannel.values()) {
+        const ordered: Array<{ row: Record<string, unknown>; mode: ChannelOrderMode }> = [];
+        for (const [cid, list] of byChannel) {
           const confirmed = list.filter(
             (r) => r.server_message_id !== undefined && r.server_message_id !== '',
           );
@@ -405,8 +440,9 @@ export class CacheDB extends Dexie {
           const anyMissingPts = confirmed.some(
             (r) => r.pts === undefined || r.pts === '',
           );
+          const mode: ChannelOrderMode = anyMissingPts ? 'server_id' : 'pts';
           confirmed.sort((a, b) =>
-            anyMissingPts
+            mode === 'server_id'
               ? cmp(a.server_message_id as string, b.server_message_id as string)
               : cmp(a.pts as string, b.pts as string) ||
                 cmp(a.server_message_id as string, b.server_message_id as string),
@@ -420,31 +456,179 @@ export class CacheDB extends Dexie {
               Number(a.timestamp ?? 0) - Number(b.timestamp ?? 0) ||
               String(a.id ?? '').localeCompare(String(b.id ?? '')),
           );
-          ordered.push(...confirmed, ...pendingRows);
+          for (const row of [...confirmed, ...pendingRows]) ordered.push({ row, mode });
+          if (mode === 'server_id') {
+            await meta.put({ key: orderModeKey(cid), value: mode });
+          }
         }
 
+        /** Which local row currently holds each network id, so a second
+         *  claimant can be recognised before the unique index rejects it —
+         *  a ConstraintError inside an upgrade aborts the whole thing and
+         *  leaves the database unopenable. */
+        const holderBySmid = new Map<string, Record<string, unknown>>();
         const idByOldKey = new Map<string, string>();
-        for (const r of ordered) {
+        /** Old id → surviving id, for rows merged or quarantined below. */
+        const redirect = new Map<string, string>();
+
+        /** More complete wins: a row with pts, then one with a local id
+         *  (ours, i.e. the one the UI and outbox point at), then the earlier
+         *  one. */
+        const completeness = (r: Record<string, unknown>): number =>
+          (r.pts !== undefined && r.pts !== '' ? 2 : 0) +
+          (r.local_message_id !== undefined ? 1 : 0);
+
+        for (const { row: r, mode } of ordered) {
           seq += 1;
           const id = String(r.id ?? nextLocalMessageRecordId());
+          const channel_id = String(r.channel_id ?? '');
           const { record_key, ...rest } = r as { record_key?: string };
           if (record_key !== undefined) {
-            idByOldKey.set(`${String(r.channel_id ?? '')}|${record_key}`, id);
+            idByOldKey.set(`${channel_id}|${record_key}`, id);
           }
+          const smid =
+            r.server_message_id === undefined || r.server_message_id === ''
+              ? undefined
+              : String(r.server_message_id);
+
+          if (smid !== undefined) {
+            const held = holderBySmid.get(smid);
+            if (held !== undefined) {
+              // Same channel: one message that got written twice. Keep the
+              // more complete row and point everything at it.
+              if (String(held.channel_id ?? '') === channel_id) {
+                if (completeness(r) > completeness(held)) {
+                  // The incoming row wins: retire the one already written.
+                  const heldId = String(held.id);
+                  await v2.delete(heldId);
+                  redirect.set(heldId, id);
+                  holderBySmid.set(smid, r);
+                } else {
+                  redirect.set(id, String(held.id));
+                  continue;
+                }
+              } else {
+                // Different channels claiming one network identity. There is
+                // no correct merge — keep the first and preserve the other
+                // as evidence rather than deleting a user's message.
+                await quarantine.put({
+                  ...(rest as Record<string, unknown>),
+                  id,
+                  quarantine_reason: `server_message_id ${smid} already held by row ${String(held.id)} in channel ${String(held.channel_id ?? '')}`,
+                  quarantined_at: Date.now(),
+                });
+                redirect.set(id, String(held.id));
+                continue;
+              }
+            } else {
+              holderBySmid.set(smid, r);
+            }
+          }
+
           const migrated = { ...rest, id, local_order_seq: seq } as MessageRecord;
-          await v2.put({ ...migrated, sort_key: displaySortKey(migrated) });
+          await v2.put({
+            ...migrated,
+            sort_key: displaySortKey(migrated, mode),
+            pts_gap: hasPtsGap(migrated) ? 1 : 0,
+          });
         }
         await meta.put({ key: LOCAL_ORDER_SEQ_KEY, value: String(seq) });
 
-        // Outbox references, in the same transaction. A command whose
-        // message_id already resolves is left alone; otherwise its stale
-        // record_key is translated once, while the mapping still exists.
+        // Outbox references, in the same transaction. Every command must come
+        // out of this upgrade either linked to a message row or explicitly
+        // marked unrecoverable — a command with no link is not a neutral
+        // state: `resolvePending` treats it as damaged data on every single
+        // flush, forever, and the user sees a send that neither completes nor
+        // fails.
         const commands: Array<Record<string, unknown>> = await outbox.toArray();
         for (const o of commands) {
-          if (o.message_id !== undefined) continue;
-          const key = `${String(o.channel_id ?? '')}|${String(o.record_key ?? '')}`;
-          const id = idByOldKey.get(key);
-          if (id !== undefined) await outbox.update(o.outbox_id as string, { message_id: id });
+          const outbox_id = String(o.outbox_id);
+          const channel_id = String(o.channel_id ?? '');
+          const local_message_id =
+            o.local_message_id === undefined ? undefined : String(o.local_message_id);
+
+          /** A command may only point at the message of its own send. */
+          const owns = (row: Record<string, unknown> | undefined): boolean =>
+            row !== undefined &&
+            String(row.channel_id ?? '') === channel_id &&
+            row.local_message_id === local_message_id;
+
+          // 1. An existing link, but only if it still resolves to THIS send.
+          //    A stale one is worse than none: the ack lands on another row.
+          if (o.message_id !== undefined) {
+            const target = redirect.get(String(o.message_id)) ?? String(o.message_id);
+            const named = await v2.get(target);
+            if (owns(named as Record<string, unknown> | undefined)) {
+              if (target !== o.message_id) await outbox.update(outbox_id, { message_id: target });
+              continue;
+            }
+          }
+
+          // 2. The old primary key it was written with, translated once while
+          //    the mapping still exists.
+          const viaKey = idByOldKey.get(`${channel_id}|${String(o.record_key ?? '')}`);
+          const byKey = viaKey === undefined ? undefined : await v2.get(viaKey);
+          if (owns(byKey as Record<string, unknown> | undefined)) {
+            await outbox.update(outbox_id, { message_id: viaKey });
+            continue;
+          }
+
+          // 3. The send's own idempotency key. An acked row was rekeyed
+          //    `l:` → `s:`, so its command's record_key points at nothing —
+          //    precisely the commands this rescues.
+          if (local_message_id !== undefined) {
+            const byLocal = await v2
+              .where('[channel_id+local_message_id]')
+              .equals([channel_id, local_message_id])
+              .first();
+            if (byLocal !== undefined) {
+              await outbox.update(outbox_id, { message_id: String(byLocal.id) });
+              continue;
+            }
+          }
+
+          // 4. The row is gone. Rebuild it where the payload can — the
+          //    command carries the whole body for text and system messages,
+          //    so the message the user sent is recoverable exactly.
+          const entry = o as unknown as OutboxEntry;
+          if (isRebuildableFromPayload(String(o.content_type ?? ''))) {
+            seq += 1;
+            const rebuilt: MessageRecord = {
+              id: nextLocalMessageRecordId(),
+              channel_id,
+              channel_type: Number(o.channel_type ?? 0),
+              local_message_id,
+              from_uid: String(o.from_uid ?? ''),
+              message_type: String(o.content_type ?? 'text'),
+              content: decodeRebuildableContent(entry),
+              payload: entry.payload,
+              timestamp: Number(o.created_at ?? Date.now()),
+              status: 'pending',
+              local_order_seq: seq,
+            };
+            await v2.put({
+              ...rebuilt,
+              sort_key: displaySortKey(rebuilt, 'pts'),
+              pts_gap: 0,
+            });
+            await meta.put({ key: LOCAL_ORDER_SEQ_KEY, value: String(seq) });
+            await outbox.update(outbox_id, { message_id: rebuilt.id });
+            continue;
+          }
+
+          // 5. Media and structured cards: the payload depends on a local
+          //    file or on metadata this row never carried, so rebuilding
+          //    would produce a bubble that can never load. Mark it for the
+          //    host repair path — a state the UI can act on, unlike silence.
+          await outbox.update(outbox_id, {
+            message_id: undefined,
+            status: 'local_data_error',
+            last_error:
+              'local message row lost; a ' +
+              String(o.content_type ?? 'media') +
+              ' payload cannot rebuild it',
+            updated_at: Date.now(),
+          });
         }
       });
 
@@ -571,7 +755,13 @@ export async function upsertMessages(
     // Allocate once for the batch; only genuinely new rows consume one.
     let next = await allocateOrderSeq(db, records.length);
     const out: StoredMessage[] = [];
+    const modes = new Map<string, ChannelOrderMode>();
     for (const record of records) {
+      let mode = modes.get(record.channel_id);
+      if (mode === undefined) {
+        mode = await getChannelOrderMode(db, record.channel_id);
+        modes.set(record.channel_id, mode);
+      }
       const existing = await findExisting(db, record);
       // `id` is account-global, so a row arriving under an existing id but a
       // different channel is not an update — it is one message being moved
@@ -590,7 +780,7 @@ export async function upsertMessages(
         local_order_seq:
           existing?.local_order_seq ?? record.local_order_seq ?? (next += 1),
       };
-      const stamped = stamp(merged);
+      const stamped = stamp(merged, mode);
       // The row may be moving off a key another row holds (pending row that
       // just gained its server id). Delete by the old primary key first so
       // the unique index does not see two.
@@ -600,7 +790,21 @@ export async function upsertMessages(
       await db.messages_v2.put(stamped);
       out.push(stamped);
     }
-    return out.map(strip);
+    // Modes last, once the rows are in: a channel that just received its
+    // first pts-less confirmed row degrades here, and one whose gaps sync
+    // just filled comes back to pts order. Same transaction, so the keys and
+    // the flag can never be observed disagreeing.
+    const finalModes = new Map<string, ChannelOrderMode>();
+    for (const cid of modes.keys()) finalModes.set(cid, await reconcileOrderMode(db, cid));
+    // Re-read anything a mode change rewrote, so callers get the keys that
+    // are actually on disk.
+    return Promise.all(
+      out.map(async (row) =>
+        finalModes.get(row.channel_id) === modes.get(row.channel_id)
+          ? strip(row)
+          : strip((await db.messages_v2.get(row.id)) ?? row),
+      ),
+    );
   });
 }
 
@@ -613,6 +817,28 @@ export async function upsertMessage(
   return stored!;
 }
 
+/**
+ * One network identity is claimed by two channels.
+ *
+ * There is no correct merge: the message belongs to one conversation, and
+ * writing it into the other would put someone's message in a conversation it
+ * was never sent to. The write is refused so the caller — and the bug that
+ * produced it — surfaces, rather than the database quietly holding a lie.
+ */
+export class ServerMessageIdConflictError extends Error {
+  constructor(
+    readonly server_message_id: string,
+    readonly held_by_channel_id: string,
+    readonly attempted_channel_id: string,
+  ) {
+    super(
+      `server_message_id ${server_message_id} already belongs to channel ${held_by_channel_id}; ` +
+        `refusing to also write it into ${attempted_channel_id}`,
+    );
+    this.name = 'ServerMessageIdConflictError';
+  }
+}
+
 /** Locate the row this record refers to, by stable id then by either
  *  network identity. Returns undefined for a genuinely new message. */
 async function findExisting(
@@ -622,11 +848,26 @@ async function findExisting(
   const byId = await db.messages_v2.get(record.id);
   if (byId !== undefined) return byId;
   if (record.server_message_id !== undefined && record.server_message_id !== '') {
+    // Global lookup, then verify the channel. The index is account-wide
+    // because a network id names exactly one message; searching only within
+    // the channel would let the same id be admitted a second time elsewhere,
+    // and the write would then fail against the unique index with a
+    // ConstraintError far from the cause. Finding it in ANOTHER channel is
+    // not a match — it is the conflict, and it is raised as one.
     const bySmid = await db.messages_v2
-      .where('[channel_id+server_message_id]')
-      .equals([record.channel_id, record.server_message_id])
+      .where('server_message_id')
+      .equals(record.server_message_id)
       .first();
-    if (bySmid !== undefined) return bySmid;
+    if (bySmid !== undefined) {
+      if (bySmid.channel_id !== record.channel_id) {
+        throw new ServerMessageIdConflictError(
+          record.server_message_id,
+          bySmid.channel_id,
+          record.channel_id,
+        );
+      }
+      return bySmid;
+    }
   }
   if (record.local_message_id !== undefined && record.local_message_id !== '') {
     const byLmid = await db.messages_v2
@@ -722,7 +963,7 @@ export async function applyAck(
         acked.local_order_seq ??
         (await allocateOrderSeq(db, 1)) + 1,
     };
-    const stamped = stamp(merged);
+    const stamped = stamp(merged, await getChannelOrderMode(db, acked.channel_id));
 
     // Absorb whichever row we did not keep. One logical message, one row.
     for (const row of [local, remote]) {
@@ -731,8 +972,73 @@ export async function applyAck(
       }
     }
     await db.messages_v2.put(stamped);
-    return strip(stamped);
+    const mode = await reconcileOrderMode(db, acked.channel_id);
+    return strip((await db.messages_v2.get(stamped.id)) ?? stamp(merged, mode));
   });
+}
+
+/**
+ * Create the local echo and its outbox command in ONE transaction.
+ *
+ * This is the Command-First invariant (MESSAGE_SPEC §8.3, SYNC_SPEC §3.3),
+ * and it is the whole reason the outbox lives in the same database as the
+ * message. Written separately, a crash between them leaves either:
+ *
+ *   - a message row with no command — permanently "sending", with nothing
+ *     that will ever send it; or
+ *   - a command with no message — the ack has no row to land on.
+ *
+ * Neither is recoverable from inside the client, which is why the write is
+ * not allowed to be two steps. The send attempt happens strictly after this
+ * commits: a message that reaches the wire but not the disk is one the ack
+ * cannot be applied to.
+ */
+export async function createLocalMessageQueued(
+  db: CacheDB,
+  message: MessageRecord,
+  command: OutboxEntry,
+): Promise<MessageRecord> {
+  return db.transaction(
+    'rw',
+    db.messages_v2,
+    db.outbox,
+    db.cache_metadata,
+    async () => {
+      const seq = (await allocateOrderSeq(db, 1)) + 1;
+      const stored = stamp(
+        { ...message, local_order_seq: seq },
+        await getChannelOrderMode(db, message.channel_id),
+      );
+      await db.messages_v2.add(stored);
+      await db.outbox.add({ ...command, message_id: stored.id });
+      return strip(stored);
+    },
+  );
+}
+
+/**
+ * Apply the ACK and retire the command in ONE transaction.
+ *
+ * The pair has to be atomic for the same reason as the enqueue: a committed
+ * ack with a surviving command re-sends a delivered message, and a retired
+ * command with an unapplied ack loses it.
+ */
+export async function commitAck(
+  db: CacheDB,
+  acked: MessageRecord,
+  outbox_id: string,
+): Promise<MessageRecord> {
+  return db.transaction(
+    'rw',
+    db.messages_v2,
+    db.outbox,
+    db.cache_metadata,
+    async () => {
+      const durable = await applyAck(db, acked);
+      await db.outbox.delete(outbox_id);
+      return durable;
+    },
+  );
 }
 
 /** Latest `limit` messages for a channel, in display order (ascending).
@@ -768,7 +1074,10 @@ export async function getMessagesBefore(
   before: MessageRecord | string,
   limit: number,
 ): Promise<MessageRecord[]> {
-  const cursor = typeof before === 'string' ? before : displaySortKey(before);
+  const cursor =
+    typeof before === 'string'
+      ? before
+      : displaySortKey(before, await getChannelOrderMode(db, channel_id));
   const desc = await db.messages_v2
     .where('[channel_id+sort_key]')
     .between([channel_id, ''], [channel_id, cursor], true, false)
@@ -925,14 +1234,68 @@ export async function clearAll(db: CacheDB): Promise<void> {
   );
 }
 
-// ----- Internal: record_key stamping -----
+// ----- Internal: derived-column stamping -----
 
-function stamp(record: MessageRecord): StoredMessage {
-  return { ...record, sort_key: displaySortKey(record) };
+function stamp(record: MessageRecord, mode: ChannelOrderMode): StoredMessage {
+  return {
+    ...record,
+    sort_key: displaySortKey(record, mode),
+    pts_gap: hasPtsGap(record) ? 1 : 0,
+  };
 }
 
 function strip(stored: StoredMessage): MessageRecord {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { sort_key: _, ...rest } = stored;
+  const { sort_key: _s, pts_gap: _g, ...rest } = stored;
   return rest;
+}
+
+/**
+ * The mode this channel's persisted `sort_key`s were written under.
+ *
+ * Read inside the caller's transaction — a mode read outside the write it
+ * governs is a mode that can change before the row lands, which is how a
+ * single row ends up keyed differently from the rest of its channel.
+ */
+export async function getChannelOrderMode(
+  db: CacheDB,
+  channel_id: string,
+): Promise<ChannelOrderMode> {
+  const meta = await db.cache_metadata.get(orderModeKey(channel_id));
+  return meta?.value === 'server_id' ? 'server_id' : 'pts';
+}
+
+/**
+ * Re-decide the channel's order mode after a write, and rewrite its keys if
+ * it changed.
+ *
+ * Both directions matter. A confirmed row with no pts (a history fetch, which
+ * carries none) degrades the channel: keeping pts order would sort that row
+ * ahead of the entire conversation, since a missing pts encodes as zeros.
+ * And once sync has filled the gaps in, the channel must come back — pts is
+ * the authoritative order and `server_message_id` only approximates it.
+ *
+ * The flag and the regenerated keys are one transaction with the write that
+ * triggered them, so no read can observe a mode that disagrees with the keys
+ * on disk. The check itself is an indexed count on `pts_gap`, not a scan; only
+ * an actual transition pays for rewriting the channel.
+ */
+async function reconcileOrderMode(
+  db: CacheDB,
+  channel_id: string,
+): Promise<ChannelOrderMode> {
+  const current = await getChannelOrderMode(db, channel_id);
+  const gaps = await db.messages_v2
+    .where('[channel_id+pts_gap]')
+    .equals([channel_id, 1])
+    .count();
+  const want: ChannelOrderMode = gaps > 0 ? 'server_id' : 'pts';
+  if (want === current) return current;
+
+  const rows = await db.messages_v2.where('channel_id').equals(channel_id).toArray();
+  for (const row of rows) {
+    await db.messages_v2.put({ ...row, sort_key: displaySortKey(row, want) });
+  }
+  await db.cache_metadata.put({ key: orderModeKey(channel_id), value: want });
+  return want;
 }

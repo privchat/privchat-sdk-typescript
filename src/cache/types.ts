@@ -528,22 +528,63 @@ export function pendingGroup(record: MessageRecord): number {
   return sid === undefined || sid === '' || sid === '0' ? 1 : 0;
 }
 
-/** The persisted compound sort key: `[channel_id, pending, pts, smid, seq]`.
+/**
+ * How one channel's confirmed rows are ordered.
+ *
+ * `pts` is the normal mode and the one the contract wants: a per-channel
+ * authoritative sequence. `server_id` is the degraded fallback for a channel
+ * where at least one confirmed row still has no pts — typically rows fetched
+ * through `message/history/*`, which carries no pts.
+ *
+ * The fallback exists because pts and server_message_id are not comparable to
+ * each other: a row with no pts encodes as zeros and would sort ahead of the
+ * entire conversation, i.e. exactly the inversion the rule prevents. Inside a
+ * degraded channel every confirmed row is keyed by server_message_id instead,
+ * which is server-issued, monotonic and present on all of them.
+ *
+ * The mode is per channel, so the choice is uniform across every row a
+ * comparison can involve — the sort key index is `[channel_id+sort_key]` and
+ * the in-memory store groups by channel.
+ */
+export type ChannelOrderMode = 'pts' | 'server_id';
+
+/** `true` when this row is confirmed but carries no pts, i.e. the condition
+ *  that puts its channel into `server_id` mode. Persisted as `pts_gap` so the
+ *  recovery check is an indexed count instead of a scan. */
+export function hasPtsGap(record: MessageRecord): boolean {
+  return (
+    pendingGroup(record) === 0 &&
+    (record.pts === undefined || record.pts === '' || record.pts === '0')
+  );
+}
+
+/** The persisted compound sort key: `[pending, order, smid, seq]`, where
+ *  `order` is pts or server_message_id depending on the channel's mode.
  *  Written on every row so IndexedDB can range-scan the timeline in display
  *  order without loading and re-sorting it. */
-export function displaySortKey(record: MessageRecord): string {
+export function displaySortKey(
+  record: MessageRecord,
+  mode: ChannelOrderMode = 'pts',
+): string {
   return [
     String(pendingGroup(record)),
-    encodeSortKey(record.pts),
+    encodeSortKey(mode === 'pts' ? record.pts : record.server_message_id),
     encodeSortKey(record.server_message_id),
     encodeSortKey(record.local_order_seq),
   ].join('|');
 }
 
-/** The single comparator. Every in-memory ordering goes through it. */
-export function compareDisplayOrder(a: MessageRecord, b: MessageRecord): number {
-  const key = displaySortKey(a);
-  const other = displaySortKey(b);
+/** The single comparator. Every in-memory ordering goes through it, with the
+ *  same mode the persisted keys were written under — the two orderings are
+ *  one ordering, and a comparator that disagreed with the index would make
+ *  the timeline reshuffle the moment it was re-read from disk. */
+export function compareDisplayOrder(
+  a: MessageRecord,
+  b: MessageRecord,
+  mode: ChannelOrderMode = 'pts',
+): number {
+  const key = displaySortKey(a, mode);
+  const other = displaySortKey(b, mode);
   return key < other ? -1 : key > other ? 1 : 0;
 }
 

@@ -25,9 +25,12 @@ import {
   UserStore,
   ensureCacheOwner,
   applyAck as cacheApplyAck,
+  createLocalMessageQueued as cacheCreateLocalMessageQueued,
+  commitAck as cacheCommitAck,
   deleteMessageById as cacheDeleteMessageById,
   deleteFriendships as cacheDeleteFriendships,
   deleteOutboxEntry as cacheDeleteOutboxEntry,
+  getChannelOrderMode as cacheGetChannelOrderMode,
   getMessageWindow as cacheGetMessageWindow,
   getOutboxEntry as cacheGetOutboxEntry,
   getSyncState as cacheGetSyncState,
@@ -1645,7 +1648,7 @@ export class PrivchatClient {
     //    failure paths, because the outbox now owns retry semantics
     //    and the UI should not regress to `failed` while a retry is
     //    pending.
-    const pending: MessageRecord = {
+    let pending: MessageRecord = {
       // Stable for the whole life of this row: the ack fills in
       // server_message_id but never touches `id`, which is the primary key.
       id: nextLocalMessageRecordId(),
@@ -1662,14 +1665,19 @@ export class PrivchatClient {
     // Memory first, so the local echo is on screen in the same tick the user
     // hit send — publishing it costs nothing and risks nothing.
     this.cacheStore.upsertMessage(pending, false);
-    // But the row must be DURABLE before the message goes anywhere. If the
-    // write were left in flight and failed, the server could end up holding
-    // a message whose local row does not exist: the ACK would have no
-    // pending identity to inherit, and a reload would mint a new one — the
-    // row loses the name every dependency and projection refers to it by. A
-    // send we cannot record locally is a send we must not make.
+    // Then the durable half: the row AND its command, in one transaction,
+    // before anything touches the wire (MESSAGE_SPEC §8.3). Written
+    // separately there is a window where the message exists with nothing
+    // that will ever send it — permanently "sending" after a reload — and a
+    // send that reaches the server but not the disk has no row for the ack
+    // to land on. The synchronous attempt below is an optimisation on top of
+    // a command that is already durable, not a way around it.
     try {
-      await cacheUpsertMessage(this.cacheDb, pending);
+      pending = await cacheCreateLocalMessageQueued(
+        this.cacheDb,
+        pending,
+        this.buildOutboxRow(localMsgId, input, payload, pending.id, payloadEncoding),
+      );
     } catch (err) {
       // Roll the echo back. Nothing owns this row otherwise: it was never
       // sent, never queued in the outbox, and no sync will ever hear about
@@ -1680,21 +1688,21 @@ export class PrivchatClient {
       this.cacheStore.removeMessage(input.channel_id, input.channel_type, pending.id);
       throw new LocalMessagePersistError(localMsgId, err);
     }
+    // Re-publish with the `local_order_seq` the transaction allocated. The
+    // in-memory comparator uses it as the final tuple element, so without
+    // this the echo sorts against the persisted rows by a field it does not
+    // have — two consecutive sends would render in an order the database
+    // disagrees with.
+    this.cacheStore.upsertMessage(pending, false);
 
     // 2. Offline gate. If we are not authenticated, skip the wire and
     //    enqueue immediately. Catches: never-connected client, mid-
     //    reconnect window, post-`disconnect()` state. The reconnect
     //    flush hook (5C-1d) will pick the row up later.
     if (this.state !== 'authenticated') {
-      await this.enqueueOutboxRow(
-        localMsgId,
-        input,
-        payload,
-        'pending',
-        pending.id,
-        undefined,
-        payloadEncoding,
-      );
+      // Already durable and already queued — nothing further to write. The
+      // reconnect flush hook picks it up.
+      this.emitOutboxQueued(localMsgId, input, 'pending');
       return {
         status: 'queued',
         local_message_id: localMsgId,
@@ -1709,15 +1717,7 @@ export class PrivchatClient {
     } catch (e) {
       // Transport failure mid-send → enqueue as `failed (transient)`.
       // Cache row stays `pending` so the UI reflects "still trying".
-      await this.enqueueOutboxRow(
-        localMsgId,
-        input,
-        payload,
-        'failed',
-        pending.id,
-        formatTransientError(e),
-        payloadEncoding,
-      );
+      await this.markOutboxFailed(localMsgId, input, formatTransientError(e));
       return {
         status: 'queued',
         local_message_id: localMsgId,
@@ -1729,14 +1729,10 @@ export class PrivchatClient {
       // Server rejected (rate-limit, permission, etc). Enqueue as
       // `failed (rejected)` — the engine will not auto-retry, host UI
       // must surface the rejection state via the outbox observer.
-      await this.enqueueOutboxRow(
+      await this.markOutboxFailed(
         localMsgId,
         input,
-        payload,
-        'failed',
-        pending.id,
         `rejected: code=${resp.reason_code}`,
-        payloadEncoding,
       );
       return {
         status: 'queued',
@@ -1763,7 +1759,7 @@ export class PrivchatClient {
     // reconcile it would never fetch it again. Leaving the cursor where it
     // is keeps that recovery path open.
     try {
-      acked = await cacheApplyAck(this.cacheDb, acked);
+      acked = await cacheCommitAck(this.cacheDb, acked, localMsgId);
     } catch (err) {
       // The send succeeded — the server has the message — but locally it is
       // still pending, which is the truthful state and the one a reload will
@@ -1948,19 +1944,18 @@ export class PrivchatClient {
    * The 5C-1c engine reads `last_error` to decide retry eligibility.
    * No event emit here — observer/event wiring lands in 5C-1e.
    */
-  private async enqueueOutboxRow(
+  /** Build the command that `createLocalMessageQueued` writes beside the
+   *  message. It is always created `pending`: the row exists before any
+   *  attempt, and the attempt only ever moves it forward. */
+  private buildOutboxRow(
     outbox_id: string,
     input: SendTextInput,
     payload: Uint8Array,
-    status: OutboxStatus,
-    /** Stable `MessageRecord.id` of the local echo this command delivers. */
     message_id: string,
-    last_error?: string,
     payload_encoding?: 'raw_utf8' | 'message_envelope',
-  ): Promise<void> {
-    if (this.cacheDb === null) return;
+  ): OutboxEntry {
     const now = Date.now();
-    const entry: OutboxEntry = {
+    return {
       outbox_id,
       message_id,
       payload_encoding,
@@ -1968,31 +1963,53 @@ export class PrivchatClient {
       channel_type: input.channel_type,
       local_message_id: outbox_id,
       from_uid: input.from_uid,
-      // Word form derived from the send input — media sends queued
-      // offline must NOT regress to text on outbox retry (the engine
-      // maps this back to the wire tag in buildRequest).
+      // Word form derived from the send input — media sends queued offline
+      // must NOT regress to text on outbox retry (the engine maps this back
+      // to the wire tag in buildRequest).
       content_type: contentTypeFromWireTag(input.message_type ?? 0),
       payload,
       created_at: now,
       updated_at: now,
-      attempt_count: status === 'failed' ? 1 : 0,
+      attempt_count: 0,
       next_attempt_at: now,
-      last_error,
-      status,
+      status: 'pending',
     };
-    await cachePutOutboxEntry(this.cacheDb, entry);
-    // Surface the new row to outbox listeners + L1 stream. The engine
-    // path uses the same fan-out for sending/sent/failed transitions
-    // — see OutboxEngineHooks wiring in the constructor.
+  }
+
+  /** Announce a command that is already durable. */
+  private emitOutboxQueued(
+    outbox_id: string,
+    input: SendTextInput,
+    status: OutboxStatus,
+    last_error?: string,
+  ): void {
     this.onOutboxMutation({
       type: 'outbox_state_changed',
-      outbox_id: entry.outbox_id,
-      local_message_id: entry.local_message_id,
-      channel_id: entry.channel_id,
-      channel_type: entry.channel_type,
+      outbox_id,
+      local_message_id: outbox_id,
+      channel_id: input.channel_id,
+      channel_type: input.channel_type,
       status,
       last_error,
     });
+  }
+
+  /** Record that this attempt failed. The row already exists — it was
+   *  written with the message — so this is an update, never an insert.
+   *  `last_error`'s prefix tells the engine whether to auto-retry. */
+  private async markOutboxFailed(
+    outbox_id: string,
+    input: SendTextInput,
+    last_error: string,
+  ): Promise<void> {
+    if (this.cacheDb === null) return;
+    await cacheUpdateOutboxStatus(this.cacheDb, outbox_id, {
+      status: 'failed',
+      attempt_count: 1,
+      last_error,
+      updated_at: Date.now(),
+    });
+    this.emitOutboxQueued(outbox_id, input, 'failed', last_error);
   }
 
   // ----- Phase 4: Cache APIs (require `cache.enabled: true` in constructor) -----
@@ -2645,6 +2662,12 @@ export class PrivchatClient {
     const { db, store } = this.requireCache();
     const limit = opts.limit ?? DEFAULT_OPEN_LIMIT;
 
+    // The buffer must be sorted the same way the rows on disk are keyed
+    // (SDK_ENTITY_MODEL_SPEC §2.6.2). The mode is per channel and persisted,
+    // so it is read here rather than inferred from the window — a window can
+    // easily contain no evidence of a gap the rest of the channel has.
+    store.setChannelOrderMode(channel_id, await cacheGetChannelOrderMode(db, channel_id));
+
     // 1. Synchronous emit of the cached window (if any).
     const cached = await cacheGetMessageWindow(db, channel_id, channel_type, limit);
     if (cached.length > 0) {
@@ -2663,6 +2686,9 @@ export class PrivchatClient {
       // 3. Persist + emit. replaceWindow preserves out-of-range pending
       //    records (local echoes for messages just sent).
       await cacheUpsertMessages(db, records);
+      // History carries no pts, so persisting it can degrade the channel.
+      // Re-read rather than assume: this is exactly the transition.
+      store.setChannelOrderMode(channel_id, await cacheGetChannelOrderMode(db, channel_id));
       store.replaceWindow(channel_id, channel_type, records, true);
       this.refreshChannelPreviewFromLocalMessages(channel_id, channel_type);
 

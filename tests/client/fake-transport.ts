@@ -18,6 +18,10 @@ export class FakeTransport implements Transport {
    *  `undefined` to silently drop the request. */
   responder: ((packet: Packet) => Uint8Array | undefined) | null = null;
 
+  /** Awaited before the response is produced, so a test can observe state
+   *  as it stood at the moment the packet hit the wire. */
+  onSendHook: ((packet: Packet) => Promise<void> | void) | null = null;
+
   /** Override to use a different response bizType than the request's. */
   responseBizTypeFor: ((requestBizType: number) => number) | null = null;
 
@@ -33,6 +37,7 @@ export class FakeTransport implements Transport {
 
   async send(packet: Packet): Promise<void> {
     this.sent.push(packet);
+    if (this.onSendHook !== null) await this.onSendHook(packet);
     for (const cb of this.messageSentHandlers) cb({ messageId: packet.messageId });
 
     if (

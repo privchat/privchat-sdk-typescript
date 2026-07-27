@@ -23,6 +23,7 @@ import { contentTypeFromWireTag } from './content-type.js';
 import {
   clearChannelMessages as cacheClearChannelMessages,
   applyAck,
+  getChannelOrderMode,
   getSyncState as cacheGetSyncState,
   upsertMessages as cacheUpsertMessages,
   upsertSyncState as cacheUpsertSyncState,
@@ -696,6 +697,10 @@ export class SyncEngine {
     // ---- Publication, after the page is durable ----
     //
     // Strictly what is on disk: memory shows what a reload would show.
+    // Sync fills pts gaps in, which is what brings a degraded channel back
+    // to pts order; publish the mode before the rows so the buffer is sorted
+    // under the same one the keys were rewritten with.
+    store.setChannelOrderMode(channel_id, await getChannelOrderMode(db, channel_id));
     for (const { localKey, acked } of page.ackSwaps) {
       store.replaceMessage(channel_id, channel_type, localKey, acked, true);
     }

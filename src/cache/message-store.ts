@@ -12,6 +12,8 @@
 
 import {
   compareDisplayOrder,
+  hasPtsGap,
+  type ChannelOrderMode,
   type ChannelRecord,
   type ConversationPatch,
   type ConversationSnapshot,
@@ -46,6 +48,50 @@ type ConversationListener = (
 ) => void;
 
 export class MessageStore {
+  /**
+   * Per-channel display-order mode (SDK_ENTITY_MODEL_SPEC §2.6.2).
+   *
+   * It has to be here, and not derived per comparison, because the persisted
+   * `sort_key` was written under ONE mode for the whole channel. A comparator
+   * that picked its own mode from whatever subset happens to be in the buffer
+   * would order the same rows differently from the index they came out of,
+   * and the timeline would reshuffle on every reload.
+   *
+   * The persistent store is the source of truth and pushes the mode in on
+   * every read. `noteRows` only ever moves a channel INTO the degraded mode:
+   * seeing a confirmed row with no pts proves the gap exists, whereas not
+   * seeing one in a window proves nothing about the rest of the channel.
+   */
+  private readonly orderModes = new Map<string, ChannelOrderMode>();
+
+  /** Declare the mode this channel's persisted keys were written under. */
+  setChannelOrderMode(channel_id: string, mode: ChannelOrderMode): void {
+    const k = channelKey(channel_id);
+    const prev = this.orderModes.get(k);
+    this.orderModes.set(k, mode);
+    // A mode change re-orders the buffer; leaving it sorted under the old
+    // one is the disagreement this whole mechanism exists to prevent.
+    if (prev !== undefined && prev !== mode) {
+      const buf = this.buffers.get(k);
+      if (buf !== undefined) this.buffers.set(k, [...buf].sort(this.cmpFor(channel_id)));
+    }
+  }
+
+  getChannelOrderMode(channel_id: string): ChannelOrderMode {
+    return this.orderModes.get(channelKey(channel_id)) ?? 'pts';
+  }
+
+  /** Degrade on evidence: a confirmed row with no pts. */
+  private noteRows(channel_id: string, records: MessageRecord[]): void {
+    if (this.getChannelOrderMode(channel_id) === 'server_id') return;
+    if (records.some(hasPtsGap)) this.setChannelOrderMode(channel_id, 'server_id');
+  }
+
+  private cmpFor(channel_id: string): (a: MessageRecord, b: MessageRecord) => number {
+    const mode = this.getChannelOrderMode(channel_id);
+    return (a, b) => compareDisplayOrder(a, b, mode);
+  }
+
   private readonly channels = new Map<ChannelKey, ChannelRecord>();
   private readonly buffers = new Map<ChannelKey, MessageRecord[]>();
   private readonly listeners = new Map<ChannelKey, Set<ConversationListener>>();
@@ -126,7 +172,10 @@ export class MessageStore {
     is_remote: boolean,
   ): void {
     const k = channelKey(channel_id);
-    const sorted = records.map(normalizeRecord).sort(compareDisplayOrder);
+    const normalized = records.map(normalizeRecord);
+    this.noteRows(channel_id, normalized);
+    const cmp = this.cmpFor(channel_id);
+    const sorted = normalized.sort(cmp);
     const existing = this.buffers.get(k) ?? [];
 
     if (sorted.length === 0) {
@@ -141,10 +190,10 @@ export class MessageStore {
     const lo = sorted[0]!;
     const hi = sorted[sorted.length - 1]!;
     const outsideRange = existing.filter(
-      (m) => compareDisplayOrder(m, lo) < 0 || compareDisplayOrder(m, hi) > 0,
+      (m) => cmp(m, lo) < 0 || cmp(m, hi) > 0,
     );
 
-    const merged = mergeByKey(absorbDuplicates(outsideRange, sorted), sorted);
+    const merged = mergeByKey(absorbDuplicates(outsideRange, sorted), sorted, cmp);
     this.buffers.set(k, merged);
 
     const oldKeys = new Set(existing.map(messageIdOf));
@@ -170,6 +219,7 @@ export class MessageStore {
   ): void {
     if (records.length === 0) return;
     const k = channelKey(channel_id);
+    this.noteRows(channel_id, records);
     const existing = absorbDuplicates(
       this.buffers.get(k) ?? [],
       records.map(normalizeRecord),
@@ -184,7 +234,7 @@ export class MessageStore {
       if (!prev || !messageEquals(prev, r)) upserted.push(r);
     }
     if (upserted.length === 0) return;
-    const merged = [...byKey.values()].sort(compareDisplayOrder);
+    const merged = [...byKey.values()].sort(this.cmpFor(channel_id));
     this.buffers.set(k, merged);
     this.notify(channel_id, channel_type, merged, { upserted, removed: [], is_remote });
   }
@@ -225,7 +275,8 @@ export class MessageStore {
       const id = messageIdOf(m);
       return id !== replacedId && id !== nextId && !sameMessage(m);
     });
-    const merged = [...filtered, next].sort(compareDisplayOrder);
+    this.noteRows(channel_id, [next]);
+    const merged = [...filtered, next].sort(this.cmpFor(channel_id));
     this.buffers.set(k, merged);
     const removed = replacedId !== nextId ? [replacedId] : [];
     this.notify(channel_id, channel_type, merged, { upserted: [next], removed, is_remote });
@@ -387,11 +438,15 @@ function absorbDuplicates(
   });
 }
 
-function mergeByKey(a: MessageRecord[], b: MessageRecord[]): MessageRecord[] {
+function mergeByKey(
+  a: MessageRecord[],
+  b: MessageRecord[],
+  cmp: (x: MessageRecord, y: MessageRecord) => number,
+): MessageRecord[] {
   const byKey = new Map<string, MessageRecord>();
   for (const m of a) byKey.set(messageIdOf(m), m);
   for (const m of b) byKey.set(messageIdOf(m), m); // b wins on collision
-  return [...byKey.values()].sort(compareDisplayOrder);
+  return [...byKey.values()].sort(cmp);
 }
 
 function messageEquals(a: MessageRecord, b: MessageRecord): boolean {
