@@ -117,3 +117,37 @@ describe('message content normalization', () => {
     })).toMatchObject({ kind: 'text', text: '刚发送即可见' });
   });
 });
+
+describe('reply anchor sanitisation', () => {
+  // Production payloads carry `"reply_to_message_id":"null"` — a sender that
+  // stringified an absent optional. Callers test the projection with
+  // `!== undefined`, so passing it through made web draw an "original
+  // unavailable" quote strip above every plain message.
+  const project = (replyTo: unknown) =>
+    projectMessageContent({
+      content: JSON.stringify({
+        content: 'hi',
+        metadata: {},
+        reply_to_message_id: replyTo,
+      }),
+      content_type: 'text',
+    }).reply_to_message_id;
+
+  it.each([
+    ['stringified null', 'null'],
+    ['stringified undefined', 'undefined'],
+    ['zero sentinel as string', '0'],
+    ['zero sentinel as number', 0],
+    ['empty string', ''],
+    ['non-numeric junk', 'abc'],
+  ])('drops %s', (_label, value) => {
+    expect(project(value)).toBeUndefined();
+  });
+
+  it.each([
+    ['snowflake string', '600997771041832960', '600997771041832960'],
+    ['numeric id', 4242, '4242'],
+  ])('keeps a real %s', (_label, value, expected) => {
+    expect(project(value)).toBe(expected);
+  });
+});

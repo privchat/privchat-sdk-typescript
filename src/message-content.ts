@@ -135,7 +135,7 @@ export function projectMessageContent(input: ProjectMessageContentInput): Messag
   const replyTo =
     input.envelope?.reply_to_message_id ??
     input.reply_to_message_id ??
-    idString(raw?.reply_to_message_id);
+    replyAnchorId(raw?.reply_to_message_id);
   const base = (safeText: string): MessageContentBase => ({
     text: safeText,
     entities: scanMessageTextEntities(safeText, mentionedUserIds),
@@ -281,6 +281,30 @@ function idString(value: unknown): string | undefined {
   if (typeof value === 'string') return value;
   if (typeof value === 'number' || typeof value === 'bigint') return String(value);
   return undefined;
+}
+
+/** Reply anchor out of a legacy JSON envelope, or `undefined` if there isn't one.
+ *
+ *  Deliberately stricter than [idString], which also serves red-packet /
+ *  transfer ref ids (`"rp-1"` and friends are legitimately non-numeric).
+ *  A reply anchor is a snowflake, so it must match the Rust boundary:
+ *  `MessagePayloadEnvelope::from_legacy` parses with `parse::<u64>().ok()` and
+ *  the FlatBuffers decoder maps `0` to `None`.
+ *
+ *  Two shapes have to be rejected rather than passed through, because callers
+ *  test the result with `!== undefined` and treat anything else as a real
+ *  reference:
+ *  - `"null"` / `"undefined"` — a sender that stringified an absent optional.
+ *    Production payloads carry `{"reply_to_message_id":"null"}`, which made web
+ *    draw an "original unavailable" quote strip above every plain message.
+ *  - `0` / `"0"` — the protocol's "no reply" sentinel for a u64 field.
+ */
+function replyAnchorId(value: unknown): string | undefined {
+  const raw = idString(value);
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return undefined;
+  return /^0+$/.test(trimmed) ? undefined : trimmed;
 }
 
 function idList(value: unknown): string[] {

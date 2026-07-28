@@ -4300,9 +4300,14 @@ export class PrivchatClient {
   }
 }
 
+/** Snowflake id off the wire, or `undefined`. `0` is the protocol's "absent"
+ *  sentinel for u64 id fields (see the FlatBuffers decoder, which maps it to
+ *  `None`) — returning `"0"` here would read downstream as a real reference. */
 function protocolIdString(value: unknown): string | undefined {
-  if (typeof value === 'string' && /^\d+$/.test(value)) return value;
-  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) {
+  if (typeof value === 'string' && /^\d+$/.test(value)) {
+    return /^0+$/.test(value) ? undefined : value;
+  }
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) {
     return String(value);
   }
   return undefined;
