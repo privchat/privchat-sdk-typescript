@@ -13,7 +13,6 @@ import {
   agreesWith,
   canonicalFromHistory,
   canonicalFromPush,
-  canonicalFromSendAck,
   canonicalFromSyncCommit,
   mergeSentAt,
   metadataFromEnvelope,
@@ -22,6 +21,8 @@ import {
   type CanonicalInboundMessage,
   type SemanticProjection,
 } from '../../src/cache/canonical-inbound.js';
+import type { HistoricalMessage } from '../../src/api-types.js';
+import type { PushMessageRequest } from '../../src/codec/push.js';
 
 interface Fixture {
   cases: Array<{
@@ -65,37 +66,40 @@ function projectFixtureSource(
   p: Record<string, unknown>,
 ): CanonicalInboundMessage {
   if (path === 'history' || path === 'around') {
-    return canonicalFromHistory(
-      {
-        message_id: String(p.message_id),
-        channel_id: String(p.channel_id),
-        sender_id: String(p.sender_id),
-        content: String(p.content ?? ''),
-        message_type: String(p.message_type ?? 'text'),
-        timestamp: Number(p.timestamp ?? 0),
-        message_seq:
-          p.message_seq !== undefined ? Number(p.message_seq) : undefined,
-        metadata: p.metadata as Record<string, unknown> | undefined,
-        revoked: Boolean(p.revoked),
-      } as Parameters<typeof canonicalFromHistory>[0],
-      String(p.channel_id),
-      1,
-    );
+    // fixture 的 u64 是十进制字符串（JSON 数字会被 JSON.parse 截断）。
+    // HistoricalMessage 目前把这些字段声明成 number —— 该类型自己的注释就承认
+    // 「snowflake 可能超过 MAX_SAFE_INTEGER，调用方应在边界 stringify」。
+    // 这里显式转换而不是假装类型匹配：把 u64 收敛成 string 是独立的一处债，
+    // 不在本次改动范围内，掩盖它才是问题。
+    const msg = {
+      message_id: String(p.message_id),
+      channel_id: String(p.channel_id),
+      sender_id: String(p.sender_id),
+      content: String(p.content ?? ''),
+      message_type: String(p.message_type ?? 'text'),
+      timestamp: Number(p.timestamp ?? 0),
+      message_seq: p.message_seq !== undefined ? Number(p.message_seq) : undefined,
+      metadata: p.metadata as Record<string, unknown> | undefined,
+      revoked: Boolean(p.revoked),
+    } as unknown as HistoricalMessage;
+    return canonicalFromHistory(msg, String(p.channel_id), 1);
   }
   if (path === 'push') {
+    const push: PushMessageRequest = {
+      server_message_id: String(p.server_message_id),
+      local_message_id: String(p.local_message_id ?? '0'),
+      channel_id: String(p.channel_id),
+      channel_type: Number(p.channel_type ?? 1),
+      from_uid: String(p.from_uid),
+      message_type: Number(p.message_type ?? 0),
+      message_seq: Number(p.message_seq ?? 0),
+      // push.fbs 的 timestamp 是秒。
+      timestamp: Number(p.timestamp_secs ?? 0),
+      payload: envelopeBytes(p.extra),
+      deleted: false,
+    } as PushMessageRequest;
     return canonicalFromPush(
-      {
-        server_message_id: String(p.server_message_id),
-        local_message_id: String(p.local_message_id ?? '0'),
-        channel_id: String(p.channel_id),
-        channel_type: Number(p.channel_type ?? 1),
-        from_uid: String(p.from_uid),
-        message_seq: Number(p.message_seq ?? 0),
-        // push.fbs 的 timestamp 是秒。
-        timestamp: Number(p.timestamp_secs ?? 0),
-        payload: envelopeBytes(p.extra),
-        deleted: false,
-      } as Parameters<typeof canonicalFromPush>[0],
+      push,
       String(p.content ?? ''),
       WORD_FORM_BY_TAG[Number(p.message_type ?? 0)] ?? 'text',
     );
@@ -113,14 +117,6 @@ function projectFixtureSource(
     content: String(p.content ?? ''),
     payload: envelopeBytes(p.extra),
   };
-  if (path === 'send_ack') {
-    return canonicalFromSendAck({
-      ...common,
-      local_message_id: String(p.local_message_id ?? '0'),
-      pts: String(p.message_seq ?? 0),
-      sent_at_ms: Number(p.sent_at_ms ?? 0),
-    });
-  }
   return canonicalFromSyncCommit({
     ...common,
     pts: String(p.pts ?? 0),
@@ -183,5 +179,83 @@ describe('canonical inbound projection', () => {
     expect(metadataFromEnvelope('{"content":"x","metadata":{"thumbnail_file_id":7119}}')).toEqual({
       thumbnail_file_id: 7119,
     });
+  });
+});
+
+// 精度必须真的落到持久层，不能只活在 adapter 里。
+//
+// 这是 review 抓到的一处假闭环：两端都在 canonical 里声明了精度，写库时却丢掉，
+// 于是 history 的 .317 仍会被后到的 push 覆盖成 .000 —— 正是本轮声称已修的事故。
+describe('send-time precision survives persistence', () => {
+  it('a seconds-precision push never coarsens a stored millisecond time', async () => {
+    const { CacheDB, upsertMessages, getMessageWindow } = await import(
+      '../../src/cache/indexeddb-store.js'
+    );
+    const db = new CacheDB(`precision-${Date.now()}-${Math.random()}`);
+    try {
+      const precise = 1_785_148_271_317;
+      const base = {
+        id: 'm1',
+        channel_id: 'c1',
+        channel_type: 1,
+        server_message_id: '604621803637178368',
+        from_uid: '9',
+        message_type: 'image',
+        content: '[图片]',
+        payload: new Uint8Array(),
+        status: 'received' as const,
+      };
+
+      // history 先到：毫秒。
+      await upsertMessages(db, [
+        { ...base, timestamp: precise, timestamp_precision: 'milliseconds' },
+      ]);
+      // push 后到：adapter 已把秒归一成毫秒，但精度仍是 seconds。
+      await upsertMessages(db, [
+        {
+          ...base,
+          timestamp: Math.floor(precise / 1000) * 1000,
+          timestamp_precision: 'seconds',
+        },
+      ]);
+      expect((await getMessageWindow(db, 'c1', 1, 10))[0]!.timestamp).toBe(precise);
+
+      // 跨秒也一样——「最后到达者获胜」正是要去掉的规则。
+      await upsertMessages(db, [
+        {
+          ...base,
+          timestamp: Math.floor(precise / 1000) * 1000 + 60_000,
+          timestamp_precision: 'seconds',
+        },
+      ]);
+      expect((await getMessageWindow(db, 'c1', 1, 10))[0]!.timestamp).toBe(precise);
+
+      // 同精度但值不同 = 某一端数据坏了。发送时间是不变量，普通 replay 不覆盖
+      // （只保留先到的）；要改只能走显式的定向 repair。两端同一条规则。
+      await upsertMessages(db, [
+        { ...base, timestamp: precise + 5_000, timestamp_precision: 'milliseconds' },
+      ]);
+      expect((await getMessageWindow(db, 'c1', 1, 10))[0]!.timestamp).toBe(precise);
+
+      // 反向：本地是秒精度时，毫秒来源应当升级它。
+      const db2 = new CacheDB(`precision-up-${Date.now()}-${Math.random()}`);
+      try {
+        await upsertMessages(db2, [
+          {
+            ...base,
+            timestamp: Math.floor(precise / 1000) * 1000,
+            timestamp_precision: 'seconds',
+          },
+        ]);
+        await upsertMessages(db2, [
+          { ...base, timestamp: precise, timestamp_precision: 'milliseconds' },
+        ]);
+        expect((await getMessageWindow(db2, 'c1', 1, 10))[0]!.timestamp).toBe(precise);
+      } finally {
+        db2.close();
+      }
+    } finally {
+      db.close();
+    }
   });
 });

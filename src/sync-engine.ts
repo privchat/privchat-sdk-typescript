@@ -784,6 +784,7 @@ export function commitToMessageRecord(
     content: inbound.content,
     payload: inbound.payload,
     timestamp: inbound.sent_at_ms,
+    timestamp_precision: inbound.sent_at_precision,
     status: isOwn ? 'sent' : 'received',
     revoked: inbound.revoked,
   };

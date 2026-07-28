@@ -41,6 +41,7 @@ import {
   decodeRebuildableContent,
   isRebuildableFromPayload,
 } from './rebuild.js';
+import { mergeSentAt } from './canonical-inbound.js';
 
 /** Persisted shape — adds the derived, fixed-width `sort_key` so IndexedDB
  *  can range-scan a channel in display order without loading and re-sorting
@@ -774,9 +775,34 @@ export async function upsertMessages(
             `refusing to move it to ${record.channel_id}`,
         );
       }
+      // 发送时间按**精度**合并，不按到达顺序：一条消息的发送时间在服务端是不变量，
+      // 所以唯一合法的分歧是分辨率（push 只有秒，history/sync 有毫秒）。低精度永不
+      // 覆盖高精度，否则 history 拿到的 .317 会被随后到达的 push 改成 .000。
+      const time = mergeSentAt(
+        existing === undefined
+          ? undefined
+          : {
+              ms: existing.timestamp,
+              precision: existing.timestamp_precision ?? 'milliseconds',
+            },
+        {
+          ms: record.timestamp,
+          precision: record.timestamp_precision ?? 'milliseconds',
+        },
+      );
+      if (time.conflict) {
+        // 同精度但值不同 = 某一端的数据坏了。保留先到的，别让 replay 覆盖，
+        // 但要留下痕迹：静默地二选一是这类问题查不出来的原因。
+        console.warn(
+          `[privchat] send time conflict for server_message_id=${record.server_message_id}: ` +
+            `${existing?.timestamp} vs ${record.timestamp}`,
+        );
+      }
       const merged: MessageRecord = {
         ...record,
         id: existing?.id ?? record.id,
+        timestamp: time.ms,
+        timestamp_precision: time.precision,
         local_order_seq:
           existing?.local_order_seq ?? record.local_order_seq ?? (next += 1),
       };

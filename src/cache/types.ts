@@ -21,6 +21,7 @@ import { decodeMessagePayloadEnvelope } from '../codec/payload.js';
 import type { PushMessageRequest } from '../codec/push.js';
 import { contentTypeFromWireTag } from '../content-type.js';
 import { normalizeMessageDisplayContent } from '../message-content.js';
+import type { TimePrecision } from './canonical-inbound.js';
 import { canonicalFromPush } from './canonical-inbound.js';
 
 /** All u64-grade ids stay as decimal strings at the public boundary —
@@ -259,9 +260,13 @@ export interface MessageRecord {
    *  for records reconstructed from message/history/get (which carries
    *  parsed `content` + metadata, not raw payload). */
   payload: Uint8Array;
-  /** Wall-clock timestamp (ms). Server-emitted for received rows;
-   *  `Date.now()` for local-echo pending rows. Used as the sort key. */
+  /** 发送时间（毫秒）。received 行来自服务端，本地乐观行是 `Date.now()`。 */
   timestamp: number;
+  /** `timestamp` **原本**的精度。归一之后数值上已看不出来，所以必须显式存：
+   *  合并同一条消息的两条来源时靠它决定谁覆盖谁（push 只有秒，history/sync 是
+   *  毫秒），靠数值形状猜是猜不准的。缺省按毫秒——多数写入路径都是毫秒，而把毫秒
+   *  误标成秒会让它被任何来源覆盖，是更危险的方向。 */
+  timestamp_precision?: TimePrecision;
   /** Client-side delivery state. */
   status: MessageStatus;
   revoked?: boolean;
@@ -624,6 +629,7 @@ export function pushToMessageRecord(push: PushMessageRequest): MessageRecord {
     content: canonical.content,
     payload: canonical.payload,
     timestamp: canonical.sent_at_ms,
+    timestamp_precision: canonical.sent_at_precision,
     status: 'received',
     revoked: canonical.revoked,
   };

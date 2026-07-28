@@ -55,7 +55,6 @@ export {
   buildEnvelopePayload,
   canonicalFromHistory,
   canonicalFromPush,
-  canonicalFromSendAck,
   canonicalFromSyncCommit,
   mergeSentAt,
   metadataFromEnvelope,

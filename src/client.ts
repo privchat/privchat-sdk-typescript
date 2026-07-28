@@ -588,6 +588,7 @@ function historicalMessageToRecord(
     content: canonical.content,
     payload: canonical.payload,
     timestamp: canonical.sent_at_ms,
+    timestamp_precision: canonical.sent_at_precision,
     pts: canonical.pts !== '' ? canonical.pts : undefined,
     status: isSelf ? 'sent' : 'received',
     revoked: canonical.revoked,
