@@ -174,6 +174,18 @@ export interface ChannelRecord {
    *  existed — the UI falls back to showing `last_message_preview`. */
   last_message_type?: string;
   /**
+   * 当前预览来自哪条消息的 pts —— 预览的**归属证据**。
+   *
+   * 没有它就只能靠「现在是不是空的」来判断能不能改预览，于是一条错误的非空预览
+   * 会被永久固定：频道先由 sync 推到 latest_pts=N 并留下错误预览，随后同一条消息
+   * 以相同 pts 由 push 重放，「更大 pts」「更晚时间」「当前为空」三个条件全都不
+   * 成立，预览再也没有机会被纠正。生产上就是这么显示成 [系统消息] 的。
+   *
+   * 有了它，规则变成按 pts 比较：等于则允许 canonical 投影纠正内容与类型，小于
+   * 则拒绝（旧的重复投递不得回退更新的预览），大于则正常推进。
+   */
+  last_message_pts?: string;
+  /**
    * `true` when the channel's most-recent message has been revoked.
    * Set by the push-absorb path when a `deleted=true` push lands AND
    * its pts equals `latest_pts`; cleared when a fresher message

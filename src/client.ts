@@ -3917,11 +3917,35 @@ export class PrivchatClient {
       // timestamp == updated_at, and the old timestamp-only condition left
       // the row blank forever. Non-revoked rows only; an empty *text*
       // preview is dropped — keep the prior line.
+      // 预览归属按 pts 判定，不看「现在是不是空的」。
+      //
+      // 旧判据（更大 pts / 更晚时间 / 当前为空）有一个致命缺口：频道先由 sync 推到
+      // latest_pts=N 并留下一条**错误的非空**预览，随后同一条消息以相同 pts 由 push
+      // 重放时三个条件全不成立，错误预览就被永久固定，重开也不会好——生产上的
+      // [系统消息] 正是这么来的。
+      //
+      // 现在预览记得自己来自哪条消息（last_message_pts）：
+      //   - incoming > preview_pts：正常推进；
+      //   - incoming == preview_pts：同一条消息，允许 canonical 投影纠正内容与类型
+      //     （这正是修复路径）；
+      //   - incoming < preview_pts：拒绝——旧的重复投递不得回退更新的预览。
+      // 没有 last_message_pts 的旧行（本次之前写的）用原来的空判据兜底，避免升级瞬间
+      // 把既有预览全部判成不可信。
       const previewMissing =
         next.last_message_preview === undefined || next.last_message_preview === '';
+      const previewPts = next.last_message_pts;
+      const incomingPts = record.pts;
+      // 旧行（本次改动之前写的）没有 last_message_pts。这些正是生产上出问题的行，
+      // 所以不能让它们退回旧判据——那等于修了新库、修不了任何现存用户。对它们用
+      // channel.latest_pts 作为归属的近似：预览按定义来自最新那条消息。
+      const ownerPts = previewPts ?? channel.latest_pts;
+      const previewOwnershipAllows =
+        incomingPts !== undefined &&
+        (ownerPts === undefined || BigInt(incomingPts) >= BigInt(ownerPts));
       if (
         !record.revoked &&
-        (becomesLatest ||
+        (previewOwnershipAllows ||
+          becomesLatest ||
           timestampAdvanced ||
           (previewMissing && (wasLatest || record.timestamp >= channel.updated_at)))
       ) {
@@ -3935,7 +3959,13 @@ export class PrivchatClient {
               ...next,
               last_message_preview: preview.text,
               last_message_type: preview.content_type,
+              last_message_pts: incomingPts ?? next.last_message_pts,
             };
+            mutated = true;
+          } else if (incomingPts !== undefined && next.last_message_pts !== incomingPts) {
+            // 内容与类型都没变，但归属要记下来，否则下一次同 pts 重放又会落回
+            // 「没有证据」的分支。
+            next = { ...next, last_message_pts: incomingPts };
             mutated = true;
           }
         }
