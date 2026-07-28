@@ -23,6 +23,7 @@ import { contentTypeFromWireTag } from './content-type.js';
 import {
   clearChannelMessages as cacheClearChannelMessages,
   applyAck,
+  canonicalFromSyncCommit,
   getChannelOrderMode,
   getSyncState as cacheGetSyncState,
   upsertMessages as cacheUpsertMessages,
@@ -755,22 +756,36 @@ export function commitToMessageRecord(
     : typeof c === 'object' && c !== null && 'metadata' in c
       ? new TextEncoder().encode(JSON.stringify(c))
       : new Uint8Array();
-  return {
-    id: nextLocalMessageRecordId(),
-    channel_id,
-    channel_type,
+  // 经 canonical adapter：metadata 提取与时间归一与 push / history / send-ack 同一
+  // 份实现，也正是门禁测试调用的那一份。本地部分只剩 id 与 sent/received 判定。
+  const inbound = canonicalFromSyncCommit({
     server_message_id: commit.server_msg_id,
     local_message_id: commit.local_message_id,
-    pts: commit.pts,
+    channel_id,
+    channel_type,
     from_uid: commit.sender_id,
     message_type: canonical
       ? contentTypeFromWireTag(canonical.message_type)
       : commit.message_type,
     content: canonical?.payload.content ?? extractContent(commit.content),
     payload,
-    timestamp: commit.server_timestamp,
+    pts: commit.pts,
+    sent_at_ms: commit.server_timestamp,
+  });
+  return {
+    id: nextLocalMessageRecordId(),
+    channel_id: inbound.channel_id,
+    channel_type: inbound.channel_type,
+    server_message_id: inbound.server_message_id,
+    local_message_id: inbound.local_message_id,
+    pts: inbound.pts,
+    from_uid: inbound.from_uid,
+    message_type: inbound.message_type,
+    content: inbound.content,
+    payload: inbound.payload,
+    timestamp: inbound.sent_at_ms,
     status: isOwn ? 'sent' : 'received',
-    revoked: false,
+    revoked: inbound.revoked,
   };
 }
 

@@ -11,9 +11,13 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   agreesWith,
+  canonicalFromHistory,
+  canonicalFromPush,
+  canonicalFromSendAck,
+  canonicalFromSyncCommit,
+  mergeSentAt,
   metadataFromEnvelope,
   normalizeSentAtMs,
-  preferPreciseSentAt,
   semanticProjection,
   type CanonicalInboundMessage,
   type SemanticProjection,
@@ -34,15 +38,13 @@ const FIXTURE = JSON.parse(
   ),
 ) as Fixture;
 
-/** wire message_type 字符串 → canonical word form。与 Rust 判别值一一对应。 */
-const WORD_FORM: Record<string, string> = {
-  text: 'text',
-  voice: 'voice',
-  image: 'image',
-  video: 'video',
-  file: 'file',
-  system: 'system',
-};
+/**
+ * fixture 的 wire payload → **生产 adapter** 的入参。
+ *
+ * 这里只做「把 fixture 的中立编码还原成 wire 形态」，投影本身一律调 src 里的
+ * adapter。上一版在这个文件里自己实现了 fromHistory/fromWire，结果测的是测试代码
+ * 自己一致，而三条生产 mapper 一行没改——那种绿是最坏的一种绿。
+ */
 const WORD_FORM_BY_TAG: Record<number, string> = {
   0: 'text',
   1: 'voice',
@@ -52,24 +54,53 @@ const WORD_FORM_BY_TAG: Record<number, string> = {
   5: 'system',
 };
 
-function fromHistory(p: Record<string, unknown>): CanonicalInboundMessage {
-  return {
-    server_message_id: String(p.message_id),
-    channel_id: String(p.channel_id),
-    channel_type: 1,
-    from_uid: String(p.sender_id),
-    message_type: WORD_FORM[String(p.message_type)] ?? 'text',
-    content: String(p.content ?? ''),
-    metadata: (p.metadata as Record<string, unknown> | undefined) ?? undefined,
-    pts: String(p.message_seq ?? 0),
-    sent_at_ms: normalizeSentAtMs(Number(p.timestamp ?? 0)),
-    revoked: Boolean(p.revoked),
-  };
+function envelopeBytes(extra: unknown): Uint8Array {
+  return typeof extra === 'string' && extra.length > 0
+    ? new TextEncoder().encode(extra)
+    : new Uint8Array();
 }
 
-function fromWire(p: Record<string, unknown>, secondsField?: string): CanonicalInboundMessage {
-  const raw = secondsField !== undefined ? Number(p[secondsField]) : Number(p.timestamp ?? p.sent_at_ms);
-  return {
+function projectFixtureSource(
+  path: string,
+  p: Record<string, unknown>,
+): CanonicalInboundMessage {
+  if (path === 'history' || path === 'around') {
+    return canonicalFromHistory(
+      {
+        message_id: String(p.message_id),
+        channel_id: String(p.channel_id),
+        sender_id: String(p.sender_id),
+        content: String(p.content ?? ''),
+        message_type: String(p.message_type ?? 'text'),
+        timestamp: Number(p.timestamp ?? 0),
+        message_seq:
+          p.message_seq !== undefined ? Number(p.message_seq) : undefined,
+        metadata: p.metadata as Record<string, unknown> | undefined,
+        revoked: Boolean(p.revoked),
+      } as Parameters<typeof canonicalFromHistory>[0],
+      String(p.channel_id),
+      1,
+    );
+  }
+  if (path === 'push') {
+    return canonicalFromPush(
+      {
+        server_message_id: String(p.server_message_id),
+        local_message_id: String(p.local_message_id ?? '0'),
+        channel_id: String(p.channel_id),
+        channel_type: Number(p.channel_type ?? 1),
+        from_uid: String(p.from_uid),
+        message_seq: Number(p.message_seq ?? 0),
+        // push.fbs 的 timestamp 是秒。
+        timestamp: Number(p.timestamp_secs ?? 0),
+        payload: envelopeBytes(p.extra),
+        deleted: false,
+      } as Parameters<typeof canonicalFromPush>[0],
+      String(p.content ?? ''),
+      WORD_FORM_BY_TAG[Number(p.message_type ?? 0)] ?? 'text',
+    );
+  }
+  const common = {
     server_message_id: String(p.server_message_id),
     local_message_id:
       p.local_message_id !== undefined && String(p.local_message_id) !== '0'
@@ -80,11 +111,21 @@ function fromWire(p: Record<string, unknown>, secondsField?: string): CanonicalI
     from_uid: String(p.from_uid),
     message_type: WORD_FORM_BY_TAG[Number(p.message_type ?? 0)] ?? 'text',
     content: String(p.content ?? ''),
-    metadata: metadataFromEnvelope(p.extra as string | undefined),
-    pts: String(p.pts ?? p.message_seq ?? 0),
-    sent_at_ms: normalizeSentAtMs(raw),
-    revoked: false,
+    payload: envelopeBytes(p.extra),
   };
+  if (path === 'send_ack') {
+    return canonicalFromSendAck({
+      ...common,
+      local_message_id: String(p.local_message_id ?? '0'),
+      pts: String(p.message_seq ?? 0),
+      sent_at_ms: Number(p.sent_at_ms ?? 0),
+    });
+  }
+  return canonicalFromSyncCommit({
+    ...common,
+    pts: String(p.pts ?? 0),
+    sent_at_ms: Number(p.timestamp ?? 0),
+  });
 }
 
 describe('canonical inbound projection', () => {
@@ -95,12 +136,7 @@ describe('canonical inbound projection', () => {
     for (const testCase of FIXTURE.cases) {
       for (const [path, payload] of Object.entries(testCase.sources)) {
         if (path.startsWith('$')) continue;
-        const canonical =
-          path === 'history' || path === 'around'
-            ? fromHistory(payload)
-            : fromWire(payload, path === 'push' ? 'timestamp_secs' : undefined);
-
-        const actual = semanticProjection(canonical);
+        const actual = semanticProjection(projectFixtureSource(path, payload));
         expect(
           agreesWith(actual, testCase.expected),
           `${testCase.name}: ${path} 这条来源投影出来和其他来源不一致\n` +
@@ -123,14 +159,20 @@ describe('canonical inbound projection', () => {
     expect(normalizeSentAtMs(0)).toBe(0);
   });
 
-  it('never lets a second-resolution source degrade a millisecond value', () => {
-    const precise = 1_785_148_271_317;
-    const coarse = 1_785_148_271_000;
-    expect(preferPreciseSentAt(precise, coarse)).toBe(precise);
-    expect(preferPreciseSentAt(coarse, precise)).toBe(precise);
-    // 跨秒是真的更新，必须跟上。
-    expect(preferPreciseSentAt(precise, precise + 5_000)).toBe(precise + 5_000);
-    expect(preferPreciseSentAt(0, coarse)).toBe(coarse);
+  it('merges send time by precision, not by arrival order', () => {
+    const precise = { ms: 1_785_148_271_317, precision: 'milliseconds' as const };
+    const coarse = { ms: 1_785_148_271_000, precision: 'seconds' as const };
+
+    // 低精度永不覆盖高精度，方向无关。
+    expect(mergeSentAt(precise, coarse)).toEqual({ ...precise, conflict: false });
+    expect(mergeSentAt(coarse, precise)).toEqual({ ...precise, conflict: false });
+    // 本地还没有值：直接采用。
+    expect(mergeSentAt(undefined, coarse)).toEqual({ ...coarse, conflict: false });
+
+    // 同精度但值不同 = 某一端数据坏了。发送时间是不变量，普通 replay 不许覆盖，
+    // 只报冲突；「最后到达者获胜」恰恰是最没有权威性的规则。
+    const later = { ms: precise.ms + 5_000, precision: 'milliseconds' as const };
+    expect(mergeSentAt(precise, later)).toEqual({ ...precise, conflict: true });
   });
 
   it('tells "server sent no metadata" apart from "this path dropped it"', () => {

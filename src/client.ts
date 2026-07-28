@@ -30,6 +30,7 @@ import {
   deleteMessageById as cacheDeleteMessageById,
   deleteFriendships as cacheDeleteFriendships,
   deleteOutboxEntry as cacheDeleteOutboxEntry,
+  canonicalFromHistory,
   getChannelOrderMode as cacheGetChannelOrderMode,
   getMessageWindow as cacheGetMessageWindow,
   getOutboxEntry as cacheGetOutboxEntry,
@@ -550,7 +551,13 @@ function tryDecodeReadCursorNotification(
   }
 }
 
-/** Convert an RPC `HistoricalMessage` into a cache `MessageRecord`. */
+/**
+ * `HistoricalMessage` → cache row，经 canonical adapter。
+ *
+ * 这里只剩「本地」的部分：新分配 `id`、按 selfUid 判 sent/received。字段搬运、
+ * envelope 重建、时间归一全在 `canonicalFromHistory` 里，与 push / sync / send-ack
+ * 共用同一份实现，也正是门禁测试调用的那一份。
+ */
 function historicalMessageToRecord(
   msg: HistoricalMessage,
   channel_id: string,
@@ -561,60 +568,29 @@ function historicalMessageToRecord(
    *  (the original conservative behaviour). */
   selfUid: string | undefined,
 ): MessageRecord {
-  // Server's `message/history/get` now emits `message_seq` per row
-  // (same value as `SendMessageResponse.message_seq` and inbound push
-  // `PushMessageRequest.message_seq`). It's the per-channel pts the
-  // cache needs to project `read_by_peer` correctly. Legacy rows
-  // pre-dating server-side pts assignment may still come back with
-  // `message_seq` undefined — we tolerate that gracefully.
-  const fromUid = String(msg.sender_id);
-  // Senders see their own historical rows as 'sent', not 'received' —
-  // otherwise reloading the page or paging older history visually
-  // demotes acked outbound messages back to "incoming". Server-side
-  // delivery / read receipts (when wired through) will further promote
-  // 'sent' to 'delivered' / 'read'.
-  const isSelf = selfUid !== undefined && fromUid === selfUid;
   const legacyEnvelope = decodeLegacyMessageEnvelope(msg.content);
-  const normalizedContent = normalizeMessageDisplayContent(msg.content);
   const legacy = legacyEnvelope?.raw;
-  const metadata = msg.metadata ?? legacy?.metadata;
-  const replyTo = msg.reply_to_message_id ?? legacy?.reply_to_message_id;
-  const mentionedUserIds = legacy?.mentioned_user_ids;
-  const messageSource = legacy?.message_source;
-  // 媒体 metadata 必须随历史消息进入 payload，否则 Web VM 无从解码 → 历史图片/文件退化成
-  // [图片]/[文件]、缩略图/文件名/尺寸占位全丢（实时 push 带 metadata 才能显示，历史不能）。
-  // 重建与 realtime push 同形的 JSON envelope {content, metadata}，让 decodeMediaMetadata 解码。
-  const hasEnvelopeData =
-    (metadata !== undefined && metadata !== null) ||
-    replyTo !== undefined ||
-    Array.isArray(mentionedUserIds) ||
-    messageSource !== undefined;
-  const payload = hasEnvelopeData
-    ? new TextEncoder().encode(
-        JSON.stringify({
-          content: normalizedContent,
-          ...(metadata !== undefined ? { metadata } : {}),
-          ...(replyTo !== undefined ? { reply_to_message_id: replyTo } : {}),
-          ...(Array.isArray(mentionedUserIds)
-            ? { mentioned_user_ids: mentionedUserIds }
-            : {}),
-          ...(messageSource !== undefined ? { message_source: messageSource } : {}),
-        }),
-      )
-    : new Uint8Array();
+  const canonical = canonicalFromHistory(msg, channel_id, channel_type, {
+    metadata: legacy?.metadata as Record<string, unknown> | undefined,
+    reply_to_message_id: legacy?.reply_to_message_id as string | undefined,
+    mentioned_user_ids: legacy?.mentioned_user_ids as string[] | undefined,
+    message_source: legacy?.message_source,
+  });
+  // 发送者看自己的历史行是 'sent'，否则翻页会把已 ack 的外发消息视觉降级成「收到」。
+  const isSelf = selfUid !== undefined && canonical.from_uid === selfUid;
   return {
     id: nextLocalMessageRecordId(),
-    channel_id,
-    channel_type,
-    server_message_id: String(msg.message_id),
-    from_uid: fromUid,
-    message_type: msg.message_type,
-    content: normalizedContent,
-    payload,
-    timestamp: msg.timestamp,
-    pts: msg.message_seq !== undefined ? String(msg.message_seq) : undefined,
+    channel_id: canonical.channel_id,
+    channel_type: canonical.channel_type,
+    server_message_id: canonical.server_message_id,
+    from_uid: canonical.from_uid,
+    message_type: canonical.message_type,
+    content: canonical.content,
+    payload: canonical.payload,
+    timestamp: canonical.sent_at_ms,
+    pts: canonical.pts !== '' ? canonical.pts : undefined,
     status: isSelf ? 'sent' : 'received',
-    revoked: msg.revoked === true,
+    revoked: canonical.revoked,
   };
 }
 

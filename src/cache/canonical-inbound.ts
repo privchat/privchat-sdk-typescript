@@ -1,7 +1,8 @@
 // 服务端来的一条消息，规范化之后的样子。
 //
-// 五条来源——realtime push、`sync/get_difference` commit、`message/history/get`、
-// `message/history/around`、send ACK——的 transport 形态本来就不一样：字段名不同、
+// 四条**投影**来源——realtime push、`sync/get_difference` commit、
+// `message/history/get`、`message/history/around`——的 transport 形态本来就不一样：
+// 字段名不同、
 // 时间单位不同（push 是秒，其余是毫秒）、metadata 有的在 envelope 里有的在顶层。
 // 以前每条来源各自拼一份缓存投影，于是「同一条消息从哪条路进来」决定了它在本地长
 // 什么样。两个线上事故就是这么来的：history 进来的图片没有 metadata（缩略图永远
@@ -9,7 +10,11 @@
 //
 // 规则：**来源只做适配，不做投影**。
 //
-//   push / sync commit / history / around / send-ack
+// send ACK 不在其列，这是有意的：它不构造消息行，只在已有乐观行上补服务端身份与
+// 顺序（applyAck 拿到的就是调用方补好字段的同一行）。给它硬造一个 adapter 只会多
+// 一个没有生产调用者的函数，和一条测得很好看却不存在的路径。
+//
+//   push / sync commit / history / around
 //                    ↓  (各自的 from* 适配器)
 //            CanonicalInboundMessage
 //                    ↓  (唯一一条投影)
@@ -32,18 +37,43 @@ export function normalizeSentAtMs(value: number): number {
 }
 
 /**
- * 已有值与新值指向同一秒时，保留精度更高的那个。
+ * 合并同一条消息（同一 server_message_id）的发送时间。
  *
- * 秒精度只可能来自 push；任何毫秒值都更接近真实发送时刻。跨秒则以新值为准（那是
- * 真的更新，不是精度差）。不这样做的话，一条 history 拿到 .317 的消息会被随后的
- * push 改成 .000，显示时间跟着「最后一条到达的路径」抖。
+ * 一条消息的发送时间在服务端是不变量，所以这里唯一合法的分歧来源是**精度**：
+ * push 只能给到秒，history/sync 给毫秒。规则据此而定，不看数值大小：
+ *
+ * - 高精度覆盖低精度；
+ * - 低精度**永不**覆盖高精度；
+ * - 同精度但值不同 = 某一端的数据坏了。普通 replay 不覆盖（保留先到的），
+ *   返回 `conflict` 让调用方打点；要改只能走显式的定向 repair。
+ *
+ * 之前那版规则是「同秒取 max，跨秒 incoming 覆盖」——跨秒那半条等于让最后到达的
+ * 路径赢，而「最后到达」恰恰是最没有权威性的一个属性。
  */
-export function preferPreciseSentAt(existingMs: number, incomingMs: number): number {
-  if (existingMs > 0 && Math.floor(existingMs / 1000) === Math.floor(incomingMs / 1000)) {
-    return Math.max(existingMs, incomingMs);
+export function mergeSentAt(
+  existing: { ms: number; precision: TimePrecision } | undefined,
+  incoming: { ms: number; precision: TimePrecision },
+): { ms: number; precision: TimePrecision; conflict: boolean } {
+  if (existing === undefined || existing.ms <= 0) {
+    return { ...incoming, conflict: false };
   }
-  return incomingMs;
+  if (existing.precision === incoming.precision) {
+    return {
+      ms: existing.ms,
+      precision: existing.precision,
+      conflict: existing.ms !== incoming.ms,
+    };
+  }
+  const preciseIsIncoming = incoming.precision === 'milliseconds';
+  return {
+    ms: preciseIsIncoming ? incoming.ms : existing.ms,
+    precision: preciseIsIncoming ? incoming.precision : existing.precision,
+    conflict: false,
+  };
 }
+
+/** 时间戳精度。wire 上两种都有，合并时必须知道手里这个是哪种。 */
+export type TimePrecision = 'seconds' | 'milliseconds';
 
 /** 一条服务端消息的规范形态。 */
 export interface CanonicalInboundMessage {
@@ -62,7 +92,19 @@ export interface CanonicalInboundMessage {
   pts: string;
   /** 发送时间，**毫秒**。适配器负责归一，读取方不再猜。 */
   sent_at_ms: number;
+  /** 这个时间戳原本的精度。push 只能给到秒，合并时据此决定谁覆盖谁——
+   *  丢掉这个信息就只能靠「值看起来像不像整秒」去猜，那是猜不准的
+   *  （真实发送时间正好落在整秒上完全可能）。 */
+  sent_at_precision: TimePrecision;
   revoked: boolean;
+  /** 引用的原消息 server_message_id。 */
+  reply_to_message_id?: string;
+  /** @ 提及的用户。 */
+  mentioned_user_ids?: string[];
+  /** 消息来源标记（转发等）。 */
+  message_source?: unknown;
+  /** 原始/重建的 payload 字节。媒体消息靠它解 metadata。 */
+  payload: Uint8Array;
 }
 
 /**
@@ -142,6 +184,149 @@ export function metadataFromEnvelope(extra: string | undefined): Record<string, 
       return metadata as Record<string, unknown>;
     }
     return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// ----- 来源适配器：wire → canonical。生产代码与门禁测试共用这些函数。 -----
+//
+// 每条来源只允许在这里出现一次。测试里再实现一遍等于测试自己跟自己比——上一版
+// 就是这么"全绿"的，而生产 mapper 一行没改。
+
+import type { HistoricalMessage } from '../api-types.js';
+import type { PushMessageRequest } from '../codec/push.js';
+import { normalizeMessageDisplayContent } from '../message-content.js';
+
+/** legacy envelope（`{content, metadata, reply_to_message_id, …}`）解析结果。 */
+export interface LegacyEnvelope {
+  metadata?: Record<string, unknown>;
+  reply_to_message_id?: string;
+  mentioned_user_ids?: string[];
+  message_source?: unknown;
+}
+
+/** 重建与 realtime push 同形的 payload envelope。
+ *
+ *  历史消息的媒体 metadata 必须进 payload，否则 Web VM 无从解码——历史图片会退化成
+ *  `[图片]`，缩略图/尺寸/文件名全丢。 */
+export function buildEnvelopePayload(
+  content: string,
+  parts: LegacyEnvelope,
+): Uint8Array {
+  const hasData =
+    (parts.metadata !== undefined && parts.metadata !== null) ||
+    parts.reply_to_message_id !== undefined ||
+    Array.isArray(parts.mentioned_user_ids) ||
+    parts.message_source !== undefined;
+  if (!hasData) return new Uint8Array();
+  return new TextEncoder().encode(
+    JSON.stringify({
+      content,
+      ...(parts.metadata !== undefined ? { metadata: parts.metadata } : {}),
+      ...(parts.reply_to_message_id !== undefined
+        ? { reply_to_message_id: parts.reply_to_message_id }
+        : {}),
+      ...(Array.isArray(parts.mentioned_user_ids)
+        ? { mentioned_user_ids: parts.mentioned_user_ids }
+        : {}),
+      ...(parts.message_source !== undefined ? { message_source: parts.message_source } : {}),
+    }),
+  );
+}
+
+/** `message/history/get` 与 `message/history/around`（同一个 server JSON 视图）。 */
+export function canonicalFromHistory(
+  msg: HistoricalMessage,
+  channel_id: string,
+  channel_type: number,
+  legacy?: LegacyEnvelope,
+): CanonicalInboundMessage {
+  const content = normalizeMessageDisplayContent(msg.content);
+  const metadata = (msg.metadata as Record<string, unknown> | undefined) ?? legacy?.metadata;
+  const reply_to_message_id =
+    msg.reply_to_message_id !== undefined
+      ? String(msg.reply_to_message_id)
+      : legacy?.reply_to_message_id;
+  const parts: LegacyEnvelope = {
+    metadata,
+    reply_to_message_id,
+    mentioned_user_ids: legacy?.mentioned_user_ids,
+    message_source: legacy?.message_source,
+  };
+  return {
+    server_message_id: String(msg.message_id),
+    channel_id,
+    channel_type,
+    from_uid: String(msg.sender_id),
+    message_type: msg.message_type,
+    content,
+    metadata,
+    pts: msg.message_seq !== undefined ? String(msg.message_seq) : '',
+    // server 侧是 created_at.timestamp_millis()。
+    sent_at_ms: normalizeSentAtMs(msg.timestamp),
+    sent_at_precision: 'milliseconds',
+    revoked: msg.revoked === true,
+    reply_to_message_id,
+    mentioned_user_ids: legacy?.mentioned_user_ids,
+    message_source: legacy?.message_source,
+    payload: buildEnvelopePayload(content, parts),
+  };
+}
+
+/** realtime push。`timestamp` 是**秒**（push.fbs 的 `uint`）。 */
+export function canonicalFromPush(
+  push: PushMessageRequest,
+  content: string,
+  message_type: string,
+): CanonicalInboundMessage {
+  return {
+    server_message_id: push.server_message_id,
+    local_message_id:
+      push.local_message_id !== '0' ? push.local_message_id : undefined,
+    channel_id: push.channel_id,
+    channel_type: push.channel_type,
+    from_uid: push.from_uid,
+    message_type,
+    content,
+    metadata: metadataFromEnvelope(payloadAsText(push.payload)),
+    pts: String(push.message_seq),
+    sent_at_ms: normalizeSentAtMs(push.timestamp),
+    sent_at_precision: 'seconds',
+    revoked: push.deleted,
+    payload: push.payload,
+  };
+}
+
+/** `sync/get_difference` commit。 */
+export function canonicalFromSyncCommit(args: {
+  server_message_id: string;
+  local_message_id?: string;
+  channel_id: string;
+  channel_type: number;
+  from_uid: string;
+  message_type: string;
+  content: string;
+  payload: Uint8Array;
+  pts: string;
+  sent_at_ms: number;
+  revoked?: boolean;
+  reply_to_message_id?: string;
+  mentioned_user_ids?: string[];
+}): CanonicalInboundMessage {
+  return {
+    ...args,
+    metadata: metadataFromEnvelope(payloadAsText(args.payload)),
+    sent_at_ms: normalizeSentAtMs(args.sent_at_ms),
+    sent_at_precision: 'milliseconds',
+    revoked: args.revoked ?? false,
+  };
+}
+
+function payloadAsText(payload: Uint8Array): string | undefined {
+  if (payload.length === 0 || payload[0] !== 0x7b /* '{' */) return undefined;
+  try {
+    return new TextDecoder().decode(payload);
   } catch {
     return undefined;
   }

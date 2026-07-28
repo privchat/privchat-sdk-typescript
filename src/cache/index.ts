@@ -50,6 +50,21 @@ export {
   updateOutboxStatus,
 } from './outbox-store.js';
 export type { ListOutboxOptions } from './outbox-store.js';
+export {
+  agreesWith,
+  buildEnvelopePayload,
+  canonicalFromHistory,
+  canonicalFromPush,
+  canonicalFromSendAck,
+  canonicalFromSyncCommit,
+  mergeSentAt,
+  metadataFromEnvelope,
+  normalizeSentAtMs,
+  semanticProjection,
+  type CanonicalInboundMessage,
+  type SemanticProjection,
+  type TimePrecision,
+} from './canonical-inbound.js';
 export { mergeOnPushAbsorb } from './merge.js';
 export type { MergePushContext } from './merge.js';
 export { MessageStore } from './message-store.js';

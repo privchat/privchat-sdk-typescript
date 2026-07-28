@@ -21,6 +21,7 @@ import { decodeMessagePayloadEnvelope } from '../codec/payload.js';
 import type { PushMessageRequest } from '../codec/push.js';
 import { contentTypeFromWireTag } from '../content-type.js';
 import { normalizeMessageDisplayContent } from '../message-content.js';
+import { canonicalFromPush } from './canonical-inbound.js';
 
 /** All u64-grade ids stay as decimal strings at the public boundary —
  *  snowflake IDs exceed `Number.MAX_SAFE_INTEGER` in production. */
@@ -604,25 +605,27 @@ export function compareDisplayOrder(
  * the call site stays resilient against malformed/empty payloads.
  */
 export function pushToMessageRecord(push: PushMessageRequest): MessageRecord {
+  // 经 canonical adapter：字段搬运、metadata 提取、时间归一（push 的 timestamp 是
+  // 秒）都在那里，与 history / sync / send-ack 共用，也正是门禁测试调用的实现。
+  const canonical = canonicalFromPush(
+    push,
+    extractPushContent(push),
+    contentTypeFromWireTag(push.message_type),
+  );
   return {
     id: nextLocalMessageRecordId(),
-    channel_id: push.channel_id,
-    channel_type: push.channel_type,
-    server_message_id: push.server_message_id,
-    local_message_id:
-      push.local_message_id !== '0' ? push.local_message_id : undefined,
-    pts: String(push.message_seq),
-    from_uid: push.from_uid,
-    // Canonical word form ('text' / 'image' / …) — same representation
-    // the history / sync paths store, so dedup comparisons and consumers
-    // see ONE representation regardless of ingest path. (Legacy rows
-    // persisted as decimal strings are still understood by decoders.)
-    message_type: contentTypeFromWireTag(push.message_type),
-    content: extractPushContent(push),
-    payload: push.payload,
-    timestamp: push.timestamp * 1000, // PushMessageRequest.timestamp is seconds
+    channel_id: canonical.channel_id,
+    channel_type: canonical.channel_type,
+    server_message_id: canonical.server_message_id,
+    local_message_id: canonical.local_message_id,
+    pts: canonical.pts,
+    from_uid: canonical.from_uid,
+    message_type: canonical.message_type,
+    content: canonical.content,
+    payload: canonical.payload,
+    timestamp: canonical.sent_at_ms,
     status: 'received',
-    revoked: push.deleted,
+    revoked: canonical.revoked,
   };
 }
 
