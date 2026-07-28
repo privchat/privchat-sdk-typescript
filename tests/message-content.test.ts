@@ -150,4 +150,41 @@ describe('reply anchor sanitisation', () => {
   ])('keeps a real %s', (_label, value, expected) => {
     expect(project(value)).toBe(expected);
   });
+
+  // The path that actually renders production conversations: react parses the
+  // JSON payload straight into the envelope shape and passes it in as `envelope`,
+  // so the sanitiser has to cover that source too — not just the raw legacy body.
+  const projectViaEnvelope = (replyTo: unknown) =>
+    projectMessageContent({
+      content_type: 'text',
+      content: 'hi',
+      envelope: {
+        content: 'hi',
+        mentioned_user_ids: [],
+        reply_to_message_id: replyTo,
+      } as never,
+    }).reply_to_message_id;
+
+  it.each([
+    ['stringified null', 'null'],
+    ['zero sentinel', '0'],
+    ['empty string', ''],
+  ])('drops %s arriving via the envelope', (_label, value) => {
+    expect(projectViaEnvelope(value)).toBeUndefined();
+  });
+
+  it('keeps a real anchor arriving via the envelope', () => {
+    expect(projectViaEnvelope('600997771041832960')).toBe('600997771041832960');
+  });
+
+  // Explicit caller input is sanitised as well.
+  it('drops a stringified null passed explicitly', () => {
+    expect(
+      projectMessageContent({
+        content_type: 'text',
+        content: 'hi',
+        reply_to_message_id: 'null' as never,
+      }).reply_to_message_id,
+    ).toBeUndefined();
+  });
 });

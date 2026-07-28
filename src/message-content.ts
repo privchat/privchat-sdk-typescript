@@ -132,9 +132,12 @@ export function projectMessageContent(input: ProjectMessageContentInput): Messag
       input.mentioned_user_ids ??
       idList(raw?.mentioned_user_ids),
   );
+  // Every source goes through the same sanitiser. The envelope is not
+  // trustworthy just because it is typed: callers hand us a JSON payload
+  // parsed straight into the envelope shape, so `"null"` arrives here too.
   const replyTo =
-    input.envelope?.reply_to_message_id ??
-    input.reply_to_message_id ??
+    replyAnchorId(input.envelope?.reply_to_message_id) ??
+    replyAnchorId(input.reply_to_message_id) ??
     replyAnchorId(raw?.reply_to_message_id);
   const base = (safeText: string): MessageContentBase => ({
     text: safeText,
