@@ -798,9 +798,43 @@ export async function upsertMessages(
             `${existing?.timestamp} vs ${record.timestamp}`,
         );
       }
+      // 一条已有的行被再次写入时，只有**带正文的**写入才有资格改动展示字段。
+      //
+      // 这里原来是 `{...record, id: existing?.id ?? record.id}`：身份保住了，其余
+      // 字段一律被 incoming 覆盖。状态推送（同一 server_message_id、空 payload、
+      // from_uid 是确认方）走到这里就把用户自己那条消息的正文清空、作者改成对方、
+      // 状态从 sent 退回 received——2026-07-29 web/H5「发出去就消失」的持久层成因。
+      //
+      // 与内存侧 `mergeOnPushAbsorb` 同一条规则：**再次写入可以补充事实，不能抹掉
+      // 事实**。两处都要有，因为两处都能单独把行写坏。
+      const incomingHasBody =
+        (record.content !== undefined && record.content !== '') ||
+        (record.payload !== undefined && record.payload.length > 0);
+      const keepDisplay = existing !== undefined && !incomingHasBody;
       const merged: MessageRecord = {
         ...record,
         id: existing?.id ?? record.id,
+        content: keepDisplay ? existing.content : record.content,
+        payload:
+          keepDisplay || (existing !== undefined && (record.payload?.length ?? 0) === 0)
+            ? (existing?.payload ?? record.payload)
+            : record.payload,
+        message_type: keepDisplay ? existing.message_type : record.message_type,
+        from_uid: keepDisplay ? existing.from_uid : record.from_uid,
+        // 状态只前进：已确认发出的行不得被推送的默认 'received' 拉回去。
+        status:
+          existing !== undefined &&
+          (existing.status === 'sent' || existing.status === 'pending') &&
+          !incomingHasBody
+            ? existing.status === 'pending'
+              ? record.status
+              : 'sent'
+            : record.status,
+        // 撤回是单调的。
+        revoked:
+          existing?.revoked === true || record.revoked === true
+            ? true
+            : record.revoked,
         timestamp: time.ms,
         timestamp_precision: time.precision,
         local_order_seq:
