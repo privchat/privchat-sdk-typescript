@@ -380,7 +380,6 @@ describe('cache account ownership', () => {
       });
 
     it('不得擦掉正文 / 不得改作者 / 不得把 sent 退回 received', async () => {
-      const db = new CacheDB();
       await ensureCacheOwner(db, 'u1');
       await upsertChannels(db, [sampleChannel()]);
       const [stored] = await upsertMessages(db, [sent()]);
@@ -401,11 +400,9 @@ describe('cache account ownership', () => {
       expect(mine[0]?.from_uid).toBe('self');
       expect(mine[0]?.status).toBe('sent');
       expect(mine[0]?.id).toBe(stored?.id);
-      await db.delete();
     });
 
     it('带正文的推送仍然可以更新内容', async () => {
-      const db = new CacheDB();
       await ensureCacheOwner(db, 'u1');
       await upsertChannels(db, [sampleChannel()]);
       await upsertMessages(db, [sampleMessage('8', { content: '旧', status: 'received' })]);
@@ -419,7 +416,6 @@ describe('cache account ownership', () => {
 
       const rows = await getMessageWindow(db, '12345', 1, 50);
       expect(rows.filter((r) => r.server_message_id === 's-8')[0]?.content).toBe('新');
-      await db.delete();
     });
   });
 });

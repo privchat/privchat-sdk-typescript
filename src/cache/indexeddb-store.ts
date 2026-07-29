@@ -807,9 +807,10 @@ export async function upsertMessages(
       //
       // 与内存侧 `mergeOnPushAbsorb` 同一条规则：**再次写入可以补充事实，不能抹掉
       // 事实**。两处都要有，因为两处都能单独把行写坏。
-      const incomingHasBody =
-        (record.content !== undefined && record.content !== '') ||
-        (record.payload !== undefined && record.payload.length > 0);
+      // 只认**非空正文**。不能把「有 payload」当成「有消息体」：状态推送同样带
+      // payload（那是状态信封，不是消息内容），实测就是它绕过了第一版守卫，
+      // 把正文擦成空、作者改成确认方。
+      const incomingHasBody = record.content !== undefined && record.content !== '';
       const keepDisplay = existing !== undefined && !incomingHasBody;
       const merged: MessageRecord = {
         ...record,

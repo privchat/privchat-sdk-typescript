@@ -71,13 +71,13 @@ export function mergeOnPushAbsorb(
   // content and its authorship are established facts, and a push is not
   // entitled to overwrite them with blanks. This is the invariant that
   // makes the status-push case harmless without having to recognise it.
-  const incomingHasContent = incoming.content !== undefined && incoming.content !== '';
   const incomingHasPayload = incoming.payload !== undefined && incoming.payload.length > 0;
 
-  // A status-only push (no payload, no content) says nothing about what the
-  // message *is* — only that something happened to it. Anything it would
-  // "contribute" to the display fields is an absence, not a value.
-  const carriesMessageBody = incomingHasContent || incomingHasPayload;
+  // A push earns the right to touch the display fields by carrying the body
+  // itself — i.e. non-empty content. Carrying *a* payload is not enough: a
+  // status push has one too (a status envelope, not the message), and
+  // treating that as a body is what let it blank the text in production.
+  const carriesMessageBody = incoming.content !== undefined && incoming.content !== '';
 
   return {
     ...existing,

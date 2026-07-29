@@ -157,6 +157,23 @@ describe('mergeOnPushAbsorb', () => {
         status: 'received',
       });
 
+    // 第一版修复漏掉的正是这一格：状态推送**也带 payload**（状态信封），
+    // 把「有 payload」当成「有消息体」就会放行空正文，线上仍然变白。
+    it('带 payload 但正文为空的推送同样不得擦掉正文', () => {
+      const mine = rec({ id: 'r-mine', from_uid: SELF_UID, content: 'DX-608874', status: 'sent' });
+      const push = rec({
+        id: 'r-fresh',
+        from_uid: PEER_UID,
+        content: '',
+        payload: new Uint8Array([1, 2, 3, 4]),  // 状态信封，不是消息体
+        status: 'received',
+      });
+      const out = mergeOnPushAbsorb(mine, push, { currentUserId: SELF_UID });
+      expect(out.content).toBe('DX-608874');
+      expect(out.from_uid).toBe(SELF_UID);
+      expect(out.id).toBe('r-mine');
+    });
+
     it('不得改变行的稳定身份', () => {
       const mine = rec({ id: 'r-mine', from_uid: SELF_UID, content: 'DX-608874', status: 'sent' });
       const out = mergeOnPushAbsorb(mine, statusPush(), { currentUserId: SELF_UID });
