@@ -140,7 +140,10 @@ export type {
   ReservedL1Type,
   SdkEvent,
   SequencedSdkEvent,
+  SyncCriticalFailure,
   SyncFullRebuildRequiredEvent,
+  SyncReadiness,
+  SyncReadinessChangedEvent,
   TypingReceivedEvent,
   ChannelPublishReceivedEvent,
 } from './events.js';

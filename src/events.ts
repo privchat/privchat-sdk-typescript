@@ -44,6 +44,27 @@ export interface ConnectionStateChangedEvent {
   reason?: string;
 }
 
+export type SyncReadiness =
+  | 'disconnected'
+  | 'authenticated'
+  | 'syncing_critical'
+  | 'ready'
+  | 'critical_failed';
+
+export type SyncCriticalFailure =
+  | 'network'
+  | 'server_unavailable'
+  | 'protocol'
+  | 'storage'
+  | 'unknown';
+
+export interface SyncReadinessChangedEvent {
+  type: 'sync_readiness_changed';
+  readiness: SyncReadiness;
+  failure?: SyncCriticalFailure;
+  retryable: boolean;
+}
+
 export interface MessageReceivedEvent {
   type: 'message_received';
   message: PushMessageRequest;
@@ -340,6 +361,7 @@ export interface EntityChangedEvent {
 
 export type SdkEvent =
   | ConnectionStateChangedEvent
+  | SyncReadinessChangedEvent
   | MessageReceivedEvent
   | MessageBatchReceivedEvent
   | PongReceivedEvent

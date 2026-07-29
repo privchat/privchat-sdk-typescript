@@ -16,6 +16,8 @@ import {
   type OutboxStateChangedEvent,
   type SdkEvent,
   type SequencedSdkEvent,
+  type SyncCriticalFailure,
+  type SyncReadiness,
 } from './events.js';
 import {
   CacheDB,
@@ -696,6 +698,7 @@ export class PrivchatClient {
   private readonly reconnectOpts: Required<ReconnectOptions>;
 
   private state: ConnectionState = 'disconnected';
+  private readiness: SyncReadiness = 'disconnected';
   /** Captured on successful `authenticate()` so reconnect can replay it. Cleared on disconnect(). */
   private lastAuth: { user_id: string; access_token: string; device_id: string } | null = null;
   /** Host-injected auth-refresh config (see `configureAuthRefresh`). Null = no auto-refresh (legacy behavior). */
@@ -734,6 +737,8 @@ export class PrivchatClient {
    * from several paths at once (reconnect handler + window focus + mount);
    * one full sweep serves all concurrent callers. */
   private bootstrapChannelsInflight: Promise<ChannelRecord[]> | null = null;
+  private bootstrapProfilesInflight: Promise<void> | null = null;
+  private criticalSyncGeneration = 0;
   /** Coalesced control-plane invalidations. Wire hints never reach UI or
    * unread/message stores; only the post-sync `entity_changed` event does. */
   private readonly pendingEntityInvalidations = new Map<string, {
@@ -916,6 +921,8 @@ export class PrivchatClient {
     try {
       await this.transport.disconnect();
     } finally {
+      this.criticalSyncGeneration += 1;
+      this.setReadiness('disconnected');
       this.lastAuth = null;
       this.activeSubscriptions.clear();
       this.setState('disconnected');
@@ -1018,6 +1025,11 @@ export class PrivchatClient {
   /** Current SDK connection lifecycle state. Synchronous, side-effect-free. */
   connectionState(): ConnectionState {
     return this.state;
+  }
+
+  /** Startup readiness. Background convergence never regresses `ready`. */
+  syncReadiness(): SyncReadiness {
+    return this.readiness;
   }
 
   /**
@@ -1334,7 +1346,9 @@ export class PrivchatClient {
     }
 
     this.lastAuth = { user_id, access_token: token, device_id };
+    this.setReadiness('authenticated');
     this.setState('authenticated');
+    void this.startCriticalSync();
     return resp;
   }
 
@@ -2193,6 +2207,17 @@ export class PrivchatClient {
    * not need to invoke this directly — it runs from `bootstrapChannels`.
    */
   private async bootstrapProfilesBestEffort(limit: number): Promise<void> {
+    if (this.bootstrapProfilesInflight !== null) {
+      return this.bootstrapProfilesInflight;
+    }
+    const run = this.bootstrapProfilesBestEffortImpl(limit).finally(() => {
+      this.bootstrapProfilesInflight = null;
+    });
+    this.bootstrapProfilesInflight = run;
+    return run;
+  }
+
+  private async bootstrapProfilesBestEffortImpl(limit: number): Promise<void> {
     const db = this.cacheDb;
     const userStore = this.userStore;
     const groupStore = this.groupStore;
@@ -3224,6 +3249,14 @@ export class PrivchatClient {
     });
   }
 
+  onSyncReadinessChanged(
+    cb: (event: SdkEvent & { type: 'sync_readiness_changed' }) => void,
+  ): Unsubscribe {
+    return this.bus.subscribe((env) => {
+      if (env.event.type === 'sync_readiness_changed') cb(env.event);
+    });
+  }
+
   /** Phase 5D: subscribe to self-side read-cursor advances. Fires only
    *  on actual `read_pts` advance — duplicate / out-of-order pushes
    *  that fail the MAX-merge are suppressed. */
@@ -4026,6 +4059,14 @@ export class PrivchatClient {
     if (this.state === next) return;
     const prev = this.state;
     this.state = next;
+    if (
+      next === 'disconnected' ||
+      next === 'reconnecting' ||
+      next === 'closing'
+    ) {
+      this.criticalSyncGeneration += 1;
+      this.setReadiness('disconnected');
+    }
     this.bus.emit({ type: 'connection_state_changed', state: next, reason });
     // Idle-heartbeat: arm only while authenticated. Any other transition
     // (closing, disconnected, reconnecting, authenticating, connected,
@@ -4035,6 +4076,42 @@ export class PrivchatClient {
       this.startHeartbeat();
     } else if (prev === 'authenticated') {
       this.stopHeartbeat();
+    }
+  }
+
+  private setReadiness(
+    next: SyncReadiness,
+    failure?: SyncCriticalFailure,
+    retryable = true,
+  ): void {
+    if (this.readiness === next && failure === undefined) return;
+    this.readiness = next;
+    this.bus.emit({
+      type: 'sync_readiness_changed',
+      readiness: next,
+      failure,
+      retryable,
+    });
+  }
+
+  private async startCriticalSync(): Promise<void> {
+    const generation = ++this.criticalSyncGeneration;
+    if (this.cacheDb === null) {
+      this.setReadiness('ready');
+      return;
+    }
+    this.setReadiness('syncing_critical');
+    try {
+      await this.bootstrapChannels();
+      await this.bootstrapProfilesBestEffort(100);
+      if (generation !== this.criticalSyncGeneration || this.lastAuth === null) return;
+      this.setReadiness('ready');
+    } catch (error) {
+      if (generation !== this.criticalSyncGeneration || this.lastAuth === null) return;
+      const failure = classifyCriticalSyncFailure(error);
+      this.setReadiness('critical_failed', failure, failure !== 'protocol');
+      // eslint-disable-next-line no-console
+      console.warn('[privchat:sync] critical entity sync failed', error);
     }
   }
 
@@ -4298,6 +4375,24 @@ export class PrivchatClient {
       }
     }
   }
+}
+
+function classifyCriticalSyncFailure(error: unknown): SyncCriticalFailure {
+  if (
+    error instanceof CacheOwnershipError ||
+    error instanceof LocalPersistenceError
+  ) {
+    return 'storage';
+  }
+  if (error instanceof RpcError) {
+    if (error.response.code >= 500 && error.response.code < 600) return 'server_unavailable';
+    if (error.response.code >= 400 && error.response.code < 500) return 'protocol';
+  }
+  if (error instanceof TypeError || error instanceof RangeError) return 'protocol';
+  if (error instanceof Error && /network|transport|socket|timeout/i.test(error.message)) {
+    return 'network';
+  }
+  return 'unknown';
 }
 
 /** Snowflake id off the wire, or `undefined`. `0` is the protocol's "absent"

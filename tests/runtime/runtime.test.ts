@@ -16,7 +16,7 @@ import {
   type RuntimeClientLike,
   type SyncRuntimeState,
 } from '../../src/runtime/client-runtime.js';
-import type { ConnectionState } from '../../src/events.js';
+import type { ConnectionState, SyncReadiness } from '../../src/events.js';
 import type { OutboxEntry } from '../../src/cache/types.js';
 
 // ---------- user-display ----------
@@ -174,6 +174,7 @@ describe('resolveRuntimeBanner priority', () => {
 
 class FakeClient implements RuntimeClientLike {
   private connCb: ((event: { state: ConnectionState }) => void) | null = null;
+  private readinessCb: ((event: { readiness: SyncReadiness; retryable: boolean }) => void) | null = null;
   private authCb: ((event: unknown) => void) | null = null;
   private outboxCb: ((entries: OutboxEntry[]) => void) | null = null;
 
@@ -189,6 +190,14 @@ class FakeClient implements RuntimeClientLike {
       this.authCb = null;
     };
   }
+  onSyncReadinessChanged(
+    cb: (event: { readiness: SyncReadiness; retryable: boolean }) => void,
+  ): () => void {
+    this.readinessCb = cb;
+    return () => {
+      this.readinessCb = null;
+    };
+  }
   observeOutbox(cb: (entries: OutboxEntry[]) => void): () => void {
     this.outboxCb = cb;
     return () => {
@@ -199,6 +208,9 @@ class FakeClient implements RuntimeClientLike {
   emitState(state: ConnectionState): void {
     this.connCb?.({ state });
   }
+  emitReadiness(readiness: SyncReadiness): void {
+    this.readinessCb?.({ readiness, retryable: true });
+  }
   emitAuthExpired(): void {
     this.authCb?.({ type: 'auth_expired' });
   }
@@ -208,7 +220,7 @@ class FakeClient implements RuntimeClientLike {
 }
 
 describe('createClientRuntime state machine', () => {
-  it('first connect is not reconnecting; authenticated resets attempts and completes initial sync', () => {
+  it('authentication and critical readiness are separate', () => {
     const fake = new FakeClient();
     const rt = createClientRuntime(fake);
     fake.emitState('connecting');
@@ -220,7 +232,12 @@ describe('createClientRuntime state machine', () => {
     expect(c.authenticated).toBe(true);
     expect(c.reconnectAttempt).toBe(0);
     expect(c.lastError).toBeNull();
+    expect(rt.sync.getState().initialSyncCompleted).toBe(false);
+    fake.emitReadiness('syncing_critical');
+    expect(rt.sync.getState().resumeSyncRunning).toBe(true);
+    fake.emitReadiness('ready');
     expect(rt.sync.getState().initialSyncCompleted).toBe(true);
+    expect(rt.sync.getState().resumeSyncRunning).toBe(false);
     rt.dispose();
   });
 

@@ -10,17 +10,15 @@
  * Event sources are the real TS SDK surfaces (no fabricated events):
  *  - `onConnectionStateChanged` — 7-state lifecycle incl. an explicit `reconnecting`
  *  - `onAuthExpired` — terminal auth loss
+ *  - `onSyncReadinessChanged` — critical startup readiness, separate from convergence
  *  - `observeOutbox` — persistent outbox snapshots (queue depth / failed count)
  *  - `navigator.onLine` + window online/offline — device reachability
  *
- * Honest gap (documented, not faked): the TS SDK runs post-reconnect sync inline and
- * emits no resume_sync_started/completed events, so `sync.resumeSyncRunning` only changes
- * via [markSyncStarted]/[markSyncCompleted] fed by the integration layer, and
- * `initialSyncCompleted` is set on the first `authenticated` (the TS connect flow
- * completes its sync inside that transition).
+ * Background channel convergence never drives the blocking sync banner. Only
+ * `syncing_critical` does.
  */
 
-import type { ConnectionState } from '../events.js';
+import type { ConnectionState, SyncReadiness } from '../events.js';
 import type { OutboxEntry } from '../cache/types.js';
 
 // ========== Unified error model ==========
@@ -180,6 +178,10 @@ export function resolveRuntimeBanner(
 /** Minimal structural view of PrivchatClient (only public APIs that exist today). */
 export interface RuntimeClientLike {
   onConnectionStateChanged(cb: (event: { state: ConnectionState }) => void): () => void;
+  onSyncReadinessChanged?(
+    cb: (event: { readiness: SyncReadiness; retryable: boolean }) => void,
+  ): () => void;
+  syncReadiness?(): SyncReadiness;
   onAuthExpired?(cb: (event: unknown) => void): () => void;
   observeOutbox?(cb: (entries: OutboxEntry[]) => void): () => void;
 }
@@ -279,17 +281,42 @@ export function createClientRuntime(client: RuntimeClientLike): ClientRuntime {
             };
         }
       });
-      // TS SDK 的连接流程在 authenticated 前已完成同步（无独立 resume 事件）：
-      // 首次 authenticated 即标记初始同步完成。
-      if (state === 'authenticated') {
-        sync.update((s) =>
-          s.initialSyncCompleted ? s : { ...s, initialSyncCompleted: true, lastSyncAt: Date.now() },
-        );
-      }
+  };
+
+  const applySyncReadiness = (readiness: SyncReadiness): void => {
+    if (readiness === 'syncing_critical') {
+      sync.update((s) => ({ ...s, resumeSyncRunning: true, globalError: null }));
+      return;
+    }
+    if (readiness === 'ready') {
+      sync.update((s) => ({
+        ...s,
+        resumeSyncRunning: false,
+        initialSyncCompleted: true,
+        lastSyncAt: Date.now(),
+        globalError: null,
+      }));
+      clearServerBusy();
+      return;
+    }
+    if (readiness === 'critical_failed') {
+      sync.update((s) => ({
+        ...s,
+        resumeSyncRunning: false,
+        globalError: { kind: 'sync_failed', rawReason: 'critical_sync_failed' },
+      }));
+    }
   };
 
   // ---- connectivity ← connection_state_changed ----
   unsubs.push(client.onConnectionStateChanged(({ state }) => applyConnectionState(state)));
+  if (client.onSyncReadinessChanged) {
+    unsubs.push(
+      client.onSyncReadinessChanged(({ readiness }) => applySyncReadiness(readiness)),
+    );
+  }
+  const initialReadiness = client.syncReadiness?.();
+  if (initialReadiness !== undefined) applySyncReadiness(initialReadiness);
 
   // ---- connectivity ← auth_expired ----
   if (client.onAuthExpired) {
