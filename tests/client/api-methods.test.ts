@@ -144,6 +144,42 @@ describe('channel', () => {
 });
 
 describe('group', () => {
+  it('normalizes the canonical member display without exposing a hidden username', async () => {
+    const t = new FakeTransport();
+    t.responder = () =>
+      ok({
+        members: [
+          {
+            user_id: 42,
+            alias: ' 群名片 ',
+            username: '',
+            nickname: '昵称',
+            display_name: '',
+            role: 'Owner',
+            joined_at: 1,
+            is_muted: false,
+          },
+          {
+            user_id: 43,
+            username: '',
+            nickname: '',
+            display_name: '',
+            role: 'MEMBER',
+            joined_at: 2,
+            is_muted: false,
+          },
+        ],
+        total: 2,
+      });
+    const c = new PrivchatClient({ transport: t });
+
+    const response = await c.groupMemberList(1);
+
+    expect(response.members.map((member) => member.display_name)).toEqual(['群名片', '43']);
+    expect(response.members.map((member) => member.role)).toEqual(['owner', 'member']);
+    expect(response.members.map((member) => member.user_type)).toEqual([0, 0]);
+  });
+
   it.each([
     [(c: PrivchatClient) => c.groupCreate('test'), 'group/group/create'],
     [(c: PrivchatClient) => c.groupInfo(1), 'group/group/info'],

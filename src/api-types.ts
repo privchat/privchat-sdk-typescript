@@ -387,9 +387,14 @@ export interface GroupMemberListRequest {
 
 export interface GroupMember {
   user_id: number;
+  /** Group-scoped alias/card. It is distinct from the global nickname. */
+  alias?: string;
   username: string;
   nickname: string;
+  /** Canonical server projection: alias > nickname > visible username > uid. */
+  display_name: string;
   avatar_url?: string;
+  user_type: number;
   role: string;
   joined_at: number;
   is_muted: boolean;

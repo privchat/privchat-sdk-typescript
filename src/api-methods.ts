@@ -478,9 +478,20 @@ proto.groupMemberList = function (groupId) {
     // Role strings are a lowercase contract ('owner'/'admin'/'member');
     // older servers emitted Debug-capitalized variants ('Owner') which
     // silently disabled every permission gate downstream. Normalize here.
-    const members = (resp.members ?? []).map((m) =>
-      typeof m.role === 'string' ? { ...m, role: m.role.toLowerCase() } : m,
-    );
+    const members = (resp.members ?? []).map((m) => {
+      const displayName =
+        m.display_name?.trim() ||
+        m.alias?.trim() ||
+        m.nickname?.trim() ||
+        m.username?.trim() ||
+        String(m.user_id);
+      return {
+        ...m,
+        display_name: displayName,
+        user_type: m.user_type ?? 0,
+        role: typeof m.role === 'string' ? m.role.toLowerCase() : m.role,
+      };
+    });
     // Single write-path: hydrate the user cache from member profiles so
     // clicking a (non-friend, un-synced) member's avatar resolves.
     this.ingestUserProfiles(members);
