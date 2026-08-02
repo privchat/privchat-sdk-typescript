@@ -565,6 +565,36 @@ describe('OutboxEngine — failure paths', () => {
     expect(second.attempted).toBe(0);
   });
 
+  // 生产事故的两个方向：终局拒绝被无限重试（消息永远转圈），
+  // 与会自愈的错误被冻结（一次服务重启就要用户手动重发一批消息）。
+  // 判据是错误码本身，不是「非零」。见 SDK_ARCHITECTURE_SPEC §11.3。
+  it('terminal server code freezes the row instead of retrying forever', async () => {
+    const h = newHarness({ now: NOW });
+    // 10205 OperationConflict：服务端对「附件已被别的消息占用」的终局判定。
+    h.setSendImpl(async () => rejectedResp(10205));
+    await putOutboxEntry(h.db, row('TERM', { attempt_count: 0 }));
+
+    await h.engine.flushOutbox();
+    const after = await getOutboxEntry(h.db, 'TERM');
+    expect(after?.next_attempt_at).toBe(FROZEN_NEXT_ATTEMPT_AT);
+    expect(after?.last_error).toBe('rejected: code=10205');
+    expect((await h.engine.flushOutbox()).attempted).toBe(0);
+  });
+
+  it('retryable server code is retried with backoff, not frozen', async () => {
+    const h = newHarness({ now: NOW, initialDelayMs: 1_000, maxAttempts: 8 });
+    // 7 DatabaseError：真的抖了一下，过一会儿会自己好。
+    h.setSendImpl(async () => rejectedResp(7));
+    await putOutboxEntry(h.db, row('TRANS', { attempt_count: 0 }));
+
+    await h.engine.flushOutbox();
+    const after = await getOutboxEntry(h.db, 'TRANS');
+    expect(after?.attempt_count).toBe(1);
+    expect(after?.next_attempt_at).toBe(NOW + 1_000);
+    expect(after?.last_error).toMatch(/^transient: /);
+    expect(after?.last_error).toContain('code=7');
+  });
+
   it('Case 8: maxAttempts reached → frozen with descriptive last_error', async () => {
     const h = newHarness({
       now: NOW,

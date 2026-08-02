@@ -44,6 +44,7 @@ import {
 import type { SendMessageRequest, SendMessageResponse } from './codec/send.js';
 import type { ConnectionState, OutboxStateChangedEvent } from './events.js';
 import { contentTypeToWireTag } from './content-type.js';
+import { isRetryableServerCode } from './send-error.js';
 
 // ----- Public API -----
 
@@ -556,7 +557,16 @@ export class OutboxEngine {
     }
 
     if (resp.reason_code !== 0) {
-      const lastError = await this.handleRejected(entry, token, resp.reason_code);
+      // 非零码分两类（SDK_ARCHITECTURE_SPEC §11.3）：会自己好的（限流 / 数据库抖动 /
+      // 服务重启窗口）走退避重试；终局拒绝才冻结等用户重发。此前一律冻结，于是
+      // 一次服务重启就要求用户把窗口里的消息全部手动重发。
+      const lastError = isRetryableServerCode(resp.reason_code)
+        ? await this.handleTransient(
+            entry,
+            token,
+            new Error(`server rejected: code=${resp.reason_code}`),
+          )
+        : await this.handleRejected(entry, token, resp.reason_code);
       if (lastError === undefined) return;
       this.emit({ ...identityOf(entry), status: 'failed', last_error: lastError });
       counters.failed += 1;

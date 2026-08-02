@@ -5,6 +5,7 @@ import {
   type TransportClientOptions,
   type TransportContext,
 } from '@msgtrans/client';
+import { isRetryableServerCode } from './send-error.js';
 import {
   classifyAuthErrorCode,
   parseAuthErrorPrefix,
@@ -1717,13 +1718,17 @@ export class PrivchatClient {
     }
 
     if (resp.reason_code !== 0) {
-      // Server rejected (rate-limit, permission, etc). Enqueue as
-      // `failed (rejected)` — the engine will not auto-retry, host UI
-      // must surface the rejection state via the outbox observer.
+      // 非零码分两类（SDK_ARCHITECTURE_SPEC §11.3）。会自己好的（限流 / 数据库抖动 /
+      // 服务重启窗口）记成 transient，交给引擎退避重试；终局拒绝才冻结，由 host UI
+      // 通过 outbox observer 呈现失败态、让用户重发。
       await this.markOutboxFailed(
         localMsgId,
         input,
-        `rejected: code=${resp.reason_code}`,
+        isRetryableServerCode(resp.reason_code)
+          ? formatTransientError(
+              new Error(`server rejected: code=${resp.reason_code}`),
+            )
+          : `rejected: code=${resp.reason_code}`,
       );
       return {
         status: 'queued',
