@@ -356,6 +356,12 @@ export interface GroupInfo {
   is_archived: boolean;
   tags?: string[];
   custom_fields?: Record<string, unknown>;
+  /** 请求者在本群的角色（'owner' | 'admin' | 'member'，非成员为 ''）。
+   *  判断「我能不能管理这个群」MUST 读它，不许去拉整份花名册找自己——
+   *  750 人的群那是 126 KB。见 CHANNEL_SPEC §9.2.2。 */
+  my_role?: string;
+  /** 管理员 uid（群主见 owner_id）。有界，够气泡打【管理】标签用。 */
+  admin_user_ids?: number[];
 }
 
 export interface GroupMemberSummary {
@@ -370,7 +376,9 @@ export interface GroupMemberSummary {
 export interface GroupInfoResponse {
   status: string;
   group_info: GroupInfo;
-  members: GroupMemberSummary[];
+  /** 服务端不再随 group/info 下发整份花名册（它曾是第二个全量 roster 端点，
+   *  且当时零调用方）。要成员列表请用 group/member/list + 分页。 */
+  members?: GroupMemberSummary[];
   timestamp: number;
 }
 
@@ -383,6 +391,8 @@ export type GroupMemberAddResponse = boolean;
 
 export interface GroupMemberListRequest {
   group_id: number;
+  limit?: number;
+  offset?: number;
 }
 
 export interface GroupMember {
