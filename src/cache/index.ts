@@ -93,3 +93,4 @@ export {
 } from './types.js';
 
 export * from './group-member-store.js';
+export type { GroupMemberRecord } from './types.js';

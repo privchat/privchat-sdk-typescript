@@ -21,10 +21,14 @@ import {
   type SyncReadiness,
 } from './events.js';
 import {
+  advanceGroupMemberWatermark,
+  groupMemberSyncWatermark,
+  numericRoleToString,
   upsertGroupMembers,
   pruneGroupMembers,
   countGroupMembers,
   readGroupMemberPage,
+  type GroupMemberRecord,
   type GroupMemberView,
   CacheDB,
   FriendshipStore,
@@ -923,7 +927,9 @@ export class PrivchatClient {
         alias: m.alias,
         is_muted: m.is_muted ?? false,
         joined_at: m.joined_at ?? 0,
-        sync_version: now,
+        // group/member/list 不下发版本号：标 0 = 未知，不参与增量水位。
+        sync_version: 0,
+        cached_at: now,
       })),
     );
     const isFullRoster = page?.limit === undefined && (page?.offset ?? 0) === 0;
@@ -959,6 +965,82 @@ export class PrivchatClient {
   async cachedGroupMemberCount(groupId: number): Promise<number> {
     if (this.cacheDb === null) return 0;
     return countGroupMembers(this.cacheDb, String(groupId));
+  }
+
+  /**
+   * 增量同步一个群的成员（`entity/sync_entities`，`entity_type=group_member`）。
+   *
+   * 水位取本地该群已知的最大**服务端**版本，所以只有真正变过的行会下来；
+   * 退群的人由服务端下发 tombstone（`deleted`），本地据此删除——不靠"少了一行"
+   * 让本地自己收敛，那样永远分不清"他退群了"和"这一页没带到他"。
+   *
+   * 返回本次应用的变更数。缓存关闭时直接返回 0。
+   */
+  async syncGroupMembers(groupId: number): Promise<number> {
+    const db = this.cacheDb;
+    if (db === null) return 0;
+    const groupIdStr = String(groupId);
+    let since = await groupMemberSyncWatermark(db, groupIdStr);
+    let applied = 0;
+
+    // 分页直到追平。上限防御一个永远 has_more 的服务端把这里变成死循环。
+    for (let guard = 0; guard < 50; guard += 1) {
+      const resp = await this.rpcCallTyped<
+        { entity_type: string; scope: string; since_version: number; limit: number },
+        {
+          items?: Array<{
+            entity_id: string;
+            version: number;
+            deleted?: boolean;
+            payload?: Record<string, unknown> | null;
+          }>;
+          next_version?: number;
+          has_more?: boolean;
+        }
+      >(ENTITY_SYNC_ROUTE, {
+        entity_type: 'group_member',
+        scope: groupIdStr,
+        since_version: since,
+        limit: 200,
+      });
+
+      const items = resp.items ?? [];
+      const upserts: GroupMemberRecord[] = [];
+      const deletions: Array<[string, string]> = [];
+      const now = Date.now();
+      for (const item of items) {
+        if (item.deleted === true || item.payload == null) {
+          deletions.push([groupIdStr, String(item.entity_id)]);
+          continue;
+        }
+        const p = item.payload;
+        upserts.push({
+          group_id: groupIdStr,
+          user_id: String(p.user_id ?? p.uid ?? item.entity_id),
+          role: numericRoleToString(p.role),
+          alias: typeof p.alias === 'string' ? p.alias : undefined,
+          is_muted: p.is_muted === true,
+          joined_at: typeof p.joined_at === 'number' ? p.joined_at : 0,
+          sync_version: item.version,
+          cached_at: now,
+        });
+      }
+      if (upserts.length > 0) await upsertGroupMembers(db, upserts);
+      if (deletions.length > 0) await db.group_members.bulkDelete(deletions);
+      applied += items.length;
+
+      // 水位必须显式推进并落库：tombstone 会把行删掉，靠行推水位会让这批
+      // tombstone 每次都重下发一遍，永远追不平。
+      const next = resp.next_version ?? since;
+      const advanced = next > since;
+      if (advanced) {
+        await advanceGroupMemberWatermark(db, groupIdStr, next);
+        since = next;
+      }
+      // 没有下一页，或水位没前进（再问一次只会拿到同一页）就停。
+      if (resp.has_more !== true || !advanced) break;
+    }
+    return applied;
   }
 
   private requireCache(): { db: CacheDB; store: MessageStore } {

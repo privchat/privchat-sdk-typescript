@@ -733,7 +733,15 @@ export interface GroupMemberRecord {
   alias?: string;
   is_muted: boolean;
   joined_at: number;
-  /** 单调守卫：迟到的旧响应不得覆盖新行。服务端暂无成员版本号，
-   *  以本地写入时刻代替——它同样单调，且足以抵御乱序响应。 */
+  /**
+   * **服务端**权威版本（`entity/sync_entities` 的 `version`）。
+   * `0` = 未知：这一行来自 `group/member/list`，那条 RPC 不下发版本号。
+   *
+   * 增量同步的水位取本群的 `max(sync_version)`，所以这里**只能**放服务端量纲的值——
+   * 曾经填过 `Date.now()`，那会让水位瞬间跳到一个服务端永远追不上的数，
+   * 增量同步从此认为自己已经同步完了，再也拉不到任何变更。
+   */
   sync_version: number;
+  /** 本地写入时刻。仅用于在两行版本都未知时判定谁更新，不参与同步水位。 */
+  cached_at: number;
 }

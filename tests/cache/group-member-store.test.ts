@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import 'fake-indexeddb/auto';
 import { CacheDB } from '../../src/cache/indexeddb-store.js';
 import {
+  advanceGroupMemberWatermark,
   countGroupMembers,
+  groupMemberSyncWatermark,
+  numericRoleToString,
   pruneGroupMembers,
   readGroupMemberPage,
   resolveMemberDisplayName,
@@ -26,6 +29,7 @@ function member(
     is_muted: false,
     joined_at: Number(userId),
     sync_version: 1,
+    cached_at: 1,
     ...over,
   };
 }
@@ -131,5 +135,83 @@ describe('本地花名册投影', () => {
     await upsertGroupMembers(db, [member('42')]);
     const rows = await readGroupMemberPage(db, '513', new Map());
     expect(rows[0]?.display_name).toBe('42');
+  });
+});
+
+describe('增量同步水位', () => {
+  it('只认服务端量纲的版本，未知（0）不参与', async () => {
+    // 这条是为一个真实设计错误立的：`sync_version` 一度填的是 `Date.now()`，
+    // 水位会瞬间跳到服务端永远追不上的数——增量同步从此认为自己同步完了，
+    // 再也拉不到任何成员变更。
+    const db = newDb();
+    await upsertGroupMembers(db, [
+      member('1', { sync_version: 0, cached_at: Date.now() }), // 来自 member/list
+      member('2', { sync_version: 37 }), // 来自实体同步
+    ]);
+    expect(await groupMemberSyncWatermark(db, '513')).toBe(37);
+  });
+
+  it('全是未知版本时水位是 0，即从头同步', async () => {
+    const db = newDb();
+    await upsertGroupMembers(db, [member('1', { sync_version: 0 })]);
+    expect(await groupMemberSyncWatermark(db, '513')).toBe(0);
+  });
+
+  it('带版本的行压过未知版本的行', async () => {
+    // 否则一次 member/list 刷新会把增量同步刚拿到的新角色覆盖回旧值。
+    const db = newDb();
+    await upsertGroupMembers(db, [
+      member('1', { role: 'owner', sync_version: 9, cached_at: 1 }),
+    ]);
+    await upsertGroupMembers(db, [
+      member('1', { role: 'member', sync_version: 0, cached_at: Date.now() }),
+    ]);
+    const rows = await readGroupMemberPage(db, '513', new Map());
+    expect(rows[0]?.role).toBe('owner');
+  });
+});
+
+describe('role 编码收敛', () => {
+  it('实体同步的数值与 member/list 的字符串收敛到同一个小写契约', () => {
+    // 两条路进来的同一个人必须得到同一个 role，否则权限判定取决于
+    // 你先走了哪条路。
+    expect(numericRoleToString(0)).toBe('owner');
+    expect(numericRoleToString(1)).toBe('admin');
+    expect(numericRoleToString(2)).toBe('member');
+    expect(numericRoleToString('Owner')).toBe('owner');
+    expect(numericRoleToString(undefined)).toBe('member');
+  });
+});
+
+describe('tombstone 与水位', () => {
+  it('水位显式持久化，删掉的行不会把它拖回去', async () => {
+    // 生产实测：靠 max(row.sync_version) 当水位时，退群成员的 tombstone
+    // 每次同步都重下发一遍——第 2、3、4 次全是同样的 2 条，永远追不平。
+    const db = newDb();
+    await upsertGroupMembers(db, [member('1', { sync_version: 10 })]);
+    await advanceGroupMemberWatermark(db, '513', 42); // 第 42 版是一条 tombstone
+    await db.group_members.bulkDelete([['513', '1']]); // tombstone 应用：行没了
+
+    expect(await countGroupMembers(db, '513')).toBe(0);
+    expect(await groupMemberSyncWatermark(db, '513')).toBe(42);
+  });
+
+  it('水位只增不减', async () => {
+    const db = newDb();
+    await advanceGroupMemberWatermark(db, '513', 42);
+    await advanceGroupMemberWatermark(db, '513', 7); // 迟到的旧响应
+    expect(await groupMemberSyncWatermark(db, '513')).toBe(42);
+  });
+
+  it('没记录过水位时回退到行里的最大版本，省一整轮全量', async () => {
+    const db = newDb();
+    await upsertGroupMembers(db, [member('1', { sync_version: 88 })]);
+    expect(await groupMemberSyncWatermark(db, '513')).toBe(88);
+  });
+
+  it('水位按群隔离', async () => {
+    const db = newDb();
+    await advanceGroupMemberWatermark(db, '513', 42);
+    expect(await groupMemberSyncWatermark(db, '999')).toBe(0);
   });
 });
