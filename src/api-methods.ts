@@ -128,7 +128,13 @@ declare module './client.js' {
     groupCreate(name: string, description?: string): Promise<GroupCreateResponse>;
     groupInfo(groupId: number): Promise<GroupInfoResponse>;
     groupMemberAdd(groupId: number, userId: number, role?: string): Promise<GroupMemberAddResponse>;
-    groupMemberList(groupId: number): Promise<GroupMemberListResponse>;
+    /** `page.limit` 只取前 N 个成员（按入群时间升序，CHANNEL_SPEC §9.2.1）。
+     *  九宫格头像只需要 9 个人——不带 limit 会把整份花名册拉下来，
+     *  一个 750 人的群是 126 KB。`total` 始终是群总人数，不随分页变化。 */
+    groupMemberList(
+      groupId: number,
+      page?: { limit?: number; offset?: number },
+    ): Promise<GroupMemberListResponse>;
     groupMemberLeave(groupId: number): Promise<GroupMemberLeaveResponse>;
     groupMemberRemove(groupId: number, userId: number): Promise<GroupMemberRemoveResponse>;
     /** `muteDuration` is in seconds; 0 = permanent. */
@@ -470,11 +476,15 @@ proto.groupMemberAdd = function (groupId, userId, role) {
   });
 };
 
-proto.groupMemberList = function (groupId) {
-  return this.rpcCallTyped<{ group_id: number }, GroupMemberListResponse>(
-    Routes.group_member.LIST,
-    { group_id: groupId },
-  ).then((resp) => {
+proto.groupMemberList = function (groupId, page) {
+  return this.rpcCallTyped<
+    { group_id: number; limit?: number; offset?: number },
+    GroupMemberListResponse
+  >(Routes.group_member.LIST, {
+    group_id: groupId,
+    ...(page?.limit !== undefined ? { limit: page.limit } : {}),
+    ...(page?.offset !== undefined ? { offset: page.offset } : {}),
+  }).then((resp) => {
     // Role strings are a lowercase contract ('owner'/'admin'/'member');
     // older servers emitted Debug-capitalized variants ('Owner') which
     // silently disabled every permission gate downstream. Normalize here.
