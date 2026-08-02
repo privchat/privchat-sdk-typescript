@@ -505,6 +505,10 @@ proto.groupMemberList = function (groupId, page) {
     // Single write-path: hydrate the user cache from member profiles so
     // clicking a (non-friend, un-synced) member's avatar resolves.
     this.ingestUserProfiles(members);
+    // 关系行落本地，让下次打开成员页可以先渲染再刷新（App 一直是这么做的）。
+    // 只落关系字段——display_name 读取时与 users 聚合，见
+    // SDK_ENTITY_MODEL §2.4 与 cache/group-member-store.ts。
+    void this.persistGroupMembers(groupId, members, page);
     return { ...resp, members };
   });
 };

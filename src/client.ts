@@ -21,6 +21,11 @@ import {
   type SyncReadiness,
 } from './events.js';
 import {
+  upsertGroupMembers,
+  pruneGroupMembers,
+  countGroupMembers,
+  readGroupMemberPage,
+  type GroupMemberView,
   CacheDB,
   FriendshipStore,
   GroupStore,
@@ -888,6 +893,74 @@ export class PrivchatClient {
   }
 
   /** Internal — throws CacheDisabledError if cache wasn't opted in. */
+  /**
+   * 把一页成员的**关系**行落到本地（CHANNEL_SPEC §9.2.2 / SDK_ENTITY_MODEL §2.4）。
+   *
+   * 缓存关闭时静默跳过——本地投影是加速手段，不是功能前提。
+   * 只有在拿到**全量**（调用方没传分页）时才顺带清理已退群的行；
+   * 传了 limit 就只是一页，照它删人会把其余成员误删。
+   */
+  async persistGroupMembers(
+    groupId: number,
+    members: ReadonlyArray<{
+      user_id: number | string;
+      role?: string;
+      alias?: string;
+      is_muted?: boolean;
+      joined_at?: number;
+    }>,
+    page?: { limit?: number; offset?: number },
+  ): Promise<void> {
+    if (this.cacheDb === null) return;
+    const now = Date.now();
+    const groupIdStr = String(groupId);
+    await upsertGroupMembers(
+      this.cacheDb,
+      members.map((m) => ({
+        group_id: groupIdStr,
+        user_id: String(m.user_id),
+        role: (m.role ?? 'member').toLowerCase(),
+        alias: m.alias,
+        is_muted: m.is_muted ?? false,
+        joined_at: m.joined_at ?? 0,
+        sync_version: now,
+      })),
+    );
+    const isFullRoster = page?.limit === undefined && (page?.offset ?? 0) === 0;
+    if (isFullRoster) {
+      await pruneGroupMembers(
+        this.cacheDb,
+        groupIdStr,
+        members.map((m) => String(m.user_id)),
+      );
+    }
+  }
+
+  /**
+   * 读本地已缓存的成员（先渲染、后刷新）。缓存关闭或还没缓存过时返回空数组——
+   * **不回退去发网络请求**：调用方自己决定何时刷新，这里保持"纯本地读"的语义，
+   * 否则一个看似本地的调用会在离线时挂住。
+   */
+  async cachedGroupMembers(
+    groupId: number,
+    page?: { limit?: number; offset?: number },
+  ): Promise<GroupMemberView[]> {
+    const db = this.cacheDb;
+    if (db === null) return [];
+    // 缓存开着时 userStore 必然存在（同一处构造），但类型上是可空的——
+    // 没有它就退化成 uid 展示，而不是抛异常。
+    const users = new Map(
+      (this.userStore?.list() ?? []).map((u) => [u.user_id, u]),
+    );
+    return readGroupMemberPage(db, String(groupId), users, page);
+  }
+
+  /** 本地已缓存的成员数（≠ 群总人数，后者只有服务端知道）。 */
+  async cachedGroupMemberCount(groupId: number): Promise<number> {
+    if (this.cacheDb === null) return 0;
+    return countGroupMembers(this.cacheDb, String(groupId));
+  }
+
   private requireCache(): { db: CacheDB; store: MessageStore } {
     if (this.cacheDb === null || this.cacheStore === null) {
       throw new CacheDisabledError();

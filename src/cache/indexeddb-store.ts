@@ -36,6 +36,7 @@ import {
   encodeSortKey,
   hasPtsGap,
   type ChannelOrderMode,
+  GroupMemberRecord,
 } from './types.js';
 import {
   decodeRebuildableContent,
@@ -97,6 +98,7 @@ export class CacheDB extends Dexie {
    * authenticated user; hosts must never be able to hydrate another user's
    * rows merely by reusing a database name. */
   cache_metadata!: Table<CacheMetadataRecord, string>;
+  group_members!: Table<GroupMemberRecord, [string, string]>;
   /** Rows evicted by an identity conflict. Never read by the timeline. */
   quarantine!: Table<QuarantinedMessage, string>;
 
@@ -635,6 +637,24 @@ export class CacheDB extends Dexie {
 
     // v13: the old store has served its purpose.
     this.version(13).stores({ messages: null });
+
+    // v14 (CHANNEL_SPEC §9.2.2 / SDK_ENTITY_MODEL §2.4): local group roster.
+    //
+    // Until now web/h5 asked the server for the roster every time a member
+    // list opened — 126 KB for a 750 member group — while the App had been
+    // reading a local projection and syncing incrementally for a long time.
+    // This store closes that gap: the compound primary key mirrors the
+    // entity model's `PRIMARY KEY (group_id, user_id)`, `group_id` indexes
+    // the per-group page read, and `sync_version` is the monotonic guard
+    // that keeps a stale response from overwriting a newer row.
+    //
+    // Only relation fields live here. `display_name` is computed at read
+    // time by joining the `users` store (SDK_ENTITY_MODEL §2.4 forbids
+    // denormalising it into the relation row) so a profile update shows up
+    // without rewriting every member row.
+    this.version(14).stores({
+      group_members: '[group_id+user_id], group_id, sync_version',
+    });
 
   }
 }

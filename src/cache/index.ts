@@ -91,3 +91,5 @@ export {
   nextLocalMessageRecordId,
   pushToMessageRecord,
 } from './types.js';
+
+export * from './group-member-store.js';

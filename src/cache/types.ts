@@ -716,3 +716,24 @@ function decodePlainTextPayload(payload: Uint8Array): string | undefined {
   }
   return text;
 }
+
+/**
+ * 群成员**关系**行（SDK_ENTITY_MODEL §2.4）。
+ *
+ * 只存关系字段。`display_name` 是读取时与 `users` 聚合出的 View 字段——
+ * spec 明确禁止把它冗余写进关系表：那样用户改了昵称，就得回头重写这个群
+ * 所有成员行，而漏掉一处就是一个永远显示旧名字的成员。
+ */
+export interface GroupMemberRecord {
+  group_id: IdString;
+  user_id: IdString;
+  /** 小写契约：'owner' | 'admin' | 'member'。 */
+  role: string;
+  /** 群昵称（群名片）。目前服务端恒空，字段保留给后续功能。 */
+  alias?: string;
+  is_muted: boolean;
+  joined_at: number;
+  /** 单调守卫：迟到的旧响应不得覆盖新行。服务端暂无成员版本号，
+   *  以本地写入时刻代替——它同样单调，且足以抵御乱序响应。 */
+  sync_version: number;
+}
