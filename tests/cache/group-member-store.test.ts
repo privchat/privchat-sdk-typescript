@@ -173,13 +173,22 @@ describe('增量同步水位', () => {
 
 describe('role 编码收敛', () => {
   it('实体同步的数值与 member/list 的字符串收敛到同一个小写契约', () => {
+    // 编号是协议冻结的 Member=0 / Owner=1 / Admin=2。
     // 两条路进来的同一个人必须得到同一个 role，否则权限判定取决于
     // 你先走了哪条路。
-    expect(numericRoleToString(0)).toBe('owner');
-    expect(numericRoleToString(1)).toBe('admin');
-    expect(numericRoleToString(2)).toBe('member');
+    expect(numericRoleToString(0)).toBe('member');
+    expect(numericRoleToString(1)).toBe('owner');
+    expect(numericRoleToString(2)).toBe('admin');
     expect(numericRoleToString('Owner')).toBe('owner');
+  });
+
+  it('0 与未知一律是权限最低的成员', () => {
+    // 字段缺失、默认值、老版本不认识的取值都会落在这里。
+    // 往上猜是提权：解析不出来的角色绝不能变成群主。
     expect(numericRoleToString(undefined)).toBe('member');
+    expect(numericRoleToString(99)).toBe('member');
+    expect(numericRoleToString(null)).toBe('member');
+    expect(numericRoleToString('god')).toBe('god'.toLowerCase());
   });
 });
 

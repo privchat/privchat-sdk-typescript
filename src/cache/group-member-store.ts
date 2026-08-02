@@ -12,16 +12,21 @@ import type { CacheDB } from './indexeddb-store.js';
 import type { GroupMemberRecord, UserRecord } from './types.js';
 
 /**
- * 服务端实体同步下发的是 **DB 数值编码**的 role（0=Owner / 1=Admin / 2=Member），
- * 而 `group/member/list` 下发的是小写字符串。两条路必须收敛到同一个小写契约，
- * 否则同一个人从两条路进来会得到两种 role，权限判定看你先走了哪条。
+ * 线上角色 → 小写字符串契约。
+ *
+ * 数值编码是协议冻结的 **Member=0 / Owner=1 / Admin=2**
+ * （见 privchat-protocol `rpc/group/role.rs`：`0` 必须是权限最低的，
+ * 所有"没拿到"的情形都落在 0，让 0 代表群主等于把读取失败变成提权）。
+ *
+ * 实体同步下发数值、`group/member/list` 下发字符串，两条路必须收敛到同一个
+ * 契约，否则同一个人从两条路进来会得到两种 role，权限判定取决于谁先到。
  */
 export function numericRoleToString(role: unknown): string {
-  if (typeof role === 'string') return role.toLowerCase();
+  if (typeof role === 'string') return role.trim().toLowerCase();
   switch (role) {
-    case 0:
-      return 'owner';
     case 1:
+      return 'owner';
+    case 2:
       return 'admin';
     default:
       return 'member';
