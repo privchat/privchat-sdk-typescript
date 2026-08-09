@@ -274,6 +274,15 @@ declare module './client.js' {
       sha256: string;
     }): Promise<FileUploadResult>;
 
+    /** 再次发送一份**已有**的附件：不下载、不重新压缩、不重新加密、不上传正文。
+     *
+     *  这就是「转发一张图」在本产品里的全部实现——没有转发 RPC，也没有转发
+     *  消息类型。拿到自己的 `file_id` 之后，按普通 image/video/file 消息发送。
+     *
+     *  🔴 走的是服务端算出的 `sha256`，不是本地重算的。重新加密会产出另一串
+     *  字节，那按定义就是另一个物理文件，预检必然不命中。 */
+    resendExistingFile(sourceFileId: number | string): Promise<FileUploadResult>;
+
     /** Optional Step 3 of upload: notify the server with the post-upload
      *  status (`'success'` / `'failed'`). The HTTP upload endpoint
      *  already commits the file row server-side, so the happy path
@@ -717,6 +726,29 @@ proto.fileRequestUploadToken = function (args) {
   });
 };
 
+proto.resendExistingFile = async function (sourceFileId) {
+  const detail = await this.fileGetUrl(Number(sourceFileId));
+  const sha256 = detail.sha256;
+  if (sha256 === undefined || sha256 === null || sha256.length !== 64) {
+    // 老记录的摘要是 `hash:<u64>` 那种旧格式，用不了；只能重新走完整上传。
+    throw new Error('file has no reusable content digest; upload it normally');
+  }
+
+  const token = await this.fileRequestUploadToken({
+    file_size: detail.file_size,
+    mime_type: detail.mime_type,
+    file_type: 'file',
+    business_type: 'message',
+    filename: detail.original_filename ?? 'file.bin',
+    sha256,
+  });
+  if (token.already_exists !== true) {
+    // 服务端刚说有、这会儿又说没有：通常是那份物理文件已被清掉。
+    throw new Error('server no longer holds these bytes; upload it normally');
+  }
+  return this.fileClaimExisting({ token: token.token, sha256 });
+};
+
 proto.fileClaimExisting = function (args) {
   return this.rpcCallTyped(Routes.file.CLAIM_EXISTING, {
     token: args.token,
@@ -1042,14 +1074,15 @@ export interface UploadProgressEvent {
  * no transport state.
  */
 export async function uploadFileViaToken(args: {
+  /** 明文文件。本函数内部封装一次再上传（**旧签名，保持不变**）。
+   *
+   *  想让秒传能命中，用 [uploadSealedFileViaToken]：那条路要求调用方先封装、
+   *  用封装结果的摘要去预检，再上传**同一个** blob。这里每次封装都是新的
+   *  随机 CEK/nonce，产出的字节每次都不同。 */
+  file: Blob;
   filename: string;
   uploadUrl: string;
   token: string;
-  /** 已封装好的最终 blob 与它的 CEK，见 `sealAttachment`。
-   *
-   *  🔴 这里**不接受明文**。接受明文就意味着这一步要再加密一次，而那会产出
-   *  与预检时不同的字节——秒传永远命不中，重试还会每次都变成一个新的物理文件。 */
-  sealed: SealedAttachment;
   /** Optional cross-system business reference (passed as `business_id`
    *  multipart field). */
   businessId?: string;
@@ -1059,10 +1092,25 @@ export async function uploadFileViaToken(args: {
    *  promise rejects with an AbortError-shaped error. */
   signal?: AbortSignal;
 }): Promise<FileUploadResult> {
-  // 🔴 上传的是**调用方已经封好并且已经据以求过摘要**的那个 blob，这里不再加密。
-  //
-  // 秒传按「最终上传字节」判重，而加密用随机 CEK/nonce：预检之后重新加密一次，
-  // 字节就变了、摘要也变了，本来就不该命中；重试同理必须复用同一个 blob。
+  const sealed = await sealAttachment(new Uint8Array(await args.file.arrayBuffer()));
+  return uploadSealedFileViaToken({ ...args, sealed });
+}
+
+/** 上传**已经封装好**的那个 blob。
+ *
+ * 🔴 这里不再加密。秒传按「最终上传字节」判重，而加密用随机 CEK/nonce：
+ * 预检之后重新加密一次，字节就变了、摘要也变了，本来就不该命中；
+ * 重试同理必须复用同一个 blob，否则每次重试都变成一个新的物理文件。
+ */
+export async function uploadSealedFileViaToken(args: {
+  filename: string;
+  uploadUrl: string;
+  token: string;
+  sealed: SealedAttachment;
+  businessId?: string;
+  onProgress?: (event: UploadProgressEvent) => void;
+  signal?: AbortSignal;
+}): Promise<FileUploadResult> {
   const { blob: cipherBlob, cek } = args.sealed;
   const encryptedFile = new Blob([cipherBlob as BlobPart], { type: 'application/octet-stream' });
   return new Promise<FileUploadResult>((resolve, reject) => {

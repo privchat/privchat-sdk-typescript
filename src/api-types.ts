@@ -230,6 +230,12 @@ export interface FileGetUrlRequest {
 }
 
 export interface FileGetUrlResponse {
+  /** 服务端对**已存储字节**算出的 SHA-256。
+   *
+   *  再次发送一份已有附件时用它：直接拿这个摘要去 prepare，必然命中，
+   *  然后 claim 换自己的 file_id——不用把文件下下来重算，也不重新加密
+   *  （重新加密会产出另一串字节，那本来就是另一个物理文件）。 */
+  sha256?: string | null;
   file_url: string;
   expires_at: number;
   file_size: number;
