@@ -191,6 +191,16 @@ export interface FileRequestUploadTokenRequest {
   file_type: string;
   /** "message" | "avatar" | "group_avatar" | ... */
   business_type: string;
+  /** SHA-256（hex）of the **final blob about to be uploaded** — after any
+   *  compression and *after* encryption. Omit to skip the dedup probe and
+   *  upload normally; the server keeps that path working unchanged.
+   *
+   *  Because encryption uses a random key and nonce, re-encrypting after the
+   *  probe produces different bytes and a different digest, so the client
+   *  must upload the very blob it hashed — including on retry. */
+  sha256?: string;
+  /** Producer version of those bytes; metadata only, not part of identity. */
+  transform_version?: number;
 }
 
 export interface FileRequestUploadTokenResponse {
@@ -199,6 +209,10 @@ export interface FileRequestUploadTokenResponse {
   /** Empty string at request stage; the actual file_id is returned by
    *  the upload endpoint. */
   file_id: string;
+  /** The server already holds these exact bytes — do not upload them.
+   *  Call `file/claim_existing` with this token to get a file_id of your
+   *  own. This only reports existence; it creates nothing. */
+  already_exists?: boolean;
   expires_at?: number;
   max_size?: number;
 }

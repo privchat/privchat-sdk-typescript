@@ -17,7 +17,7 @@ import {
   encodeMessagePayloadEnvelope,
   type MessageMetadata,
 } from './codec/payload.js';
-import { encryptAttachment, decryptDownloadedAttachment } from './attachment-crypto.js';
+import { decryptDownloadedAttachment, sealAttachment, type SealedAttachment } from './attachment-crypto.js';
 import { Routes } from './routes.js';
 import type {
   AccountSearchQueryRequest,
@@ -259,7 +259,20 @@ declare module './client.js' {
       file_type: 'image' | 'video' | 'voice' | 'file' | 'other';
       business_type?: string;
       filename?: string;
+      /** SHA-256 (hex) of the final blob about to be uploaded — after
+       *  encryption. Omit to skip the dedup probe. */
+      sha256?: string;
+      transform_version?: number;
     }): Promise<FileRequestUploadTokenResponse>;
+
+    /** Dedup hit: exchange the token for a file_id **of your own**, without
+     *  uploading a byte. Probing and claiming are separate calls because a
+     *  probe gets retried, and a probe that also handed out a file record
+     *  would leave an orphan behind each time. */
+    fileClaimExisting(args: {
+      token: string;
+      sha256: string;
+    }): Promise<FileUploadResult>;
 
     /** Optional Step 3 of upload: notify the server with the post-upload
      *  status (`'success'` / `'failed'`). The HTTP upload endpoint
@@ -699,6 +712,15 @@ proto.fileRequestUploadToken = function (args) {
     file_type: args.file_type,
     business_type: args.business_type ?? 'message',
     filename: args.filename,
+    sha256: args.sha256,
+    transform_version: args.transform_version,
+  });
+};
+
+proto.fileClaimExisting = function (args) {
+  return this.rpcCallTyped(Routes.file.CLAIM_EXISTING, {
+    token: args.token,
+    sha256: args.sha256,
   });
 };
 
@@ -1020,10 +1042,14 @@ export interface UploadProgressEvent {
  * no transport state.
  */
 export async function uploadFileViaToken(args: {
-  file: Blob;
   filename: string;
   uploadUrl: string;
   token: string;
+  /** 已封装好的最终 blob 与它的 CEK，见 `sealAttachment`。
+   *
+   *  🔴 这里**不接受明文**。接受明文就意味着这一步要再加密一次，而那会产出
+   *  与预检时不同的字节——秒传永远命不中，重试还会每次都变成一个新的物理文件。 */
+  sealed: SealedAttachment;
   /** Optional cross-system business reference (passed as `business_id`
    *  multipart field). */
   businessId?: string;
@@ -1033,11 +1059,11 @@ export async function uploadFileViaToken(args: {
    *  promise rejects with an AbortError-shaped error. */
   signal?: AbortSignal;
 }): Promise<FileUploadResult> {
-  // 附件加密 v1（ATTACHMENT_ENCRYPTION_SPEC）：整文件 AES-256-GCM 加密；上传的是密文
-  // blob = nonce||ct||tag，multipart 带 encryption_version=1 + cek(base64url)。对象存储只见
-  // 密文。CEK 经 multipart 交服务端（存 file 表），鉴权后由 file/get_url 下发；不进日志/URL。
-  const plaintext = new Uint8Array(await args.file.arrayBuffer());
-  const { blob: cipherBlob, cek } = await encryptAttachment(plaintext);
+  // 🔴 上传的是**调用方已经封好并且已经据以求过摘要**的那个 blob，这里不再加密。
+  //
+  // 秒传按「最终上传字节」判重，而加密用随机 CEK/nonce：预检之后重新加密一次，
+  // 字节就变了、摘要也变了，本来就不该命中；重试同理必须复用同一个 blob。
+  const { blob: cipherBlob, cek } = args.sealed;
   const encryptedFile = new Blob([cipherBlob as BlobPart], { type: 'application/octet-stream' });
   return new Promise<FileUploadResult>((resolve, reject) => {
     const xhr = new XMLHttpRequest();

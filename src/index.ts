@@ -339,3 +339,5 @@ export type {
   RuntimeSlice,
   RuntimeClientLike,
 } from './runtime/client-runtime.js';
+
+export { sealAttachment, type SealedAttachment } from './attachment-crypto.js';

@@ -94,6 +94,7 @@ export const Routes = {
   },
   file: {
     REQUEST_UPLOAD_TOKEN: 'file/request_upload_token',
+    CLAIM_EXISTING: 'file/claim_existing',
     UPLOAD_CALLBACK: 'file/upload_callback',
     GET_URL: 'file/get_url',
   },

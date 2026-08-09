@@ -115,3 +115,30 @@ export async function decryptDownloadedAttachment(
   }
   throw new Error(`unsupported encryption_version: ${encryptionVersion}`);
 }
+
+/** 已封装好、可以直接上传的最终 blob。 */
+export interface SealedAttachment {
+  /** 密文 blob = nonce||ct||tag —— **就是要上传的那串字节**。 */
+  blob: Uint8Array;
+  /** base64url(32B)，随 multipart 交服务端。 */
+  cek: string;
+  /** 上面那串字节的 SHA-256（hex），秒传按它判重。 */
+  sha256: string;
+}
+
+/** 明文 → 最终 blob：加密一次，算一次摘要，之后都用它。
+ *
+ * 🔴 顺序不能反。秒传按「最终上传字节」判重，而加密用随机 CEK/nonce——
+ * 预检之后再加密一次，字节就变了、摘要也变了，本来就不该命中。
+ * 所以这里产出的 blob 必须留住：上传用它，重试也用它。
+ */
+export async function sealAttachment(
+  plaintext: Uint8Array,
+): Promise<SealedAttachment> {
+  const { blob, cek } = await encryptAttachment(plaintext);
+  const digest = await crypto.subtle.digest('SHA-256', blob.slice().buffer as ArrayBuffer);
+  const sha256 = Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+  return { blob, cek, sha256 };
+}
