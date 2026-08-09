@@ -281,7 +281,7 @@ declare module './client.js' {
      *
      *  🔴 走的是服务端算出的 `sha256`，不是本地重算的。重新加密会产出另一串
      *  字节，那按定义就是另一个物理文件，预检必然不命中。 */
-    resendExistingFile(sourceFileId: number | string): Promise<FileUploadResult>;
+    reuseExistingAttachment(sourceFileId: number | string): Promise<FileUploadResult>;
 
     /** Optional Step 3 of upload: notify the server with the post-upload
      *  status (`'success'` / `'failed'`). The HTTP upload endpoint
@@ -726,7 +726,20 @@ proto.fileRequestUploadToken = function (args) {
   });
 };
 
-proto.resendExistingFile = async function (sourceFileId) {
+function fileTypeFromMime(mime: string): 'image' | 'video' | 'voice' | 'file' {
+  switch ((mime ?? '').split('/')[0]) {
+    case 'image':
+      return 'image';
+    case 'video':
+      return 'video';
+    case 'audio':
+      return 'voice';
+    default:
+      return 'file';
+  }
+}
+
+proto.reuseExistingAttachment = async function (sourceFileId) {
   const detail = await this.fileGetUrl(Number(sourceFileId));
   const sha256 = detail.sha256;
   if (sha256 === undefined || sha256 === null || sha256.length !== 64) {
@@ -737,7 +750,10 @@ proto.resendExistingFile = async function (sourceFileId) {
   const token = await this.fileRequestUploadToken({
     file_size: detail.file_size,
     mime_type: detail.mime_type,
-    file_type: 'file',
+    // 🔴 不能一律报 'file'：服务端按类型定限额和校验，图片/视频报成普通文件
+    // 等于绕开那套闸门。类型只能由 mime 推，因为 get_url 不下发 file_type
+    // ——它一旦下发了就改读它，别让这张表变成第二处真源。
+    file_type: fileTypeFromMime(detail.mime_type),
     business_type: 'message',
     filename: detail.original_filename ?? 'file.bin',
     sha256,
