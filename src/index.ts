@@ -166,6 +166,7 @@ export {
   buildSendVideoInput,
   buildSendVoiceInput,
   uploadFileViaToken,
+  uploadSealedFileViaToken,
   type SendFileMetadata,
   type SendImageMetadata,
   type SendVideoMetadata,
