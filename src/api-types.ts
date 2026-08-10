@@ -236,6 +236,11 @@ export interface FileGetUrlResponse {
    *  然后 claim 换自己的 file_id——不用把文件下下来重算，也不重新加密
    *  （重新加密会产出另一串字节，那本来就是另一个物理文件）。 */
   sha256?: string | null;
+  /** 服务端记录的真实文件类型：`image` / `video` / `voice` / `file` / `other`。
+   *
+   *  复用一份已有附件时按它申请 token。**不要靠 mime 推**：`audio/mp3` 可能是
+   *  用户当普通文件发的一首歌而不是语音条。老服务端不下发时为空。 */
+  file_type?: string;
   file_url: string;
   expires_at: number;
   file_size: number;

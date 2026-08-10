@@ -726,6 +726,16 @@ proto.fileRequestUploadToken = function (args) {
   });
 };
 
+type KnownFileType = 'image' | 'video' | 'voice' | 'file' | 'other';
+
+function isKnownFileType(v: string | undefined): v is KnownFileType {
+  return v === 'image' || v === 'video' || v === 'voice' || v === 'file' || v === 'other';
+}
+
+/** 仅用于**老服务端**：它的 `file/get_url` 还不下发 `file_type`。
+ *
+ *  推不准是已知的——`audio/mp3` 既可能是语音条也可能是当普通文件发的歌，
+ *  mime 分不出来。所以它只是兼容兜底，不是判据。 */
 function fileTypeFromMime(mime: string): 'image' | 'video' | 'voice' | 'file' {
   switch ((mime ?? '').split('/')[0]) {
     case 'image':
@@ -750,10 +760,11 @@ proto.reuseExistingAttachment = async function (sourceFileId) {
   const token = await this.fileRequestUploadToken({
     file_size: detail.file_size,
     mime_type: detail.mime_type,
-    // 🔴 不能一律报 'file'：服务端按类型定限额和校验，图片/视频报成普通文件
-    // 等于绕开那套闸门。类型只能由 mime 推，因为 get_url 不下发 file_type
-    // ——它一旦下发了就改读它，别让这张表变成第二处真源。
-    file_type: fileTypeFromMime(detail.mime_type),
+    // 类型的真源是服务端那一行，不是 mime：`audio/mp3` 可能是用户当普通文件
+    // 发的一首歌而不是语音条。老服务端不下发时才回退推导。
+    file_type: isKnownFileType(detail.file_type)
+      ? detail.file_type
+      : fileTypeFromMime(detail.mime_type),
     business_type: 'message',
     filename: detail.original_filename ?? 'file.bin',
     sha256,
