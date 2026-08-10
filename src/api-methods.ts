@@ -281,7 +281,6 @@ declare module './client.js' {
      *
      *  🔴 走的是服务端算出的 `sha256`，不是本地重算的。重新加密会产出另一串
      *  字节，那按定义就是另一个物理文件，预检必然不命中。 */
-    reuseExistingAttachment(sourceFileId: number | string): Promise<FileUploadResult>;
 
     /** Optional Step 3 of upload: notify the server with the post-upload
      *  status (`'success'` / `'failed'`). The HTTP upload endpoint
@@ -724,56 +723,6 @@ proto.fileRequestUploadToken = function (args) {
     sha256: args.sha256,
     transform_version: args.transform_version,
   });
-};
-
-type KnownFileType = 'image' | 'video' | 'voice' | 'file' | 'other';
-
-function isKnownFileType(v: string | undefined): v is KnownFileType {
-  return v === 'image' || v === 'video' || v === 'voice' || v === 'file' || v === 'other';
-}
-
-/** 仅用于**老服务端**：它的 `file/get_url` 还不下发 `file_type`。
- *
- *  推不准是已知的——`audio/mp3` 既可能是语音条也可能是当普通文件发的歌，
- *  mime 分不出来。所以它只是兼容兜底，不是判据。 */
-function fileTypeFromMime(mime: string): 'image' | 'video' | 'voice' | 'file' {
-  switch ((mime ?? '').split('/')[0]) {
-    case 'image':
-      return 'image';
-    case 'video':
-      return 'video';
-    case 'audio':
-      return 'voice';
-    default:
-      return 'file';
-  }
-}
-
-proto.reuseExistingAttachment = async function (sourceFileId) {
-  const detail = await this.fileGetUrl(Number(sourceFileId));
-  const sha256 = detail.sha256;
-  if (sha256 === undefined || sha256 === null || sha256.length !== 64) {
-    // 老记录的摘要是 `hash:<u64>` 那种旧格式，用不了；只能重新走完整上传。
-    throw new Error('file has no reusable content digest; upload it normally');
-  }
-
-  const token = await this.fileRequestUploadToken({
-    file_size: detail.file_size,
-    mime_type: detail.mime_type,
-    // 类型的真源是服务端那一行，不是 mime：`audio/mp3` 可能是用户当普通文件
-    // 发的一首歌而不是语音条。老服务端不下发时才回退推导。
-    file_type: isKnownFileType(detail.file_type)
-      ? detail.file_type
-      : fileTypeFromMime(detail.mime_type),
-    business_type: 'message',
-    filename: detail.original_filename ?? 'file.bin',
-    sha256,
-  });
-  if (token.already_exists !== true) {
-    // 服务端刚说有、这会儿又说没有：通常是那份物理文件已被清掉。
-    throw new Error('server no longer holds these bytes; upload it normally');
-  }
-  return this.fileClaimExisting({ token: token.token, sha256 });
 };
 
 proto.fileClaimExisting = function (args) {
