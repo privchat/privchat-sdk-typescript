@@ -944,7 +944,10 @@ export function buildSendImageInput(args: {
     channel_id: args.channel_id,
     channel_type: args.channel_type,
     from_uid: args.from_uid,
-    content: caption !== '' ? caption : '[图片]',
+  // 🔴 正文只放用户写的说明文字。「[图片]」这类占位文案是**展示层**按消息类型和
+  // 语言现取的，不能进 wire：一进 wire 就跟着消息跑到别的语言的客户端上，而且
+  // 「没写说明」和「说明恰好是 [图片]」再也分不开。
+    content: caption,
     message_type: ContentMessageType.Image,
     payload: encodeMediaPayload('image', caption, args.metadata),
     payload_encoding: 'message_envelope',
@@ -961,7 +964,7 @@ export function buildSendFileInput(args: {
   local_message_id?: string;
 }): import('./client.js').SendTextInput {
   const caption =
-    args.caption ?? args.metadata.filename ?? '[文件]';
+    args.caption ?? '';
   return {
     channel_id: args.channel_id,
     channel_type: args.channel_type,
@@ -985,7 +988,10 @@ export function buildSendVoiceInput(args: {
     channel_id: args.channel_id,
     channel_type: args.channel_type,
     from_uid: args.from_uid,
-    content: '[语音]',
+  // 🔴 正文只放用户写的说明文字。「[图片]」这类占位文案是**展示层**按消息类型和
+  // 语言现取的，不能进 wire：一进 wire 就跟着消息跑到别的语言的客户端上，而且
+  // 「没写说明」和「说明恰好是 [图片]」再也分不开。
+    content: '',
     message_type: ContentMessageType.Voice,
     payload: encodeMediaPayload('voice', '', args.metadata),
     payload_encoding: 'message_envelope',
@@ -1012,7 +1018,10 @@ export function buildSendVideoInput(args: {
     channel_id: args.channel_id,
     channel_type: args.channel_type,
     from_uid: args.from_uid,
-    content: caption !== '' ? caption : '[视频]',
+  // 🔴 正文只放用户写的说明文字。「[图片]」这类占位文案是**展示层**按消息类型和
+  // 语言现取的，不能进 wire：一进 wire 就跟着消息跑到别的语言的客户端上，而且
+  // 「没写说明」和「说明恰好是 [图片]」再也分不开。
+    content: caption,
     message_type: ContentMessageType.Video,
     payload: encodeMediaPayload('video', caption, args.metadata),
     payload_encoding: 'message_envelope',
