@@ -134,8 +134,6 @@ import { decodeLegacyMessageEnvelope, normalizeMessageDisplayContent } from './m
 import { derivePreview } from './preview.js';
 import {
   contentTypeFromWireTag,
-  contentTypeToWireTag,
-  decodeContentTypeName,
 } from './content-type.js';
 import {
   AuthRefreshCoordinator,
@@ -154,7 +152,7 @@ import {
   type SendMessageRequest,
   type SendMessageResponse,
 } from './codec/send.js';
-import { encodeMessagePayloadEnvelope, decodeMessagePayloadEnvelope } from './codec/payload.js';
+import { encodeMessagePayloadEnvelope } from './codec/payload.js';
 import {
   decodeSubscribeResponse,
   encodeSubscribeRequest,
@@ -1951,94 +1949,6 @@ export class PrivchatClient {
       local_message_id: localMsgId,
       response: resp,
     };
-  }
-
-  /**
-   * Forward a cached message into another conversation (Rust-SDK
-   * `forward_message` parity): the source message's content / content-type
-   * are re-sent as a NEW message to the target — a copy, not a reference.
-   * Reply/mention references are deliberately dropped (they point into the
-   * source conversation), matching the Rust behaviour.
-   *
-   * - Text-family rows are re-sent from `content` (fresh raw-UTF-8 payload).
-   * - Media rows reuse the source's raw FlatBuffers envelope payload
-   *   verbatim (metadata / file_id fidelity). Rows reconstructed from
-   *   history carry no raw payload — forwarding such a media row throws
-   *   rather than emitting a broken bubble.
-   * - Revoked sources are rejected, matching Rust.
-   */
-  async forwardMessage(input: {
-    source_channel_id: string;
-    source_channel_type: number;
-    source_server_message_id: string;
-    target_channel_id: string;
-    target_channel_type: number;
-    from_uid: string;
-  }): Promise<SendTextOperationResult> {
-    const rows = this.getCachedMessages(
-      input.source_channel_id,
-      input.source_channel_type,
-    );
-    const src = rows.find(
-      (m) => String(m.server_message_id ?? '') === String(input.source_server_message_id),
-    );
-    if (src === undefined) {
-      throw new Error('forward source message is not cached');
-    }
-    if (src.revoked === true) {
-      throw new Error('cannot forward a revoked message');
-    }
-    const typeName = decodeContentTypeName(src.message_type);
-    const tag = contentTypeToWireTag(typeName);
-    // Money cards are server-injected artifacts — a client-side copy would
-    // render a card with no backing payment record. Refuse, like the UI does.
-    if (typeName === 'red_packet' || typeName === 'money_transfer') {
-      throw new Error('money messages cannot be forwarded');
-    }
-    let payload: Uint8Array | undefined;
-    if (tag !== 0 && typeName !== 'system') {
-      if (src.payload.length === 0) {
-        throw new Error('source media payload is not cached; cannot forward');
-      }
-      payload = src.payload;
-      // Legacy image envelopes may predate the thumbnail-required rule; the
-      // server now rejects thumbless images. Re-encode with the original file
-      // reference as the thumbnail (same fallback the Rust send path uses).
-      if (typeName === 'image') {
-        try {
-          const env = decodeMessagePayloadEnvelope(src.payload);
-          const m = env.metadata;
-          if (
-            m !== undefined &&
-            m.type === 'image' &&
-            (m.thumbnail_file_id === undefined || m.thumbnail_file_id === '' || m.thumbnail_file_id === '0') &&
-            (m.thumbnail_url === undefined || m.thumbnail_url === '')
-          ) {
-            payload = encodeMessagePayloadEnvelope({
-              ...env,
-              metadata: { ...m, thumbnail_file_id: m.file_id, thumbnail_url: m.url },
-            });
-          }
-        } catch {
-          // Undecodable envelope: forward the raw bytes unchanged.
-        }
-      }
-    }
-    const base = {
-      channel_id: input.target_channel_id,
-      channel_type: input.target_channel_type,
-      from_uid: input.from_uid,
-      content: src.content,
-      message_type: tag,
-    };
-    // Forward carries the source row's typed envelope through verbatim; text
-    // forwards leave payload undefined. Branch rather than spread so each
-    // arm is one concrete member of the union.
-    return this.sendTextMessage(
-      payload !== undefined
-        ? { ...base, payload, payload_encoding: 'message_envelope' }
-        : base,
-    );
   }
 
   /**
