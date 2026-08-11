@@ -29,6 +29,7 @@
     "example:transfer": "npm run codegen && tsx examples/transfer/src/main.ts"
   },
   "dependencies": {
+    "dexie": "^4.4.2",
     "flatbuffers": "^24.3.25",
     "lossless-json": "^4.3.0"
   },
@@ -38,6 +39,7 @@
   "devDependencies": {
     "@msgtrans/client": "file:../msgtrans-typescript",
     "@types/node": "^20.11.0",
+    "fake-indexeddb": "^6.2.5",
     "tsx": "^4.21.0",
     "typescript": "^5.4.0",
     "vitest": "^1.6.0"
