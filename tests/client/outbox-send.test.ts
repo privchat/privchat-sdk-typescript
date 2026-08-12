@@ -3,6 +3,7 @@
 // this file is exclusively about the new outbox-backed queued contract.
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { CacheDB } from '../../src/cache-idb.js';
 import {
   PrivchatClient,
   decodeRpcRequest,
@@ -47,7 +48,7 @@ function authResponder(t: FakeTransport): void {
 }
 
 async function newAuthedClient(transport: FakeTransport, dbName: string): Promise<PrivchatClient> {
-  const c = new PrivchatClient({ transport, cache: { enabled: true, dbName } });
+  const c = new PrivchatClient({ transport, cache: { enabled: true, db: new CacheDB(dbName) } });
   await c.connect();
   await c.authenticate('1', 'tok', 'dev');
   return c;
@@ -70,7 +71,7 @@ describe('sendTextMessage records how it encoded the payload', () => {
     const t = new FakeTransport();
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `queued-encoding-${++dbCounter}` },
+      cache: { enabled: true, db: new CacheDB(`queued-encoding-${++dbCounter}`) },
     });
 
     await client.sendTextMessage({ ...SAMPLE_INPUT, local_message_id: 'plain-1' });
@@ -101,7 +102,7 @@ describe('sendTextMessage offline → queued', () => {
     // No connect, no authenticate. State stays 'disconnected'.
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `queued-offline-${++dbCounter}` },
+      cache: { enabled: true, db: new CacheDB(`queued-offline-${++dbCounter}`) },
     });
 
     const patches: ConversationPatch[] = [];
@@ -133,7 +134,7 @@ describe('sendTextMessage offline → queued', () => {
     const t = new FakeTransport();
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `queued-row-${++dbCounter}` },
+      cache: { enabled: true, db: new CacheDB(`queued-row-${++dbCounter}`) },
     });
 
     await client.sendTextMessage({ ...SAMPLE_INPUT, local_message_id: '9007199254740992' });
@@ -159,7 +160,7 @@ describe('sendTextMessage offline → queued', () => {
     const t = new FakeTransport();
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `no-wire-${++dbCounter}` },
+      cache: { enabled: true, db: new CacheDB(`no-wire-${++dbCounter}`) },
     });
 
     await client.sendTextMessage({ ...SAMPLE_INPUT, local_message_id: '9007199254740993' });
@@ -188,7 +189,7 @@ describe('sendTextMessage online → transport throw → queued', () => {
     client = new PrivchatClient({
       transport: t,
       defaultTimeoutMs: 60,
-      cache: { enabled: true, dbName: `transient-2-${dbCounter}` },
+      cache: { enabled: true, db: new CacheDB(`transient-2-${dbCounter}`) },
     });
     await client.connect();
     await client.authenticate('1', 'tok', 'dev');

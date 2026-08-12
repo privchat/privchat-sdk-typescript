@@ -1,6 +1,6 @@
 // Cache module public surface.
+export type { CacheDB } from './indexeddb-store.js';
 export {
-  CacheDB,
   clearAll,
   clearChannelMessages,
   deleteFriendships,

@@ -1,7 +1,7 @@
 {
   "name": "@privchat/sdk",
   "version": "0.1.0-alpha.0",
-  "description": "TypeScript SDK for PrivChat — typed FlatBuffers protocol on top of @msgtrans/client",
+  "description": "TypeScript SDK for PrivChat \u2014 typed FlatBuffers protocol on top of @msgtrans/client",
   "type": "module",
   "private": true,
   "main": "./dist/index.js",
@@ -10,6 +10,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./cache-idb": {
+      "types": "./dist/cache-idb.d.ts",
+      "import": "./dist/cache-idb.js"
     }
   },
   "files": [
@@ -54,5 +58,15 @@
     "instant-messaging",
     "flatbuffers",
     "websocket"
-  ]
+  ],
+  "sideEffects": [
+    "./dist/api-methods.js"
+  ],
+  "typesVersions": {
+    "*": {
+      "cache-idb": [
+        "./dist/cache-idb.d.ts"
+      ]
+    }
+  }
 }

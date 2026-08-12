@@ -3,8 +3,8 @@
 // against fake-indexeddb so persistence is observable.
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { CacheDB } from '../../src/cache-idb.js';
 import {
-  CacheDB,
   deleteOutboxEntry,
   getOutboxByLocalMessageId,
   getOutboxEntry,

@@ -8,9 +8,9 @@
 // conversation ends up rendering in two orders.
 
 import { readFileSync } from 'node:fs';
+import { CacheDB } from '../../src/cache-idb.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  CacheDB,
   getMessageWindow,
   upsertMessages,
 } from '../../src/cache/indexeddb-store.js';

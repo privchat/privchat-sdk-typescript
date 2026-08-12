@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CacheDB } from '../../src/cache-idb.js';
 import { Packet, PacketType } from '@msgtrans/client';
 import {
   CacheDisabledError,
@@ -10,7 +11,7 @@ import {
 } from '../../src/index.js';
 import { FakeTransport } from './fake-transport.js';
 import { uniqueDbName } from './unique-db.js';
-import { CacheDB, upsertChannels } from '../../src/cache/index.js';
+import { upsertChannels } from '../../src/cache/index.js';
 
 let client: PrivchatClient | null = null;
 
@@ -118,7 +119,7 @@ describe('cache opt-in plumbing', () => {
   it('isCacheEnabled = true when constructor opts in', () => {
     client = new PrivchatClient({
       transport: new FakeTransport(),
-      cache: { enabled: true, dbName: uniqueDbName('test') },
+      cache: { enabled: true, db: new CacheDB(uniqueDbName('test')) },
     });
     expect(client.isCacheEnabled()).toBe(true);
   });
@@ -148,7 +149,7 @@ describe('bootstrapChannels', () => {
     };
     client = new PrivchatClient({
       transport: offline,
-      cache: { enabled: true, dbName },
+      cache: { enabled: true, db: new CacheDB(dbName) },
     });
 
     await expect(client.bootstrapChannels()).rejects.toThrow('offline');
@@ -203,7 +204,7 @@ describe('bootstrapChannels', () => {
 
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: uniqueDbName('bootstrap') },
+      cache: { enabled: true, db: new CacheDB(uniqueDbName('bootstrap')) },
     });
     const channels = await client.bootstrapChannels();
 
@@ -267,7 +268,7 @@ describe('bootstrapChannels', () => {
     };
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: uniqueDbName('local-preview') },
+      cache: { enabled: true, db: new CacheDB(uniqueDbName('local-preview')) },
     });
 
     const channels = await client.bootstrapChannels();
@@ -323,7 +324,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName },
+      cache: { enabled: true, db: new CacheDB(dbName) },
     });
 
     const channels = await client.bootstrapChannels();
@@ -361,7 +362,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: uniqueDbName('flags-consume') },
+      cache: { enabled: true, db: new CacheDB(uniqueDbName('flags-consume')) },
     });
     const channels = await client.bootstrapChannels();
     expect(channels.find((c) => c.channel_id === '12345')).toMatchObject({
@@ -408,7 +409,7 @@ describe('bootstrapChannels', () => {
       ],
       cursorItems: [],
     });
-    client = new PrivchatClient({ transport: t, cache: { enabled: true, dbName } });
+    client = new PrivchatClient({ transport: t, cache: { enabled: true, db: new CacheDB(dbName) } });
     const channels = await client.bootstrapChannels();
     expect(channels[0]).toMatchObject({ pinned: true, muted: true, hidden: false });
   });
@@ -437,7 +438,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: uniqueDbName('replay-preview') },
+      cache: { enabled: true, db: new CacheDB(uniqueDbName('replay-preview')) },
     });
     const channels = await client.bootstrapChannels();
     expect(channels[0]?.last_message_preview).toBeUndefined();
@@ -522,7 +523,7 @@ describe('bootstrapChannels', () => {
 
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: uniqueDbName('peer-baseline') },
+      cache: { enabled: true, db: new CacheDB(uniqueDbName('peer-baseline')) },
     });
     // Pretend we authenticated as 555. The lastAuth.user_id field is
     // what the bucket-routing logic compares against.
@@ -568,7 +569,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: uniqueDbName('legacy') },
+      cache: { enabled: true, db: new CacheDB(uniqueDbName('legacy')) },
     });
     const channels = await client.bootstrapChannels();
     const ch = channels[0]!;
@@ -624,7 +625,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: uniqueDbName('r2a-bootstrap') },
+      cache: { enabled: true, db: new CacheDB(uniqueDbName('r2a-bootstrap')) },
     });
     await client.bootstrapChannels();
     // bootstrap kicks profile sync as fire-and-forget; let it settle.
@@ -663,7 +664,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: uniqueDbName('r2a-fail') },
+      cache: { enabled: true, db: new CacheDB(uniqueDbName('r2a-fail')) },
     });
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -718,7 +719,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: uniqueDbName('r2-1-bootstrap') },
+      cache: { enabled: true, db: new CacheDB(uniqueDbName('r2-1-bootstrap')) },
     });
     await client.bootstrapChannels();
     await new Promise((r) => setTimeout(r, 30));
@@ -758,7 +759,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: uniqueDbName('r2-1-tombstone') },
+      cache: { enabled: true, db: new CacheDB(uniqueDbName('r2-1-tombstone')) },
     });
     await client.bootstrapChannels();
     await new Promise((r) => setTimeout(r, 30));
@@ -812,7 +813,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: uniqueDbName('r2-1-fail') },
+      cache: { enabled: true, db: new CacheDB(uniqueDbName('r2-1-fail')) },
     });
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -835,7 +836,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: uniqueDbName('r2a-observe') },
+      cache: { enabled: true, db: new CacheDB(uniqueDbName('r2a-observe')) },
     });
     let userSnapshot = -1;
     let groupSnapshot = -1;
@@ -864,7 +865,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: uniqueDbName('obs') },
+      cache: { enabled: true, db: new CacheDB(uniqueDbName('obs')) },
     });
     let snapshot: number | null = null;
     client.observeChannelList((channels) => {
@@ -894,7 +895,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: uniqueDbName('tomb') },
+      cache: { enabled: true, db: new CacheDB(uniqueDbName('tomb')) },
     });
     const channels = await client.bootstrapChannels();
     expect(channels.map((c) => c.channel_id)).toEqual(['1']);
@@ -914,7 +915,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: uniqueDbName('type') },
+      cache: { enabled: true, db: new CacheDB(uniqueDbName('type')) },
     });
     const channels = await client.bootstrapChannels();
     expect(channels[0]!.channel_type).toBe(5);
@@ -938,7 +939,7 @@ describe('bootstrapChannels', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: uniqueDbName('cached') },
+      cache: { enabled: true, db: new CacheDB(uniqueDbName('cached')) },
     });
     expect(client.cachedChannels()).toEqual([]);
     await client.bootstrapChannels();
@@ -980,7 +981,7 @@ describe('bootstrapChannels in-flight coalescing (P0-12 storm control)', () => {
 
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: uniqueDbName('coalesce') },
+      cache: { enabled: true, db: new CacheDB(uniqueDbName('coalesce')) },
     });
     await client.connect();
 

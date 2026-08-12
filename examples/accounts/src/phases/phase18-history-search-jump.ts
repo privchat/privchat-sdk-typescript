@@ -8,7 +8,8 @@
 //      （contract §6：around 完整消息落库；search snippet 决不落库）；
 //   4. 非成员 charlie GLOBAL 搜索同一关键词必须零命中（§4 EXISTS 成员过滤）。
 
-import { PrivchatClient } from '@privchat/sdk';
+import { PrivchatClient } from '../../../../src/index.js';
+import { CacheDB } from '../../../../src/cache-idb.js';
 import { DIRECT_SYNC_CHANNEL_TYPE, type MultiAccountManager } from '../account-manager.js';
 import { emptyMetrics, type PhaseResult } from '../types.js';
 
@@ -73,7 +74,7 @@ export async function phase18_history_search_jump(
     url,
     defaultTimeoutMs: 30_000,
     reconnect: { enabled: false },
-    cache: { enabled: true, dbName: `phase18-${Date.now()}` },
+    cache: { enabled: true, db: new CacheDB(`phase18-${Date.now()}`) },
   });
   try {
     await cacheClient.connect();

@@ -12,6 +12,7 @@
 //     leaves bob, but the group still exists and alice/charlie are
 //     still members.
 
+import { CacheDB } from '../../../../src/cache-idb.js';
 import {
   PrivchatClient,
   type PrivchatClientOptions,
@@ -45,7 +46,7 @@ export async function phase16_profile_cache(
     url,
     defaultTimeoutMs: 30_000,
     reconnect: { enabled: false },
-    cache: { enabled: true, dbName: `phase16-${Date.now()}` },
+    cache: { enabled: true, db: new CacheDB(`phase16-${Date.now()}`) },
   };
   const alice = new PrivchatClient(opts);
 

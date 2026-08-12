@@ -1,4 +1,5 @@
 // Phase 5C-1f: end-to-end persistence + cold-restart of the outbox.
+import { CacheDB } from '../../../../src/cache-idb.js';
 //
 // Flow (matches the spec test plan exactly):
 //   1. alice1: cache-enabled client, dbName captured for the cold restart.
@@ -71,7 +72,7 @@ export async function phase14_outbox(
     url,
     defaultTimeoutMs: 30_000,
     reconnect: { enabled: false },
-    cache: { enabled: true, dbName },
+    cache: { enabled: true, db: new CacheDB(dbName) },
   });
 
   let queued: SendTextOperationResult;
@@ -142,7 +143,7 @@ export async function phase14_outbox(
     url,
     defaultTimeoutMs: 30_000,
     reconnect: { enabled: false },
-    cache: { enabled: true, dbName },
+    cache: { enabled: true, db: new CacheDB(dbName) },
   });
 
   try {

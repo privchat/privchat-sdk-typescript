@@ -60,13 +60,12 @@ export type {
   UserRecord,
 } from './cache/index.js';
 export { pushToMessageRecord } from './cache/index.js';
-// R7.2b: re-exported so hosts can open the same Dexie schema
-// outside the client (e.g. for an account-level DB migration).
-// The schema definition is internal to CacheDB; consumers should
-// only `new CacheDB(name).open()` / `.close()` / iterate `.tables`,
-// not write through it directly (write paths go through the
-// regular client APIs).
-export { CacheDB } from './cache/index.js';
+// The CacheDB VALUE (and dexie with it) is deliberately NOT on the main
+// entry: persistence is an explicit choice. Construct it via
+//   import { CacheDB } from '@privchat/sdk/cache-idb'
+// and inject through `PrivchatClientOptions.cache.db`. A consumer that
+// never enables the cache no longer ships IndexedDB machinery at all.
+export type { CacheDB } from './cache/index.js';
 
 // ----- Sync engine (Phase 5B-1) -----
 export type { SyncResult, SyncStatus } from './sync-engine.js';

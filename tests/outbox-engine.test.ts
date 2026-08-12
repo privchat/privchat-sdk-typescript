@@ -4,8 +4,8 @@
 // state-skipping and FIFO ordering.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CacheDB } from '../src/cache-idb.js';
 import {
-  CacheDB,
   MessageStore,
   getMessageWindow,
   getOutboxEntry,

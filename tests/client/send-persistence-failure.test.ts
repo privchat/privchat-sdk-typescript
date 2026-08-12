@@ -51,7 +51,8 @@ const {
   decodeRpcRequest,
   encodeRpcResponse,
 } = await import('../../src/index.js');
-const { CacheDB, ensureCacheOwner, upsertChannels } = await import(
+const { CacheDB } = await import('../../src/cache-idb.js');
+const { ensureCacheOwner, upsertChannels } = await import(
   '../../src/cache/index.js'
 );
 const { FakeTransport } = await import('./fake-transport.js');
@@ -129,7 +130,7 @@ beforeEach(async () => {
 
   client = new PrivchatClient({
     transport: transport(),
-    cache: { enabled: true, dbName },
+    cache: { enabled: true, db: new CacheDB(dbName) },
   });
   await client.connect();
   await client.authenticate('999', 'tok', 'dev');

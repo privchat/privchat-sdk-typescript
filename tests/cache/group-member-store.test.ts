@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { CacheDB } from '../../src/cache-idb.js';
 import 'fake-indexeddb/auto';
-import { CacheDB } from '../../src/cache/indexeddb-store.js';
 import {
   advanceGroupMemberWatermark,
   countGroupMembers,

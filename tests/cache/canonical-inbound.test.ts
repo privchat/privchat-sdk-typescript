@@ -188,7 +188,8 @@ describe('canonical inbound projection', () => {
 // 于是 history 的 .317 仍会被后到的 push 覆盖成 .000 —— 正是本轮声称已修的事故。
 describe('send-time precision survives persistence', () => {
   it('a seconds-precision push never coarsens a stored millisecond time', async () => {
-    const { CacheDB, upsertMessages, getMessageWindow } = await import(
+    const { CacheDB } = await import('../../src/cache-idb.js');
+    const { upsertMessages, getMessageWindow } = await import(
       '../../src/cache/indexeddb-store.js'
     );
     const db = new CacheDB(`precision-${Date.now()}-${Math.random()}`);

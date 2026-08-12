@@ -30,7 +30,7 @@ import {
   readGroupMemberPage,
   type GroupMemberRecord,
   type GroupMemberView,
-  CacheDB,
+  type CacheDB,
   FriendshipStore,
   GroupStore,
   MessageStore,
@@ -209,8 +209,18 @@ export interface PrivchatClientOptions
 
 export interface CacheOptions {
   enabled?: boolean;
-  /** IndexedDB database name (default 'privchat'). */
-  dbName?: string;
+  /**
+   * The IndexedDB persistence handle. REQUIRED when `enabled` — construct
+   * it via the `@privchat/sdk/cache-idb` subpath:
+   *
+   *   import { CacheDB } from '@privchat/sdk/cache-idb';
+   *   new PrivchatClient({ cache: { enabled: true, db: new CacheDB('privchat') } })
+   *
+   * Injection (rather than a `dbName` the client constructs from) is what
+   * keeps dexie OFF the main entry: a consumer that never enables the cache
+   * no longer ships ~31 KB gz of IndexedDB machinery it cannot use.
+   */
+  db?: CacheDB;
 }
 
 export interface OutboxOptions extends OutboxEngineConfig {
@@ -806,7 +816,15 @@ export class PrivchatClient {
     };
 
     if (cache?.enabled) {
-      this.cacheDb = new CacheDB(cache.dbName ?? 'privchat');
+      if (!cache.db) {
+        throw new Error(
+          "cache.enabled requires cache.db: import { CacheDB } from " +
+            "'@privchat/sdk/cache-idb' and pass `db: new CacheDB(name)`. " +
+            'Persistence is injected so consumers without a cache do not ' +
+            'bundle IndexedDB machinery.',
+        );
+      }
+      this.cacheDb = cache.db;
       this.cacheStore = new MessageStore();
       this.userStore = new UserStore();
       this.groupStore = new GroupStore();

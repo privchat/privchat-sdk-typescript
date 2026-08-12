@@ -8,9 +8,9 @@
 // exactly once.
 
 import Dexie from 'dexie';
+import { CacheDB } from '../../src/cache-idb.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  CacheDB,
   ServerMessageIdConflictError,
   getChannelOrderMode,
   getMessageWindow,

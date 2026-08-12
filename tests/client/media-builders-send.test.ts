@@ -12,6 +12,7 @@
 // field is satisfied by omitting it.
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { CacheDB } from '../../src/cache-idb.js';
 import {
   PrivchatClient,
   buildSendFileInput,
@@ -109,7 +110,7 @@ describe.each(builders)('buildSend%sInput reaches the durable outbox', (kind, bu
 
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `media-builder-${kind}-${++dbCounter}` },
+      cache: { enabled: true, db: new CacheDB(`media-builder-${kind}-${++dbCounter}`) },
     });
     const input = build(`lid-${kind}`);
     const result = await client.sendTextMessage(input);

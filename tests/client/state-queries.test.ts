@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { CacheDB } from '../../src/cache-idb.js';
 import {
   decodeRpcRequest,
   encodeAuthorizationResponse,
@@ -79,7 +80,7 @@ describe('connectionState() / sessionSnapshot() / currentAccessToken()', () => {
     };
     const client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: uniqueDbName('readiness') },
+      cache: { enabled: true, db: new CacheDB(uniqueDbName('readiness')) },
     });
     const ready = new Promise<void>((resolve) => {
       client.onSyncReadinessChanged((event) => {

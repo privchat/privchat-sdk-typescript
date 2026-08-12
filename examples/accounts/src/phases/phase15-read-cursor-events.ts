@@ -15,6 +15,7 @@
 // Phase 5D unit tests cover the merge / suppress / channel-type
 // guard logic; this phase locks the wire-to-event handoff.
 
+import { CacheDB } from '../../../../src/cache-idb.js';
 import {
   PrivchatClient,
   type PeerReadCursorUpdatedEvent,
@@ -67,7 +68,7 @@ export async function phase15_read_cursor_events(
     url,
     defaultTimeoutMs: 30_000,
     reconnect: { enabled: false },
-    cache: { enabled: true, dbName: `phase15-${Date.now()}` },
+    cache: { enabled: true, db: new CacheDB(`phase15-${Date.now()}`) },
   });
 
   try {

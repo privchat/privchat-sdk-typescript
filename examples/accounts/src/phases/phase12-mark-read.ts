@@ -14,6 +14,7 @@
 // `message/history/get` does NOT carry pts (only snowflake message_id).
 
 import { PrivchatClient } from '../../../../src/index.js';
+import { CacheDB } from '../../../../src/cache-idb.js';
 import {
   DIRECT_SYNC_CHANNEL_TYPE,
   type MultiAccountManager,
@@ -60,7 +61,7 @@ export async function phase12_mark_read(
     url,
     defaultTimeoutMs: 30_000,
     reconnect: { enabled: false },
-    cache: { enabled: true, dbName: `phase12-${Date.now()}` },
+    cache: { enabled: true, db: new CacheDB(`phase12-${Date.now()}`) },
   });
 
   try {

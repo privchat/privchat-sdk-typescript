@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { CacheDB } from '../../src/cache-idb.js';
 import {
   PrivchatClient,
   decodeRpcRequest,
@@ -66,7 +67,7 @@ const fakeMsg = (id: number, content = `m${id}`): FakeMsg => ({
 const newClient = (transport: FakeTransport) => {
   client = new PrivchatClient({
     transport,
-    cache: { enabled: true, dbName: `conv-${++dbCounter}` },
+    cache: { enabled: true, db: new CacheDB(`conv-${++dbCounter}`) },
   });
   return client;
 };

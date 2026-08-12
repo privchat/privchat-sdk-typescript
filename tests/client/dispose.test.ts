@@ -5,6 +5,7 @@
 // bridge) call when their tab/window/process is going away.
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { CacheDB } from '../../src/cache-idb.js';
 import {
   PrivchatClient,
   encodeAuthorizationResponse,
@@ -117,7 +118,7 @@ describe('client.dispose()', () => {
     t.responder = () => encodeAuthorizationResponse({ success: true });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `dispose-obs-${++dbCounter}` },
+      cache: { enabled: true, db: new CacheDB(`dispose-obs-${++dbCounter}`) },
     });
 
     // Resolve when the initial snapshot fires — avoids a fixed-timeout
@@ -148,7 +149,7 @@ describe('client.dispose()', () => {
     const dbName = `dispose-dexie-${++dbCounter}`;
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName },
+      cache: { enabled: true, db: new CacheDB(dbName) },
     });
     // Force IDB to be open (Dexie opens lazily on first access).
     await client.outboxEntries();
@@ -169,7 +170,7 @@ describe('client.dispose()', () => {
     const dbName = `dispose-persist-${++dbCounter}`;
     const c1 = new PrivchatClient({
       transport: t1,
-      cache: { enabled: true, dbName },
+      cache: { enabled: true, db: new CacheDB(dbName) },
     });
     const queued = await c1.sendTextMessage({
       channel_id: '100',
@@ -187,7 +188,7 @@ describe('client.dispose()', () => {
     const t2 = new FakeTransport();
     client = new PrivchatClient({
       transport: t2,
-      cache: { enabled: true, dbName },
+      cache: { enabled: true, db: new CacheDB(dbName) },
     });
     const rows = await client.outboxEntries();
     expect(rows).toHaveLength(1);

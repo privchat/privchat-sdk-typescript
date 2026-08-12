@@ -16,6 +16,7 @@
 // and a test using small ids cannot see it.
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { CacheDB } from '../../src/cache-idb.js';
 import {
   PrivchatClient,
   decodeRpcRequest,
@@ -97,7 +98,7 @@ describe('message_rehydrate repair', () => {
 
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `rehydrate-${++dbCounter}` },
+      cache: { enabled: true, db: new CacheDB(`rehydrate-${++dbCounter}`) },
     });
     await client.connect();
     await client.authenticate('1', 'tok', 'dev');

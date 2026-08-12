@@ -1,6 +1,6 @@
 import Dexie from 'dexie';
+import { CacheDB } from '../../src/cache-idb.js';
 import { afterEach, describe, expect, it } from 'vitest';
-import { CacheDB } from '../../src/cache/indexeddb-store.js';
 import { getOutboxEntry } from '../../src/cache/outbox-store.js';
 
 /**

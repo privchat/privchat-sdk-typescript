@@ -7,6 +7,7 @@
 // through the local cache without any extra dance.
 
 import { PrivchatClient } from '../../../../src/index.js';
+import { CacheDB } from '../../../../src/cache-idb.js';
 import type { MultiAccountManager } from '../account-manager.js';
 import { emptyMetrics, type PhaseResult } from '../types.js';
 
@@ -39,7 +40,7 @@ export async function phase17_friendship_cache(
     url,
     defaultTimeoutMs: 30_000,
     reconnect: { enabled: false },
-    cache: { enabled: true, dbName: `phase17-${Date.now()}` },
+    cache: { enabled: true, db: new CacheDB(`phase17-${Date.now()}`) },
   });
 
   try {

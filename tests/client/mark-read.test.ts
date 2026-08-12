@@ -1,6 +1,7 @@
 // Phase 5A: client.markRead + read-cursor system push absorption.
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CacheDB } from '../../src/cache-idb.js';
 import { Packet, PacketType } from '@msgtrans/client';
 import {
   MarkReadValidationError,
@@ -107,7 +108,7 @@ function buildFake(opts: {
 const newClient = (transport: FakeTransport, withCache: boolean) => {
   client = new PrivchatClient({
     transport,
-    cache: withCache ? { enabled: true, dbName: `mr-${++dbCounter}` } : undefined,
+    cache: withCache ? { enabled: true, db: new CacheDB(`mr-${++dbCounter}`) } : undefined,
   });
   return client;
 };

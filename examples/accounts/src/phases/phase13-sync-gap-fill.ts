@@ -19,6 +19,7 @@
 //      unread_count is bumped by N.
 
 import { PrivchatClient, type SendTextOperationResult } from '../../../../src/index.js';
+import { CacheDB } from '../../../../src/cache-idb.js';
 import {
   DIRECT_SYNC_CHANNEL_TYPE,
   type MultiAccountManager,
@@ -78,7 +79,7 @@ export async function phase13_sync_gap_fill(
     defaultTimeoutMs: 30_000,
     // Fast backoff: we want the reconnect cycle to fire quickly under test.
     reconnect: { enabled: true, initialDelayMs: 100, maxDelayMs: 100, multiplier: 1 },
-    cache: { enabled: true, dbName: `phase13-${Date.now()}` },
+    cache: { enabled: true, db: new CacheDB(`phase13-${Date.now()}`) },
   });
 
   try {

@@ -1,6 +1,7 @@
 import Dexie from 'dexie';
+import { CacheDB } from '../../src/cache-idb.js';
 import { afterEach, describe, expect, it } from 'vitest';
-import { CacheDB, getMessageWindow } from '../../src/cache/indexeddb-store.js';
+import { getMessageWindow } from '../../src/cache/indexeddb-store.js';
 
 /**
  * v10 backfill (CONVERSATION_DEPENDENCY_READINESS §3.3).

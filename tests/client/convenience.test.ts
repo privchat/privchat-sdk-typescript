@@ -1,6 +1,7 @@
 // Layer-2 Rust-style convenience wrappers.
 
 import { describe, expect, it } from 'vitest';
+import { CacheDB } from '../../src/cache-idb.js';
 import {
   AuthIdentityMismatchError,
   AuthorizationError,
@@ -20,7 +21,6 @@ import {
 } from '../../src/index.js';
 import { FakeTransport } from './fake-transport.js';
 import {
-  CacheDB,
   ensureCacheOwner,
   getCacheOwner,
   upsertChannels,
@@ -143,7 +143,7 @@ describe('authenticate', () => {
     });
     const ownedClient = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName },
+      cache: { enabled: true, db: new CacheDB(dbName) },
     });
 
     await ownedClient.authenticate('100000028', 'tok-28', 'dev-28');

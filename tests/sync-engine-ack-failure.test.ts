@@ -13,6 +13,7 @@
 // alongside it. Lives in its own file because `vi.mock` is module-scoped.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CacheDB } from '../src/cache-idb.js';
 
 const ackRekeyShouldFail = { value: false };
 const messageWriteShouldFail = { value: false };
@@ -39,7 +40,6 @@ vi.mock('../src/cache/index.js', async () => {
 });
 
 const {
-  CacheDB,
   MessageStore,
   getSyncState,
   upsertMessage,

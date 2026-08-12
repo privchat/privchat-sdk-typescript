@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CacheDB } from '../../src/cache-idb.js';
 import { Packet, PacketType } from '@msgtrans/client';
 import {
   MessageType,
@@ -59,7 +60,7 @@ function authPlusSendFake(
 async function newAuthedClient(transport: FakeTransport, dbName: string): Promise<PrivchatClient> {
   const c = new PrivchatClient({
     transport,
-    cache: { enabled: true, dbName },
+    cache: { enabled: true, db: new CacheDB(dbName) },
   });
   await c.connect();
   await c.authenticate('1', 'tok', 'dev');

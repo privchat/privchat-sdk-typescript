@@ -38,7 +38,8 @@ vi.mock('../src/cache/index.js', async () => {
   };
 });
 
-const { CacheDB, MessageStore, claimRepairRow, getOutboxEntry, putOutboxEntry } =
+const { CacheDB } = await import('../src/cache-idb.js');
+const { MessageStore, claimRepairRow, getOutboxEntry, putOutboxEntry } =
   await import('../src/cache/index.js');
 const { OutboxEngine, FROZEN_NEXT_ATTEMPT_AT } = await import('../src/outbox-engine.js');
 type OutboxEntry = import('../src/cache/index.js').OutboxEntry;

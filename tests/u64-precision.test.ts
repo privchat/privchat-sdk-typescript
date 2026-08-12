@@ -8,6 +8,7 @@
 // represent them as numbers, which is exactly the bug.
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { CacheDB } from '../src/cache-idb.js';
 import { Packet, PacketType } from '@msgtrans/client';
 import {
   PrivchatClient,
@@ -119,7 +120,7 @@ describe('u64 precision — read-cursor push (previously raw JSON.parse)', () =>
     const t = buildFake();
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `u64-${++dbCounter}` },
+      cache: { enabled: true, db: new CacheDB(`u64-${++dbCounter}`) },
     });
     await client.bootstrapChannels();
 

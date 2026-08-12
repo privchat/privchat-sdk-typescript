@@ -4,6 +4,7 @@
 // behaviour itself is exercised in `tests/outbox-engine.test.ts`.
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { CacheDB } from '../../src/cache-idb.js';
 import {
   CacheDisabledError,
   PrivchatClient,
@@ -60,7 +61,7 @@ function newAuthedClient(
   };
   const c = new PrivchatClient({
     transport: t,
-    cache: { enabled: true, dbName: `outbox-events-${++dbCounter}` },
+    cache: { enabled: true, db: new CacheDB(`outbox-events-${++dbCounter}`) },
     defaultTimeoutMs: options.offline ? 30 : 30_000,
   });
   client = c;
@@ -271,7 +272,7 @@ describe('outbox_state_changed event', () => {
     };
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `outbox-events-rej-${++dbCounter}` },
+      cache: { enabled: true, db: new CacheDB(`outbox-events-rej-${++dbCounter}`) },
     });
     const events: OutboxStateChangedEvent[] = [];
     client.observeEvents((env) => {
@@ -316,7 +317,7 @@ describe('outbox_drained event', () => {
     };
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `outbox-events-drained-${++dbCounter}` },
+      cache: { enabled: true, db: new CacheDB(`outbox-events-drained-${++dbCounter}`) },
     });
     const events: SdkEvent[] = [];
     client.observeEvents((env) => events.push(env.event));

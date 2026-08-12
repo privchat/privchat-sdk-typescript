@@ -17,6 +17,7 @@
 // Exit code 0 iff every run is green.
 
 import 'fake-indexeddb/auto';
+import { CacheDB } from '../../dist/cache-idb.js';
 import { randomUUID } from 'node:crypto';
 import { PrivchatClient } from '../../dist/index.js';
 
@@ -48,7 +49,7 @@ async function runOnce(i) {
   const sfx = `${Date.now() % 1e6}${i}`;
   const A = await reg('rc2a_' + sfx, {
     reconnect: { enabled: true, initialDelayMs: 100, maxDelayMs: 200, multiplier: 1.5 },
-    cache: { enabled: true, dbName: 'rc2a-' + sfx },
+    cache: { enabled: true, db: new CacheDB('rc2a-' + sfx) },
   });
   const B = await reg('rc2b_' + sfx);
 

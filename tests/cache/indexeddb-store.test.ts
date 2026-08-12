@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { CacheDB } from '../../src/cache-idb.js';
 import {
-  CacheDB,
   applyAck,
   clearAll,
   deleteMessageById,

@@ -8,6 +8,7 @@
 // moment the transport is called*, not just what exists at the end.
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { CacheDB } from '../../src/cache-idb.js';
 import {
   PrivchatClient,
   decodeRpcRequest,
@@ -16,7 +17,6 @@ import {
   encodeRpcResponse,
   encodeSendMessageResponse,
 } from '../../src/index.js';
-import { CacheDB } from '../../src/cache/index.js';
 import { FakeTransport } from './fake-transport.js';
 
 let client: PrivchatClient | null = null;
@@ -72,7 +72,7 @@ describe('command-first send', () => {
 
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName },
+      cache: { enabled: true, db: new CacheDB(dbName) },
     });
     await client.connect();
     await client.authenticate('999', 'tok', 'dev');
@@ -112,7 +112,7 @@ describe('command-first send', () => {
       if (pkt.bizType === 1) return encodeAuthorizationResponse({ success: true });
       return undefined;
     };
-    client = new PrivchatClient({ transport: t, cache: { enabled: true, dbName } });
+    client = new PrivchatClient({ transport: t, cache: { enabled: true, db: new CacheDB(dbName) } });
     // Deliberately not authenticated: the offline gate must produce the same
     // durable pair as the online path, since it is the same write.
     const result = await client.sendTextMessage({
@@ -158,7 +158,7 @@ describe('command-first send', () => {
       }
       return undefined;
     };
-    client = new PrivchatClient({ transport: t, cache: { enabled: true, dbName } });
+    client = new PrivchatClient({ transport: t, cache: { enabled: true, db: new CacheDB(dbName) } });
     await client.connect();
     await client.authenticate('999', 'tok', 'dev');
 

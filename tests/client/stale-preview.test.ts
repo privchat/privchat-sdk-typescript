@@ -12,6 +12,7 @@
 // 来自哪条消息（last_message_pts），然后按 pts 比较。
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { CacheDB } from '../../src/cache-idb.js';
 import { Packet, PacketType } from '@msgtrans/client';
 import {
   MessageType,
@@ -21,7 +22,7 @@ import {
   decodeRpcRequest,
   encodeRpcResponse,
 } from '../../src/index.js';
-import { CacheDB, ensureCacheOwner, upsertChannels } from '../../src/cache/index.js';
+import { ensureCacheOwner, upsertChannels } from '../../src/cache/index.js';
 import { FakeTransport } from './fake-transport.js';
 
 let client: PrivchatClient | null = null;
@@ -88,7 +89,7 @@ describe('conversation preview ownership', () => {
     seed.close();
 
     const t = transport();
-    client = new PrivchatClient({ transport: t, cache: { enabled: true, dbName } });
+    client = new PrivchatClient({ transport: t, cache: { enabled: true, db: new CacheDB(dbName) } });
     await client.connect();
     await client.authenticate('100000028', 'tok', 'dev');
     // 把持久化的频道读进内存 store（RPC 这边返回空，频道来自本地缓存）。

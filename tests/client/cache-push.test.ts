@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { CacheDB } from '../../src/cache-idb.js';
 import { Packet, PacketType } from '@msgtrans/client';
 import {
   MessageType,
@@ -59,7 +60,7 @@ describe('inbound push → cache absorption', () => {
     const t = new FakeTransport();
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `push-${++dbCounter}` },
+      cache: { enabled: true, db: new CacheDB(`push-${++dbCounter}`) },
     });
 
     const patches: ConversationPatch[] = [];
@@ -89,7 +90,7 @@ describe('inbound push → cache absorption', () => {
     const t = new FakeTransport();
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `batch-${++dbCounter}` },
+      cache: { enabled: true, db: new CacheDB(`batch-${++dbCounter}`) },
     });
     const seen: Array<string | undefined> = [];
     client.observeConversation('12345', 1, (_, p) => {
@@ -122,7 +123,7 @@ describe('inbound push → cache absorption', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `promote-${++dbCounter}` },
+      cache: { enabled: true, db: new CacheDB(`promote-${++dbCounter}`) },
     });
     // Authenticate as alice (not the sender) so unread bumps
     await client.connect();
@@ -158,7 +159,7 @@ describe('inbound push → cache absorption', () => {
     });
     client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `self-${++dbCounter}` },
+      cache: { enabled: true, db: new CacheDB(`self-${++dbCounter}`) },
     });
     await client.connect();
     setupAuthOk(t);

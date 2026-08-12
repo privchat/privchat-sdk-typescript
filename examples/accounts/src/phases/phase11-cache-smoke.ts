@@ -6,6 +6,7 @@
 // accounts E2E (phases 1–10) keeps proving the no-cache path stays clean.
 
 import { PrivchatClient, type ConversationPatch } from '../../../../src/index.js';
+import { CacheDB } from '../../../../src/cache-idb.js';
 import { type MultiAccountManager, DIRECT_SYNC_CHANNEL_TYPE } from '../account-manager.js';
 import { emptyMetrics, type PhaseResult } from '../types.js';
 
@@ -38,7 +39,7 @@ export async function phase11_cache_smoke(
     url,
     defaultTimeoutMs: 30_000,
     reconnect: { enabled: false },
-    cache: { enabled: true, dbName: `phase11-${Date.now()}` },
+    cache: { enabled: true, db: new CacheDB(`phase11-${Date.now()}`) },
   });
 
   try {

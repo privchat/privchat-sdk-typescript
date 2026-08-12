@@ -1,6 +1,7 @@
 // Auto-reconnect: replay last authenticate + re-subscribe channels.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CacheDB } from '../../src/cache-idb.js';
 import {
   encodeAuthorizationResponse,
   encodeSubscribeResponse,
@@ -235,7 +236,7 @@ describe('reconnect → syncOnReconnect', () => {
     };
     const client = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `reconnect-sync-${++dbCounter}` },
+      cache: { enabled: true, db: new CacheDB(`reconnect-sync-${++dbCounter}`) },
       reconnect: { enabled: true, initialDelayMs: 50, maxDelayMs: 50, multiplier: 1 },
     });
     return { t, client };
@@ -405,7 +406,7 @@ describe('reconnect → flushOutboxOnReconnect', () => {
     };
     const c = new PrivchatClient({
       transport: t,
-      cache: { enabled: true, dbName: `reconnect-flush-${++dbCounter}` },
+      cache: { enabled: true, db: new CacheDB(`reconnect-flush-${++dbCounter}`) },
       reconnect: { enabled: true, initialDelayMs: 50, maxDelayMs: 50, multiplier: 1 },
     });
     return { t, client: c };

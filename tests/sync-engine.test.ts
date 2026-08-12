@@ -8,7 +8,8 @@
 // accounts E2E (5B-1e).
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CacheDB, MessageStore } from '../src/cache/index.js';
+import { CacheDB } from '../src/cache-idb.js';
+import { MessageStore } from '../src/cache/index.js';
 import {
   SyncEngine,
   SyncRpcError,
