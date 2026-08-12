@@ -136,9 +136,13 @@ export async function sealAttachment(
   plaintext: Uint8Array,
 ): Promise<SealedAttachment> {
   const { blob, cek } = await encryptAttachment(plaintext);
-  const digest = await crypto.subtle.digest('SHA-256', blob.slice().buffer as ArrayBuffer);
-  const sha256 = Array.from(new Uint8Array(digest))
+  return { blob, cek, sha256: await sha256Hex(blob) };
+}
+
+/** 秒传判重用的摘要口径：对**最终上传的字节**算 SHA-256，hex 小写。 */
+export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', bytes.slice().buffer as ArrayBuffer);
+  return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
-  return { blob, cek, sha256 };
 }

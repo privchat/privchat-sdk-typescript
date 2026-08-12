@@ -229,6 +229,25 @@ export interface FileGetUrlRequest {
   file_id: number;
 }
 
+/** 一份下载下来的附件：明文、**服务端存的那串密文**、以及它是什么。
+ *
+ * 🔴 `sealed` 与「转发」无关——它是这份内容当前的封装结果。再发一次同一份内容时，
+ * 普通上传路径拿它去预检就能秒传；重新封装会产出另一串字节，按定义就是另一个
+ * 物理文件。只有与服务端 `sha256` 核对一致时才有值。
+ */
+export interface DownloadedAttachment {
+  /** 解密后的明文，可直接预览/播放。 */
+  blob: Blob;
+  /** 服务端存的密文原样（已核对摘要）。老记录没有摘要时为 undefined。 */
+  sealed?: { blob: Blob; cek: string; sha256: string };
+  /** 服务端记录的原始文件名。 */
+  originalFilename?: string;
+  /** 服务端记录的 MIME。 */
+  mimeType?: string;
+  /** 服务端记录的类型：只用来决定消息类型，**不能拿来猜扩展名**。 */
+  fileType?: 'image' | 'video' | 'voice' | 'file' | 'other';
+}
+
 export interface FileGetUrlResponse {
   /** 服务端对**已存储字节**算出的 SHA-256。
    *

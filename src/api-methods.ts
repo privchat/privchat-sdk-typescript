@@ -17,9 +17,10 @@ import {
   encodeMessagePayloadEnvelope,
   type MessageMetadata,
 } from './codec/payload.js';
-import { decryptDownloadedAttachment, sealAttachment, type SealedAttachment } from './attachment-crypto.js';
+import { decryptDownloadedAttachment, sealAttachment, sha256Hex, type SealedAttachment } from './attachment-crypto.js';
 import { Routes } from './routes.js';
 import type {
+  DownloadedAttachment,
   AccountSearchQueryRequest,
   AccountSearchResponse,
   BlacklistAddResponse,
@@ -300,6 +301,17 @@ declare module './client.js' {
      *  fetch 密文 blob → WebCrypto 解密 → 返回明文 `Blob`（带 mime）。
      *  v0（legacy 明文）直接 fetch signed_url 返回。**CEK 不进 URL/日志。**
      *  图片预览用 `URL.createObjectURL(blob)`，不能 `img.src = cdnUrl`（CDN 是密文）。 */
+    /** 下载一份附件，并把「它是什么」和**服务端存的那串密文**一并带回。
+     *
+     *  🔴 `sealed` 不是转发专用的东西：它就是这份内容当前的封装结果。再发一次
+     *  同一份内容时，普通上传路径直接拿它去预检就能秒传；重新封装会用新的随机
+     *  CEK/nonce，字节一变摘要就变，命中率恒为 0。
+     *
+     *  只有与服务端 `sha256` 核对一致的密文才会出现在这里；对不上就没有，
+     *  调用方照常走重新封装。 */
+    downloadAttachmentDetailed(fileId: number): Promise<DownloadedAttachment>;
+
+    /** [downloadAttachmentDetailed] 的兼容包装，只取明文。 */
     downloadAttachmentBlob(fileId: number): Promise<Blob>;
 
     // QR_CODE_SPEC v1.3 — user qrcode（个人名片码）
@@ -744,7 +756,9 @@ proto.fileGetUrl = function (fileId) {
   return this.rpcCallTyped(Routes.file.GET_URL, { file_id: fileId });
 };
 
-proto.downloadAttachmentBlob = async function (fileId: number): Promise<Blob> {
+proto.downloadAttachmentDetailed = async function (
+  fileId: number,
+): Promise<DownloadedAttachment> {
   // file_id 优先：鉴权拿 signed_url + cek（绝不依赖消息里可能过期/明文的 url）。
   const meta = await this.fileGetUrl(fileId);
   if (meta.file_url === '' ) {
@@ -761,7 +775,33 @@ proto.downloadAttachmentBlob = async function (fileId: number): Promise<Blob> {
     cipher,
   );
   // 用响应里的 mime（v1 密文 fetch 的 content-type 不可信，以 file 元信息为准）。
-  return new Blob([plaintext as BlobPart], { type: meta.mime_type || 'application/octet-stream' });
+  const mime = meta.mime_type || 'application/octet-stream';
+
+  // 🔴 密文一并带回来。再发一次同一份内容时，普通上传路径直接拿它去预检——
+  // 重新封装会用新的随机 CEK/nonce，字节一变摘要就变，秒传恒不命中。
+  //
+  // 只有**核对过摘要**的密文才交出去：服务端给的 sha256 是它存的那串字节的，
+  // 对不上说明中途被改过或响应串了，那就当没有，照常重新封装。
+  let sealed: DownloadedAttachment['sealed'];
+  if (meta.encryption_version === 1 && meta.cek != null && meta.sha256 != null) {
+    const actual = await sha256Hex(cipher);
+    if (actual === meta.sha256) {
+      sealed = { blob: new Blob([cipher as BlobPart]), cek: meta.cek, sha256: meta.sha256 };
+    }
+  }
+
+  return {
+    blob: new Blob([plaintext as BlobPart], { type: mime }),
+    sealed,
+    originalFilename: meta.original_filename || undefined,
+    mimeType: meta.mime_type || undefined,
+    fileType: (meta.file_type || undefined) as DownloadedAttachment['fileType'],
+  };
+};
+
+proto.downloadAttachmentBlob = async function (fileId: number): Promise<Blob> {
+  // 兼容包装：只取明文，其余信息给需要的调用方。
+  return (await this.downloadAttachmentDetailed(fileId)).blob;
 };
 
 // ---------- QR_CODE_SPEC v1.3 — user qrcode ----------
