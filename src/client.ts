@@ -1,9 +1,9 @@
 import {
-  PacketType,
+  ClientRequest,
   TransportClient,
+  type ClientMessage,
   type Transport,
   type TransportClientOptions,
-  type TransportContext,
 } from '@msgtrans/client';
 import { isRetryableServerCode } from './send-error.js';
 import {
@@ -879,12 +879,16 @@ export class PrivchatClient {
       this.outboxEngine = null;
     }
 
-    this.transport.on('message', (ctx) => this.handleIncoming(ctx));
+    // 0.2.0: OneWay and Request are typed apart at the transport
+    // (ClientMessage / ClientRequest); both feed the same dispatch.
+    this.transport.on('message', (msg) => this.handleIncoming(msg));
+    this.transport.on('request', (req) => this.handleIncoming(req));
     this.transport.on('close', () => this.handleTransportClose());
     // Outbound packets count as activity for the idle-heartbeat tracker;
     // an actively-sending client doesn't need synthetic pings to keep
-    // the path warm.
-    this.transport.on('messageSent', () => {
+    // the path warm. ("Enqueued", not "sent": a browser WebSocket cannot
+    // confirm a write — the transport stopped pretending it can.)
+    this.transport.on('messageEnqueued', () => {
       this.lastActivityMs = Date.now();
     });
   }
@@ -3361,13 +3365,13 @@ export class PrivchatClient {
 
   // ----- Internal: incoming dispatch -----
 
-  private handleIncoming(ctx: TransportContext): void {
+  private handleIncoming(ctx: ClientMessage | ClientRequest): void {
     // Any inbound packet is a sign of life — bump the idle-heartbeat
     // activity tracker so we don't ping a busy connection.
     this.lastActivityMs = Date.now();
     // Auto-ACK Request-typed pushes BEFORE invoking user callbacks, so a
     // throwing handler can't leave the server hanging. Mirrors Rust SDK.
-    if (ctx.packet.packetType === PacketType.Request) {
+    if (ctx instanceof ClientRequest) {
       switch (ctx.bizType) {
         case MessageType.PushMessageRequest:
           void ctx

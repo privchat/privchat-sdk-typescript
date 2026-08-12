@@ -1,7 +1,7 @@
 import {
   Packet,
   PacketType,
-  type SentInfo,
+  type EnqueuedInfo,
   type Transport,
 } from '@msgtrans/client';
 
@@ -27,7 +27,7 @@ export class FakeTransport implements Transport {
 
   private _connected = false;
   private readonly messageHandlers: Array<(p: Packet) => void> = [];
-  private readonly messageSentHandlers: Array<(info: SentInfo) => void> = [];
+  private readonly messageEnqueuedHandlers: Array<(info: EnqueuedInfo) => void> = [];
   private readonly closeHandlers: Array<(ev?: unknown) => void> = [];
   private readonly errorHandlers: Array<(e: unknown) => void> = [];
 
@@ -38,7 +38,7 @@ export class FakeTransport implements Transport {
   async send(packet: Packet): Promise<void> {
     this.sent.push(packet);
     if (this.onSendHook !== null) await this.onSendHook(packet);
-    for (const cb of this.messageSentHandlers) cb({ messageId: packet.messageId });
+    for (const cb of this.messageEnqueuedHandlers) cb({ messageId: packet.messageId });
 
     if (
       packet.packetType === PacketType.Request &&
@@ -83,8 +83,8 @@ export class FakeTransport implements Transport {
   onMessage(cb: (packet: Packet) => void): void {
     this.messageHandlers.push(cb);
   }
-  onMessageSent(cb: (info: SentInfo) => void): void {
-    this.messageSentHandlers.push(cb);
+  onMessageEnqueued(cb: (info: EnqueuedInfo) => void): void {
+    this.messageEnqueuedHandlers.push(cb);
   }
   onClose(cb: (event?: unknown) => void): void {
     this.closeHandlers.push(cb);
