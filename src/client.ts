@@ -1,7 +1,7 @@
 import {
-  ClientRequest,
   TransportClient,
   type ClientMessage,
+  type ClientRequest,
   type Transport,
   type TransportClientOptions,
 } from '@msgtrans/client';
@@ -1189,7 +1189,7 @@ export class PrivchatClient {
    * as "unexpected", and there is no other public surface that does so.
    */
   async simulateUnexpectedDisconnect(): Promise<void> {
-    await this.transport.close();
+    await this.transport.disconnect();
   }
 
   isConnected(): boolean {
@@ -3389,7 +3389,8 @@ export class PrivchatClient {
     this.lastActivityMs = Date.now();
     // Auto-ACK Request-typed pushes BEFORE invoking user callbacks, so a
     // throwing handler can't leave the server hanging. Mirrors Rust SDK.
-    if (ctx instanceof ClientRequest) {
+    // 0.5.0: handles are interfaces (non-forgeable); discriminate by kind.
+    if (ctx.kind === 'request') {
       switch (ctx.bizType) {
         case MessageType.PushMessageRequest:
           void ctx
@@ -4282,7 +4283,7 @@ export class PrivchatClient {
       // setState here — `transport.close()` → `handleTransportClose()`
       // owns the transition.
       try {
-        await this.transport.close();
+        await this.transport.disconnect();
       } catch {
         // Best-effort: even if close throws, the next inbound/outbound
         // failure will eventually trip the same path.
