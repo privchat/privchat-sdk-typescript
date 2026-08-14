@@ -29,6 +29,7 @@ describe('client.dispose()', () => {
   it('is idempotent — second call is a no-op', async () => {
     const t = new FakeTransport();
     client = new PrivchatClient({ transport: t });
+    await client.connect();
     await client.dispose();
     await client.dispose(); // must not throw
     await client.dispose();
@@ -46,6 +47,7 @@ describe('client.dispose()', () => {
     const t = new FakeTransport();
     t.responder = () => encodeAuthorizationResponse({ success: true });
     client = new PrivchatClient({ transport: t });
+    await client.connect();
 
     const states: string[] = [];
     client.observeEvents((env) => {
@@ -120,6 +122,7 @@ describe('client.dispose()', () => {
       transport: t,
       cache: { enabled: true, db: new CacheDB(`dispose-obs-${++dbCounter}`) },
     });
+    await client.connect();
 
     // Resolve when the initial snapshot fires — avoids a fixed-timeout
     // race when the IndexedDB has migrations to run on first open.
@@ -151,6 +154,7 @@ describe('client.dispose()', () => {
       transport: t,
       cache: { enabled: true, db: new CacheDB(dbName) },
     });
+    await client.connect();
     // Force IDB to be open (Dexie opens lazily on first access).
     await client.outboxEntries();
 
@@ -172,6 +176,7 @@ describe('client.dispose()', () => {
       transport: t1,
       cache: { enabled: true, db: new CacheDB(dbName) },
     });
+    await c1.connect();
     const queued = await c1.sendTextMessage({
       channel_id: '100',
       channel_type: 1,
@@ -190,6 +195,7 @@ describe('client.dispose()', () => {
       transport: t2,
       cache: { enabled: true, db: new CacheDB(dbName) },
     });
+    await client.connect();
     const rows = await client.outboxEntries();
     expect(rows).toHaveLength(1);
     expect(rows[0]!.outbox_id).toBe('9007199254740991');

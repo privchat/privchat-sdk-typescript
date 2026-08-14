@@ -46,9 +46,10 @@ const fireRoom = (t: FakeTransport, bytes: Uint8Array) =>
   );
 
 describe('room broadcast dedup (P1-05)', () => {
-  it('drops repeats by server_message_id, keeps distinct ones', () => {
+  it('drops repeats by server_message_id, keeps distinct ones', async () => {
     const t = new FakeTransport();
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const seen: Array<{ id?: string; text: string }> = [];
     client.observeEvents((env) => {
       if (env.event.type === 'channel_publish_received') {
@@ -70,9 +71,10 @@ describe('room broadcast dedup (P1-05)', () => {
     expect(seen.map((s) => s.text)).toEqual(['a', 'b', 'c', 'd']);
   });
 
-  it('never dedupes frames without a server_message_id', () => {
+  it('never dedupes frames without a server_message_id', async () => {
     const t = new FakeTransport();
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     let count = 0;
     client.observeEvents((env) => {
       if (env.event.type === 'channel_publish_received') count++;
@@ -84,9 +86,10 @@ describe('room broadcast dedup (P1-05)', () => {
     expect(count).toBe(2);
   });
 
-  it('dedup is scoped per channel', () => {
+  it('dedup is scoped per channel', async () => {
     const t = new FakeTransport();
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const chans: string[] = [];
     client.observeEvents((env) => {
       if (env.event.type === 'channel_publish_received') chans.push(env.event.channel_id);

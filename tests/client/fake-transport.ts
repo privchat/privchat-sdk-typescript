@@ -1,53 +1,35 @@
 import {
   Packet,
   PacketType,
+  type ConnectOptions,
   type EnqueuedInfo,
-  type Transport,
+  type TransportConnector,
+  type TransportObserver,
+  type TransportSession,
 } from '@msgtrans/client';
 
-/**
- * In-memory Transport for unit tests. Captures every packet handed to
- * `send()` and lets the test register a per-bizType handler that produces
- * the response payload — the FakeTransport then synthesises a Response
- * packet (matching messageId) and fires it back through onMessage.
- */
-export class FakeTransport implements Transport {
+/** One scripted in-memory connection (Connector/Session SPI). */
+export class FakeSession implements TransportSession {
   readonly sent: Packet[] = [];
+  private readonly observers: TransportObserver[] = [];
+  private open = true;
 
-  /** Per-bizType auto-responder. Return a Uint8Array to send back, or
-   *  `undefined` to silently drop the request. */
-  responder: ((packet: Packet) => Uint8Array | undefined) | null = null;
+  constructor(private readonly owner: FakeTransport) {}
 
-  /** Awaited before the response is produced, so a test can observe state
-   *  as it stood at the moment the packet hit the wire. */
-  onSendHook: ((packet: Packet) => Promise<void> | void) | null = null;
-
-  /** Override to use a different response bizType than the request's. */
-  responseBizTypeFor: ((requestBizType: number) => number) | null = null;
-
-  private _connected = false;
-  private readonly messageHandlers: Array<(p: Packet) => void> = [];
-  private readonly messageEnqueuedHandlers: Array<(info: EnqueuedInfo) => void> = [];
-  private readonly closeHandlers: Array<(ev?: unknown) => void> = [];
-  private readonly errorHandlers: Array<(e: unknown) => void> = [];
-
-  async connect(): Promise<void> {
-    this._connected = true;
+  isOpen(): boolean {
+    return this.open;
   }
 
-  async send(packet: Packet): Promise<void> {
+  async enqueue(packet: Packet): Promise<EnqueuedInfo> {
+    if (!this.open) throw new Error('session is closed');
     this.sent.push(packet);
-    if (this.onSendHook !== null) await this.onSendHook(packet);
-    for (const cb of this.messageEnqueuedHandlers) cb({ messageId: packet.messageId });
+    if (this.owner.onSendHook !== null) await this.owner.onSendHook(packet);
 
-    if (
-      packet.packetType === PacketType.Request &&
-      this.responder !== null
-    ) {
-      const responsePayload = this.responder(packet);
+    if (packet.packetType === PacketType.Request && this.owner.responder) {
+      const responsePayload = this.owner.responder(packet);
       if (responsePayload !== undefined) {
         const responseBizType =
-          this.responseBizTypeFor?.(packet.bizType) ?? packet.bizType;
+          this.owner.responseBizTypeFor?.(packet.bizType) ?? packet.bizType;
         // Fire asynchronously so the request-side promise has registered.
         queueMicrotask(() => {
           this.fireMessage(
@@ -61,46 +43,87 @@ export class FakeTransport implements Transport {
         });
       }
     }
+    return { messageId: packet.messageId };
   }
 
-  async close(): Promise<void> {
-    if (!this._connected) return;
-    this._connected = false;
-    // Mirror real WebSocketTransport: closing the socket fires onclose
-    // on the next microtask, which is what runs the close handlers.
-    // Without this, code paths that call `transport.close()` to trigger
-    // the SDK's own close-driven state machine (e.g. heartbeat failure
-    // → close → auto-reconnect) silently dead-end in tests.
-    queueMicrotask(() => {
-      for (const cb of this.closeHandlers) cb(undefined);
-    });
+  subscribe(observer: TransportObserver): () => void {
+    this.observers.push(observer);
+    return () => {
+      const i = this.observers.indexOf(observer);
+      if (i >= 0) this.observers.splice(i, 1);
+    };
   }
 
-  isConnected(): boolean {
-    return this._connected;
-  }
-
-  onMessage(cb: (packet: Packet) => void): void {
-    this.messageHandlers.push(cb);
-  }
-  onMessageEnqueued(cb: (info: EnqueuedInfo) => void): void {
-    this.messageEnqueuedHandlers.push(cb);
-  }
-  onClose(cb: (event?: unknown) => void): void {
-    this.closeHandlers.push(cb);
-  }
-  onError(cb: (error: unknown) => void): void {
-    this.errorHandlers.push(cb);
+  close(reason?: unknown): Promise<void> {
+    if (this.open) {
+      this.open = false;
+      // Mirror the real WebSocket session: the close report lands on the
+      // next microtask, which is what runs the SDK's close-driven state
+      // machine (heartbeat failure → close → auto-reconnect).
+      queueMicrotask(() => {
+        for (const o of [...this.observers]) o.onClose?.(reason);
+      });
+    }
+    return Promise.resolve();
   }
 
   fireMessage(packet: Packet): void {
-    for (const cb of this.messageHandlers) cb(packet);
+    if (!this.open) return;
+    for (const o of [...this.observers]) o.onMessage?.(packet);
   }
   fireClose(ev?: unknown): void {
-    this._connected = false;
-    for (const cb of this.closeHandlers) cb(ev);
+    if (!this.open) return;
+    this.open = false;
+    for (const o of [...this.observers]) o.onClose?.(ev);
   }
   fireError(e: unknown): void {
-    for (const cb of this.errorHandlers) cb(e);
+    for (const o of [...this.observers]) o.onError?.(e);
+  }
+}
+
+/**
+ * In-memory connector for unit tests, keeping the old helper surface:
+ * `sent` aggregates across sessions; `fireMessage`/`fireClose`/`fireError`
+ * act on the CURRENT session; the per-bizType `responder` synthesises
+ * Response packets.
+ */
+export class FakeTransport implements TransportConnector {
+  readonly sessions: FakeSession[] = [];
+
+  /** Per-bizType auto-responder. Return a Uint8Array to send back, or
+   *  `undefined` to silently drop the request. */
+  responder: ((packet: Packet) => Uint8Array | undefined) | null = null;
+  /** Awaited before the response is produced. */
+  onSendHook: ((packet: Packet) => Promise<void> | void) | null = null;
+  /** Override to use a different response bizType than the request's. */
+  responseBizTypeFor: ((requestBizType: number) => number) | null = null;
+
+  get sent(): Packet[] {
+    return this.sessions.flatMap((s) => s.sent);
+  }
+
+  get current(): FakeSession | null {
+    const last = this.sessions[this.sessions.length - 1];
+    return last && last.isOpen() ? last : null;
+  }
+
+  async connect(_options: ConnectOptions): Promise<TransportSession> {
+    const session = new FakeSession(this);
+    this.sessions.push(session);
+    return session;
+  }
+
+  isConnected(): boolean {
+    return this.current !== null;
+  }
+
+  fireMessage(packet: Packet): void {
+    this.sessions[this.sessions.length - 1]?.fireMessage(packet);
+  }
+  fireClose(ev?: unknown): void {
+    this.sessions[this.sessions.length - 1]?.fireClose(ev);
+  }
+  fireError(e: unknown): void {
+    this.sessions[this.sessions.length - 1]?.fireError(e);
   }
 }

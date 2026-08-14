@@ -2,7 +2,7 @@ import {
   TransportClient,
   type ClientMessage,
   type ClientRequest,
-  type Transport,
+  type TransportConnector,
   type TransportClientOptions,
 } from '@msgtrans/client';
 import { isRetryableServerCode } from './send-error.js';
@@ -180,7 +180,7 @@ export interface PrivchatClientOptions
    * with `url` — pass exactly one. Mirrors `TransportClientOptions.transport`
    * but typed strictly as a `Transport` instance (no string discriminator).
    */
-  transport?: Transport;
+  transport?: TransportConnector;
   /**
    * Override the auto-detected ClientInfo used by `authenticate()`. Has no
    * effect on Layer-1 `authorize()` (caller passes the full request).
@@ -1073,6 +1073,9 @@ export class PrivchatClient {
   // ----- Lifecycle -----
 
   async connect(): Promise<void> {
+    if (this.disposed) {
+      throw new Error('PrivchatClient has been disposed; create a new instance');
+    }
     this.cancelReconnect();
     if (this.entityInvalidationTimer !== null) {
       clearTimeout(this.entityInvalidationTimer);
@@ -1151,7 +1154,7 @@ export class PrivchatClient {
       this.userInitiatedDisconnect = true;
       this.setState('closing', 'disposed');
       try {
-        await this.transport.disconnect();
+        await this.transport.shutdown();
       } catch {
         /* swallow — instance is going away regardless */
       }

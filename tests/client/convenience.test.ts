@@ -42,6 +42,7 @@ describe('authenticate', () => {
     };
 
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const resp = await client.authenticate('900710001', 'tok', 'dev-1');
 
     expect(observed).not.toBeNull();
@@ -65,6 +66,7 @@ describe('authenticate', () => {
       });
 
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     await expect(client.authenticate('1', 'bad', 'd1')).rejects.toMatchObject({
       name: 'AuthorizationError',
       message: '[401] invalid token',
@@ -80,6 +82,7 @@ describe('authenticate', () => {
         session_id: 'sess-31',
       });
     const mismatched = new PrivchatClient({ transport: t });
+    await mismatched.connect();
 
     await expect(
       mismatched.authenticate('100000028', 'token-for-31', 'dev'),
@@ -110,6 +113,7 @@ describe('authenticate', () => {
         device_name: 'tty',
       },
     });
+    await client.connect();
     await client.authenticate('1', 'tok', 'd1');
 
     expect(observed!.client_info.version).toBe('9.9.9');
@@ -145,6 +149,7 @@ describe('authenticate', () => {
       transport: t,
       cache: { enabled: true, db: new CacheDB(dbName) },
     });
+    await ownedClient.connect();
 
     await ownedClient.authenticate('100000028', 'tok-28', 'dev-28');
 
@@ -174,6 +179,7 @@ describe('subscribeChannel / unsubscribeChannel', () => {
     };
 
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     await client.subscribeChannel('12345', 1, 'token-abc');
 
     expect(observed!.action).toBe(SubscribeAction.Subscribe);
@@ -195,7 +201,9 @@ describe('subscribeChannel / unsubscribeChannel', () => {
         reason_code: 0,
       });
     };
-    await new PrivchatClient({ transport: t }).subscribeChannel('1', 1);
+    const c1 = new PrivchatClient({ transport: t });
+    await c1.connect();
+    await c1.subscribeChannel('1', 1);
     expect(observed!.param).toBe('');
   });
 
@@ -212,7 +220,9 @@ describe('subscribeChannel / unsubscribeChannel', () => {
         reason_code: 0,
       });
     };
-    await new PrivchatClient({ transport: t }).unsubscribeChannel('12345', 1);
+    const c2 = new PrivchatClient({ transport: t });
+    await c2.connect();
+    await c2.unsubscribeChannel('12345', 1);
     expect(observed!.action).toBe(SubscribeAction.Unsubscribe);
   });
 
@@ -228,6 +238,7 @@ describe('subscribeChannel / unsubscribeChannel', () => {
       });
 
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     await expect(client.subscribeChannel('1', 1)).rejects.toBeInstanceOf(SubscribeError);
   });
 });
@@ -247,6 +258,7 @@ describe('rpcCall / rpcCallTyped', () => {
     };
 
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const out = await client.rpcCall('/v1/echo', '{"x":1}');
     expect(out).toBe('{"y":2}');
   });
@@ -256,6 +268,7 @@ describe('rpcCall / rpcCallTyped', () => {
     t.responder = () => encodeRpcResponse({ code: 0, message: 'ok' });
 
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     expect(await client.rpcCall('/v1/empty', '')).toBe('');
   });
 
@@ -264,6 +277,7 @@ describe('rpcCall / rpcCallTyped', () => {
     t.responder = () => encodeRpcResponse({ code: 401, message: 'unauthorized' });
 
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     await expect(client.rpcCall('/v1/x', '{}')).rejects.toMatchObject({
       name: 'RpcError',
       route: '/v1/x',
@@ -284,6 +298,7 @@ describe('rpcCall / rpcCallTyped', () => {
     };
 
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const resp = await client.rpcCallTyped<{ n: number }, { doubled: number }>(
       '/v1/double',
       { n: 21 },
@@ -307,6 +322,7 @@ describe('sendTextMessage', () => {
     };
 
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const resp = await client.sendTextMessage({
       channel_id: '12345',
       channel_type: 1,
@@ -340,7 +356,9 @@ describe('sendTextMessage', () => {
       });
     };
 
-    await new PrivchatClient({ transport: t }).sendTextMessage({
+    const c3 = new PrivchatClient({ transport: t });
+    await c3.connect();
+    await c3.sendTextMessage({
       channel_id: '1',
       channel_type: 1,
       from_uid: '1',
@@ -357,10 +375,11 @@ describe('sendTextMessage', () => {
 });
 
 describe('AuthorizationError formatting', () => {
-  it('falls back when error_code/error_message are missing', () => {
+  it('falls back when error_code/error_message are missing', async () => {
     const t = new FakeTransport();
     t.responder = () => encodeAuthorizationResponse({ success: false });
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     return expect(client.authenticate('1', 't', 'd')).rejects.toMatchObject({
       message: '[0] authorization failed',
     });

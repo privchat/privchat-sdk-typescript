@@ -39,9 +39,10 @@ const fireOneWay = (t: FakeTransport, bizType: number, payload: Uint8Array) => {
 };
 
 describe('observeEvents fans out L1 events with sequence ids', () => {
-  it('assigns monotonic sequence_id and timestamp', () => {
+  it('assigns monotonic sequence_id and timestamp', async () => {
     const t = new FakeTransport();
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const seen: SequencedSdkEvent[] = [];
     client.observeEvents((env) => seen.push(env));
 
@@ -49,14 +50,17 @@ describe('observeEvents fans out L1 events with sequence ids', () => {
     fireOneWay(t, MessageType.PushMessageRequest, samplePush());
 
     expect(seen).toHaveLength(2);
-    expect(seen[0]!.sequence_id).toBe(1);
-    expect(seen[1]!.sequence_id).toBe(2);
+    // connect() itself emits connection_state events, so ids are asserted
+    // RELATIVE to the post-connect baseline, not absolute from 1.
+    expect(seen[1]!.sequence_id).toBe(seen[0]!.sequence_id + 1);
+    expect(seen[0]!.sequence_id).toBeGreaterThan(0);
     expect(seen[1]!.timestamp_ms).toBeGreaterThanOrEqual(seen[0]!.timestamp_ms);
   });
 
-  it('emits message_received / message_batch_received / pong_received', () => {
+  it('emits message_received / message_batch_received / pong_received', async () => {
     const t = new FakeTransport();
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const types: string[] = [];
     client.observeEvents((env) => types.push(env.event.type));
 
@@ -67,71 +71,83 @@ describe('observeEvents fans out L1 events with sequence ids', () => {
     expect(types).toEqual(['message_received', 'message_batch_received', 'pong_received']);
   });
 
-  it('lastEventSequenceId tracks the highest emitted id', () => {
+  it('lastEventSequenceId tracks the highest emitted id', async () => {
     const t = new FakeTransport();
     const client = new PrivchatClient({ transport: t });
-    expect(client.lastEventSequenceId()).toBe(0);
+    await client.connect();
+    const base = client.lastEventSequenceId();
     fireOneWay(t, MessageType.PushMessageRequest, samplePush());
-    expect(client.lastEventSequenceId()).toBe(1);
+    expect(client.lastEventSequenceId()).toBe(base + 1);
   });
 
-  it('handler errors do not break the bus', () => {
+  it('handler errors do not break the bus', async () => {
     const t = new FakeTransport();
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const survivor: number[] = [];
     client.observeEvents(() => {
       throw new Error('boom');
     });
+    const base = client.lastEventSequenceId();
     client.observeEvents((env) => survivor.push(env.sequence_id));
 
     fireOneWay(t, MessageType.PushMessageRequest, samplePush());
-    expect(survivor).toEqual([1]);
+    expect(survivor).toEqual([base + 1]);
   });
 
-  it('returned unsubscribe detaches the listener', () => {
+  it('returned unsubscribe detaches the listener', async () => {
     const t = new FakeTransport();
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const seen: number[] = [];
+    const base = client.lastEventSequenceId();
     const off = client.observeEvents((env) => seen.push(env.sequence_id));
     fireOneWay(t, MessageType.PushMessageRequest, samplePush());
     off();
     fireOneWay(t, MessageType.PushMessageRequest, samplePush());
-    expect(seen).toEqual([1]);
+    expect(seen).toEqual([base + 1]);
   });
 });
 
 describe('history buffers (recentEvents / eventsSince)', () => {
-  it('recentEvents returns last N in oldest-first order', () => {
+  it('recentEvents returns last N in oldest-first order', async () => {
     const t = new FakeTransport();
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
+    const base = client.lastEventSequenceId();
     for (let i = 0; i < 5; i++) fireOneWay(t, MessageType.PushMessageRequest, samplePush());
     const last3 = client.recentEvents(3);
-    expect(last3.map((e) => e.sequence_id)).toEqual([3, 4, 5]);
+    expect(last3.map((e) => e.sequence_id)).toEqual([base + 3, base + 4, base + 5]);
   });
 
-  it('eventsSince returns only newer-than-cursor entries, capped to limit', () => {
+  it('eventsSince returns only newer-than-cursor entries, capped to limit', async () => {
     const t = new FakeTransport();
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
+    const base = client.lastEventSequenceId();
     for (let i = 0; i < 5; i++) fireOneWay(t, MessageType.PushMessageRequest, samplePush());
-    const after2 = client.eventsSince(2, 100);
-    expect(after2.map((e) => e.sequence_id)).toEqual([3, 4, 5]);
-    const next2 = client.eventsSince(0, 2);
-    expect(next2.map((e) => e.sequence_id)).toEqual([1, 2]);
+    const after2 = client.eventsSince(base + 2, 100);
+    expect(after2.map((e) => e.sequence_id)).toEqual([base + 3, base + 4, base + 5]);
+    const next2 = client.eventsSince(base, 2);
+    expect(next2.map((e) => e.sequence_id)).toEqual([base + 1, base + 2]);
   });
 
-  it('respects historyLimit and drops the oldest', () => {
+  it('respects historyLimit and drops the oldest', async () => {
     const t = new FakeTransport();
     const client = new PrivchatClient({ transport: t, eventHistoryLimit: 3 });
+    await client.connect();
+    const base = client.lastEventSequenceId();
     for (let i = 0; i < 5; i++) fireOneWay(t, MessageType.PushMessageRequest, samplePush());
     const all = client.recentEvents(10);
-    expect(all.map((e) => e.sequence_id)).toEqual([3, 4, 5]);
+    expect(all.map((e) => e.sequence_id)).toEqual([base + 3, base + 4, base + 5]);
   });
 });
 
 describe('compat helpers (onPushMessage / onPushBatch / onPong) still work', () => {
-  it('onPushMessage receives PushMessageRequest', () => {
+  it('onPushMessage receives PushMessageRequest', async () => {
     const t = new FakeTransport();
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     let seen = 0;
     client.onPushMessage((m) => {
       expect(m.server_message_id).toBe('1');
@@ -147,6 +163,7 @@ describe('connection_state_changed events', () => {
     const t = new FakeTransport();
     t.responder = () => encodeAuthorizationResponse({ success: true });
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const states: string[] = [];
     client.onConnectionStateChanged((e) => states.push(e.state));
 
@@ -177,8 +194,9 @@ describe('onReadCursorUpdated / onPeerReadCursorUpdated helpers', () => {
     (client as any).bus.emit(event);
   };
 
-  it('onReadCursorUpdated fires only on read_cursor_updated', () => {
+  it('onReadCursorUpdated fires only on read_cursor_updated', async () => {
     const client = new PrivchatClient({ transport: new FakeTransport() });
+    await client.connect();
     const seen: Array<{ type: string; read_pts: string }> = [];
     client.onReadCursorUpdated((event) => {
       seen.push({ type: event.type, read_pts: event.read_pts });
@@ -209,8 +227,9 @@ describe('onReadCursorUpdated / onPeerReadCursorUpdated helpers', () => {
     expect(seen).toEqual([{ type: 'read_cursor_updated', read_pts: '7' }]);
   });
 
-  it('onPeerReadCursorUpdated fires only on peer_read_cursor_updated', () => {
+  it('onPeerReadCursorUpdated fires only on peer_read_cursor_updated', async () => {
     const client = new PrivchatClient({ transport: new FakeTransport() });
+    await client.connect();
     const seen: Array<{ reader_id: string; read_pts: string }> = [];
     client.onPeerReadCursorUpdated((event) => {
       seen.push({ reader_id: event.reader_id, read_pts: event.read_pts });
@@ -234,8 +253,9 @@ describe('onReadCursorUpdated / onPeerReadCursorUpdated helpers', () => {
     expect(seen).toEqual([{ reader_id: 'peer-1', read_pts: '42' }]);
   });
 
-  it('unsubscribe stops further callbacks on either helper', () => {
+  it('unsubscribe stops further callbacks on either helper', async () => {
     const client = new PrivchatClient({ transport: new FakeTransport() });
+    await client.connect();
     const selfSeen: number[] = [];
     const peerSeen: number[] = [];
     const offSelf = client.onReadCursorUpdated(() => {

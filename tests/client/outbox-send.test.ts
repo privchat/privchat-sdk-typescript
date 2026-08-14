@@ -73,6 +73,7 @@ describe('sendTextMessage records how it encoded the payload', () => {
       transport: t,
       cache: { enabled: true, db: new CacheDB(`queued-encoding-${++dbCounter}`) },
     });
+    await client.connect();
 
     await client.sendTextMessage({ ...SAMPLE_INPUT, local_message_id: 'plain-1' });
     await client.sendTextMessage({
@@ -104,6 +105,7 @@ describe('sendTextMessage offline → queued', () => {
       transport: t,
       cache: { enabled: true, db: new CacheDB(`queued-offline-${++dbCounter}`) },
     });
+    await client.connect();
 
     const patches: ConversationPatch[] = [];
     client.observeConversation('12345', 1, (_, p) => patches.push(p));
@@ -136,6 +138,7 @@ describe('sendTextMessage offline → queued', () => {
       transport: t,
       cache: { enabled: true, db: new CacheDB(`queued-row-${++dbCounter}`) },
     });
+    await client.connect();
 
     await client.sendTextMessage({ ...SAMPLE_INPUT, local_message_id: '9007199254740992' });
 
@@ -162,6 +165,7 @@ describe('sendTextMessage offline → queued', () => {
       transport: t,
       cache: { enabled: true, db: new CacheDB(`no-wire-${++dbCounter}`) },
     });
+    await client.connect();
 
     await client.sendTextMessage({ ...SAMPLE_INPUT, local_message_id: '9007199254740993' });
 

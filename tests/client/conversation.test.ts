@@ -64,11 +64,12 @@ const fakeMsg = (id: number, content = `m${id}`): FakeMsg => ({
   timestamp: id * 1000,
 });
 
-const newClient = (transport: FakeTransport) => {
+const newClient = async (transport: FakeTransport) => {
   client = new PrivchatClient({
     transport,
     cache: { enabled: true, db: new CacheDB(`conv-${++dbCounter}`) },
   });
+  await client.connect();
   return client;
 };
 
@@ -77,7 +78,7 @@ describe('openConversation', () => {
     const t = buildHistoryFake({
       pages: new Map([['100::', [fakeMsg(10), fakeMsg(11), fakeMsg(12)]]]),
     });
-    const c = newClient(t);
+    const c = await newClient(t);
     const seen: ConversationSnapshot[] = [];
     c.observeConversation('100', 1, (snap) => seen.push(snap));
     const result = await c.openConversation('100', 1);
@@ -91,7 +92,7 @@ describe('openConversation', () => {
 
   it('returns empty when server has no history', async () => {
     const t = buildHistoryFake({ pages: new Map([['100::', []]]) });
-    const c = newClient(t);
+    const c = await newClient(t);
     const seen: ConversationSnapshot[] = [];
     c.observeConversation('100', 1, (snap) => seen.push(snap));
     const result = await c.openConversation('100', 1);
@@ -103,7 +104,7 @@ describe('openConversation', () => {
     const t = buildHistoryFake({
       pages: new Map([['100::', [fakeMsg(10), fakeMsg(11)]]]),
     });
-    const c = newClient(t);
+    const c = await newClient(t);
 
     // First open populates cache + memory.
     await c.openConversation('100', 1);
@@ -132,7 +133,7 @@ describe('openConversation', () => {
     const t = buildHistoryFake({
       pages: new Map([['100::', [fakeMsg(50), fakeMsg(75)]]]),
     });
-    const c = newClient(t);
+    const c = await newClient(t);
     // Manually inject a channel — simulate post-bootstrap state.
     // (Phase 4 doesn't expose a public method for this; use observeChannelList
     //  to trigger the in-memory upsert via openConversation lazily promoting it.)
@@ -157,7 +158,7 @@ describe('scrollHistory', () => {
       rawBody = new TextDecoder().decode(req.body);
       return okJson({ messages: [], total: 0, has_more: false });
     };
-    const c = newClient(t);
+    const c = await newClient(t);
     await c.scrollHistory('9007199254740993', 1, {
       beforeServerMessageId: '9007199254740995',
     });
@@ -174,7 +175,7 @@ describe('scrollHistory', () => {
         ['100::30', [fakeMsg(20), fakeMsg(21), fakeMsg(22)]],
       ]),
     });
-    const c = newClient(t);
+    const c = await newClient(t);
     await c.openConversation('100', 1);
 
     // Default cursor = oldest in-memory msg = id 30.
@@ -199,7 +200,7 @@ describe('scrollHistory', () => {
         ['100::10', []],
       ]),
     });
-    const c = newClient(t);
+    const c = await newClient(t);
     await c.openConversation('100', 1);
     const empty = await c.scrollHistory('100', 1);
     expect(empty).toEqual([]);
@@ -211,7 +212,7 @@ describe('scrollHistory', () => {
         ['100::42', [fakeMsg(40), fakeMsg(41)]],
       ]),
     });
-    const c = newClient(t);
+    const c = await newClient(t);
     const page = await c.scrollHistory('100', 1, { beforeServerMessageId: 42, limit: 50 });
     expect(page.map((m) => m.server_message_id)).toEqual(['40', '41']);
   });
@@ -223,7 +224,7 @@ describe('scrollHistory', () => {
         ['100::30', [fakeMsg(20), fakeMsg(21)]],
       ]),
     });
-    const c = newClient(t);
+    const c = await newClient(t);
     await c.openConversation('100', 1);
 
     const patches: ConversationPatch[] = [];
@@ -241,7 +242,7 @@ describe('getCachedMessages', () => {
     const t = buildHistoryFake({
       pages: new Map([['100::', [fakeMsg(1), fakeMsg(2), fakeMsg(3)]]]),
     });
-    const c = newClient(t);
+    const c = await newClient(t);
     expect(c.getCachedMessages('100', 1)).toEqual([]);
     await c.openConversation('100', 1);
     const cached = c.getCachedMessages('100', 1);

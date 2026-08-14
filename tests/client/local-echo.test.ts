@@ -279,6 +279,7 @@ describe('sendTextMessage — cache-disabled (Phase 2 strict semantics preserved
     // No cache opt-in. Layer-1 sendMessage runs without auth gating
     // (TransportClient handles raw send), so we don't need to authenticate.
     client = new PrivchatClient({ transport: t });
+    await client.connect();
     const result = await client.sendTextMessage({
       channel_id: '12345',
       channel_type: 1,

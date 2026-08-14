@@ -73,6 +73,7 @@ describe('authenticate(): refresh-on-expiry + retry once', () => {
       return authCalls === 1 ? fail10002() : ok();
     };
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     let refreshCalls = 0;
     client.configureAuthRefresh({
       refreshAuth: async () => {
@@ -94,6 +95,7 @@ describe('authenticate(): refresh-on-expiry + retry once', () => {
     const t = new FakeTransport();
     t.responder = () => fail10002();
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     let onSessionExpired = 0;
     client.configureAuthRefresh({
       refreshAuth: async () => {
@@ -139,6 +141,7 @@ describe('authenticate(): refresh-on-expiry + retry once', () => {
         transport: t,
         reconnect: { enabled: true, initialDelayMs: 100, maxDelayMs: 100, multiplier: 1 },
       });
+      await client.connect();
       let refreshCalls = 0;
       client.configureAuthRefresh({
         refreshAuth: async () => {
@@ -185,6 +188,7 @@ describe('auto-reconnect: refresh-on-expiry during replay', () => {
       transport: t,
       reconnect: { enabled: true, initialDelayMs: 100, maxDelayMs: 100, multiplier: 1 },
     });
+    await client.connect();
     let refreshCalls = 0;
     client.configureAuthRefresh({
       refreshAuth: async () => {

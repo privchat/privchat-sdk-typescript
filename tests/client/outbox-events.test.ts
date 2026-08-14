@@ -41,10 +41,10 @@ interface SendBehavior {
   build?: (decoded: ReturnType<typeof decodeSendMessageRequest>) => Uint8Array;
 }
 
-function newAuthedClient(
+async function newAuthedClient(
   send: SendBehavior = {},
   options: { offline?: boolean } = {},
-): { t: FakeTransport; client: PrivchatClient } {
+): Promise<{ t: FakeTransport; client: PrivchatClient }> {
   const t = new FakeTransport();
   t.responder = (pkt) => {
     if (pkt.bizType === 1) return encodeAuthorizationResponse({ success: true });
@@ -64,6 +64,7 @@ function newAuthedClient(
     cache: { enabled: true, db: new CacheDB(`outbox-events-${++dbCounter}`) },
     defaultTimeoutMs: options.offline ? 30 : 30_000,
   });
+  await c.connect();
   client = c;
   return { t, client: c };
 }
@@ -89,7 +90,7 @@ const SAMPLE_INPUT = {
 
 describe('outboxEntries', () => {
   it('returns the persisted rows', async () => {
-    const { client } = newAuthedClient();
+    const { client } = await newAuthedClient();
     // No connect → offline → enqueue.
     await client.sendTextMessage({
       ...SAMPLE_INPUT,
@@ -107,7 +108,7 @@ describe('outboxEntries', () => {
   });
 
   it('respects status / channel filters', async () => {
-    const { client } = newAuthedClient();
+    const { client } = await newAuthedClient();
     await client.sendTextMessage({
       ...SAMPLE_INPUT,
       channel_id: '100',
@@ -125,13 +126,14 @@ describe('outboxEntries', () => {
   it('throws CacheDisabledError when cache is off', async () => {
     const t = new FakeTransport();
     const c = new PrivchatClient({ transport: t });
+    await c.connect();
     await expect(c.outboxEntries()).rejects.toThrow(CacheDisabledError);
   });
 });
 
 describe('observeOutbox', () => {
   it('fires an initial snapshot on subscribe', async () => {
-    const { client } = newAuthedClient();
+    const { client } = await newAuthedClient();
     await client.sendTextMessage({
       ...SAMPLE_INPUT,
       local_message_id: '9007199254740101',
@@ -149,7 +151,7 @@ describe('observeOutbox', () => {
   });
 
   it('fires a new snapshot on enqueue', async () => {
-    const { client } = newAuthedClient();
+    const { client } = await newAuthedClient();
     const snapshots: OutboxEntry[][] = [];
     const off = client.observeOutbox((entries) => snapshots.push(entries));
     await flushTicks();
@@ -169,7 +171,7 @@ describe('observeOutbox', () => {
   });
 
   it('unsubscribe stops further snapshots', async () => {
-    const { client } = newAuthedClient();
+    const { client } = await newAuthedClient();
     const snapshots: OutboxEntry[][] = [];
     const off = client.observeOutbox((entries) => snapshots.push(entries));
     await flushTicks();
@@ -187,6 +189,7 @@ describe('observeOutbox', () => {
   it('returns a noop unsubscribe when cache is disabled', async () => {
     const t = new FakeTransport();
     const c = new PrivchatClient({ transport: t });
+    await c.connect();
     const snapshots: OutboxEntry[][] = [];
     const off = c.observeOutbox((entries) => snapshots.push(entries));
     await flushTicks();
@@ -198,7 +201,7 @@ describe('observeOutbox', () => {
 
 describe('outbox_state_changed event', () => {
   it('fires `pending` on enqueue', async () => {
-    const { client } = newAuthedClient();
+    const { client } = await newAuthedClient();
     const events: OutboxStateChangedEvent[] = [];
     client.observeEvents((env) => {
       if (env.event.type === 'outbox_state_changed') events.push(env.event);
@@ -221,7 +224,7 @@ describe('outbox_state_changed event', () => {
     // Unowned pre-auth rows are intentionally discarded by the account
     // isolation guard because they cannot be attributed safely.
     // Sequence: pending (enqueue) → sending → sent.
-    const { client } = newAuthedClient({
+    const { client } = await newAuthedClient({
       build: (decoded) =>
         encodeSendMessageResponse({
           client_seq: decoded.client_seq,
@@ -274,6 +277,7 @@ describe('outbox_state_changed event', () => {
       transport: t,
       cache: { enabled: true, db: new CacheDB(`outbox-events-rej-${++dbCounter}`) },
     });
+    await client.connect();
     const events: OutboxStateChangedEvent[] = [];
     client.observeEvents((env) => {
       if (env.event.type === 'outbox_state_changed') events.push(env.event);
@@ -319,6 +323,7 @@ describe('outbox_drained event', () => {
       transport: t,
       cache: { enabled: true, db: new CacheDB(`outbox-events-drained-${++dbCounter}`) },
     });
+    await client.connect();
     const events: SdkEvent[] = [];
     client.observeEvents((env) => events.push(env.event));
 
@@ -343,7 +348,7 @@ describe('outbox_drained event', () => {
   });
 
   it('does NOT fire on initial empty observer subscription', async () => {
-    const { client } = newAuthedClient();
+    const { client } = await newAuthedClient();
     const events: SdkEvent[] = [];
     client.observeEvents((env) => events.push(env.event));
     const off = client.observeOutbox(() => {});
@@ -355,7 +360,7 @@ describe('outbox_drained event', () => {
 
 describe('discardOutboxEntry', () => {
   it('removes the outbox row and emits `discarded`', async () => {
-    const { client } = newAuthedClient();
+    const { client } = await newAuthedClient();
     const events: OutboxStateChangedEvent[] = [];
     client.observeEvents((env) => {
       if (env.event.type === 'outbox_state_changed') events.push(env.event);
@@ -377,7 +382,7 @@ describe('discardOutboxEntry', () => {
   });
 
   it('emits `outbox_drained` when discard empties the queue', async () => {
-    const { client } = newAuthedClient();
+    const { client } = await newAuthedClient();
     const events: SdkEvent[] = [];
     client.observeEvents((env) => events.push(env.event));
 
@@ -393,7 +398,7 @@ describe('discardOutboxEntry', () => {
   });
 
   it('throws when the outbox_id is unknown', async () => {
-    const { client } = newAuthedClient();
+    const { client } = await newAuthedClient();
     await expect(client.discardOutboxEntry('does-not-exist')).rejects.toThrow(
       /outbox row not found/,
     );
@@ -402,6 +407,7 @@ describe('discardOutboxEntry', () => {
   it('throws CacheDisabledError when cache is off', async () => {
     const t = new FakeTransport();
     const c = new PrivchatClient({ transport: t });
+    await c.connect();
     await expect(c.discardOutboxEntry('any')).rejects.toThrow(CacheDisabledError);
   });
 });

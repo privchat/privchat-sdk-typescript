@@ -75,6 +75,7 @@ describe('RpcError.errorKind', () => {
     const t = new FakeTransport();
     t.responder = () => encodeRpcResponse({ code: 10002, message: 'token expired' });
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const err = await client.rpcCall('/x', '{}').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(RpcError);
     expect((err as RpcError).errorKind).toBe('recoverable');
@@ -84,6 +85,7 @@ describe('RpcError.errorKind', () => {
     const t = new FakeTransport();
     t.responder = () => encodeRpcResponse({ code: 500, message: 'server error' });
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const err = await client.rpcCall('/x', '{}').catch((e: unknown) => e);
     expect((err as RpcError).errorKind).toBeUndefined();
   });
@@ -99,6 +101,7 @@ describe('authenticate emits auth_expired on failure', () => {
         error_message: 'token expired',
       });
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const seen: Array<{ reason: string; code: number }> = [];
     client.onAuthExpired((e) => seen.push({ reason: e.reason, code: e.error_code }));
 
@@ -118,6 +121,7 @@ describe('authenticate emits auth_expired on failure', () => {
         error_message: 'refresh expired',
       });
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const seen: Array<{ reason: string; code: number }> = [];
     client.onAuthExpired((e) => seen.push({ reason: e.reason, code: e.error_code }));
 

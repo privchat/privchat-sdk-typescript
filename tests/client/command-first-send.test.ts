@@ -113,6 +113,7 @@ describe('command-first send', () => {
       return undefined;
     };
     client = new PrivchatClient({ transport: t, cache: { enabled: true, db: new CacheDB(dbName) } });
+    await client.connect();
     // Deliberately not authenticated: the offline gate must produce the same
     // durable pair as the online path, since it is the same write.
     const result = await client.sendTextMessage({

@@ -10,7 +10,7 @@ import { FakeTransport } from './fake-transport.js';
 import { uniqueDbName } from './unique-db.js';
 
 describe('connectionState() / sessionSnapshot() / currentAccessToken()', () => {
-  it('initial state is disconnected with no auth', () => {
+  it('initial state is disconnected with no auth', async () => {
     const t = new FakeTransport();
     const client = new PrivchatClient({ transport: t });
     expect(client.connectionState()).toBe('disconnected');
@@ -28,6 +28,7 @@ describe('connectionState() / sessionSnapshot() / currentAccessToken()', () => {
     const t = new FakeTransport();
     t.responder = () => encodeAuthorizationResponse({ success: true });
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const readiness: string[] = [];
     client.onSyncReadinessChanged((event) => readiness.push(event.readiness));
     await client.connect();
@@ -82,6 +83,7 @@ describe('connectionState() / sessionSnapshot() / currentAccessToken()', () => {
       transport: t,
       cache: { enabled: true, db: new CacheDB(uniqueDbName('readiness')) },
     });
+    await client.connect();
     const ready = new Promise<void>((resolve) => {
       client.onSyncReadinessChanged((event) => {
         if (event.readiness === 'ready') resolve();

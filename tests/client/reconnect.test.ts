@@ -99,6 +99,7 @@ describe('auto-reconnect', () => {
       transport: t,
       reconnect: { enabled: true, initialDelayMs: 100 },
     });
+    await client.connect();
     await authenticateClient(client);
 
     await client.disconnect();
@@ -120,6 +121,7 @@ describe('auto-reconnect', () => {
       transport: t,
       reconnect: { enabled: false },
     });
+    await client.connect();
     await authenticateClient(client);
     t.fireClose();
     await advance(2000);
@@ -142,6 +144,7 @@ describe('auto-reconnect', () => {
       transport: t,
       reconnect: { enabled: true, initialDelayMs: 50, maxDelayMs: 50, multiplier: 1 },
     });
+    await client.connect();
     await authenticateClient(client);
 
     const seen: Array<{ reason: string; code: number }> = [];
@@ -182,6 +185,7 @@ describe('auto-reconnect', () => {
       transport: t,
       reconnect: { enabled: true, initialDelayMs: 50, maxDelayMs: 50, multiplier: 1 },
     });
+    await client.connect();
     await authenticateClient(client);
     await client.subscribeChannel('12345', 1);
     expect(subscribeCalls).toHaveLength(1);
@@ -211,7 +215,7 @@ describe('reconnect → syncOnReconnect', () => {
     // pollute test output. We assert on syncChannel call shape, not on log.
     warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
-  afterEach(() => {
+  afterEach( async () => {
     warnSpy?.mockRestore();
     warnSpy = null;
   });
@@ -219,7 +223,7 @@ describe('reconnect → syncOnReconnect', () => {
   /** Build a cache-enabled client whose transport handles auth + subscribe.
    *  syncChannel is spied on (real engine never runs); tests assert on the
    *  spy to verify the wiring. */
-  const buildClient = () => {
+  const buildClient = async () => {
     const t = new FakeTransport();
     t.responder = (pkt) => {
       if (pkt.bizType === 1 /* AuthorizationRequest */) {
@@ -239,6 +243,7 @@ describe('reconnect → syncOnReconnect', () => {
       cache: { enabled: true, db: new CacheDB(`reconnect-sync-${++dbCounter}`) },
       reconnect: { enabled: true, initialDelayMs: 50, maxDelayMs: 50, multiplier: 1 },
     });
+    await client.connect();
     return { t, client };
   };
 
@@ -252,7 +257,7 @@ describe('reconnect → syncOnReconnect', () => {
   };
 
   it('calls syncChannel for the active subscription after reconnect', async () => {
-    const { t, client } = buildClient();
+    const { t, client } = await buildClient();
     await authenticateClient(client);
     await client.subscribeChannel('100', 1);
 
@@ -277,7 +282,7 @@ describe('reconnect → syncOnReconnect', () => {
   });
 
   it('syncs every active subscription after reconnect (parallel)', async () => {
-    const { t, client } = buildClient();
+    const { t, client } = await buildClient();
     await authenticateClient(client);
     await client.subscribeChannel('100', 1);
     await client.subscribeChannel('200', 1);
@@ -304,7 +309,7 @@ describe('reconnect → syncOnReconnect', () => {
   });
 
   it('one channel sync failure does NOT regress reconnect state', async () => {
-    const { t, client } = buildClient();
+    const { t, client } = await buildClient();
     await authenticateClient(client);
     await client.subscribeChannel('100', 1);
     await client.subscribeChannel('200', 1);
@@ -334,7 +339,7 @@ describe('reconnect → syncOnReconnect', () => {
   });
 
   it('no active subscriptions → no syncChannel calls', async () => {
-    const { t, client } = buildClient();
+    const { t, client } = await buildClient();
     await authenticateClient(client);
 
     const sync = vi.spyOn(client, 'syncChannel');
@@ -363,6 +368,7 @@ describe('reconnect → syncOnReconnect', () => {
       // cache NOT enabled
       reconnect: { enabled: true, initialDelayMs: 50, maxDelayMs: 50, multiplier: 1 },
     });
+    await client.connect();
     await authenticateClient(client);
     await client.subscribeChannel('100', 1);
 
@@ -387,12 +393,12 @@ describe('reconnect → flushOutboxOnReconnect', () => {
   beforeEach(() => {
     warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
-  afterEach(() => {
+  afterEach( async () => {
     warnSpy?.mockRestore();
     warnSpy = null;
   });
 
-  const buildCacheClient = () => {
+  const buildCacheClient = async () => {
     const t = new FakeTransport();
     t.responder = (pkt) => {
       if (pkt.bizType === 1) return encodeAuthorizationResponse({ success: true });
@@ -409,6 +415,7 @@ describe('reconnect → flushOutboxOnReconnect', () => {
       cache: { enabled: true, db: new CacheDB(`reconnect-flush-${++dbCounter}`) },
       reconnect: { enabled: true, initialDelayMs: 50, maxDelayMs: 50, multiplier: 1 },
     });
+    await c.connect();
     return { t, client: c };
   };
 
@@ -418,7 +425,7 @@ describe('reconnect → flushOutboxOnReconnect', () => {
   };
 
   it('calls flushOutbox after reconnect lands', async () => {
-    const { t, client } = buildCacheClient();
+    const { t, client } = await buildCacheClient();
     await authenticateClient(client);
 
     const flush = vi
@@ -445,7 +452,7 @@ describe('reconnect → flushOutboxOnReconnect', () => {
   });
 
   it('flushOutbox runs AFTER syncOnReconnect', async () => {
-    const { t, client } = buildCacheClient();
+    const { t, client } = await buildCacheClient();
     await authenticateClient(client);
     await client.subscribeChannel('100', 1);
 
@@ -481,7 +488,7 @@ describe('reconnect → flushOutboxOnReconnect', () => {
   });
 
   it('flushOutbox rejection does NOT regress reconnect state', async () => {
-    const { t, client } = buildCacheClient();
+    const { t, client } = await buildCacheClient();
     await authenticateClient(client);
 
     vi.spyOn(client, 'syncChannel').mockResolvedValue({
@@ -520,6 +527,7 @@ describe('reconnect → flushOutboxOnReconnect', () => {
       // cache NOT enabled → outbox engine is null
       reconnect: { enabled: true, initialDelayMs: 50, maxDelayMs: 50, multiplier: 1 },
     });
+    await client.connect();
     await authenticateClient(client);
 
     // flushOutbox would throw CacheDisabledError if invoked. The wiring
@@ -546,6 +554,7 @@ describe('reconnect storm control (P0-12 parity with the Rust SDK)', () => {
       transport: t,
       reconnect: { enabled: true, initialDelayMs: 100, maxDelayMs: 100, multiplier: 1 },
     });
+    await client.connect();
     await authenticateClient(client);
 
     // random=0 → factor 0.7 → 70ms delay.
@@ -592,6 +601,7 @@ describe('reconnect storm control (P0-12 parity with the Rust SDK)', () => {
       transport: t,
       reconnect: { enabled: true, initialDelayMs: 50, maxDelayMs: 50, multiplier: 1 },
     });
+    await client.connect();
     await authenticateClient(client);
 
     t.fireClose();

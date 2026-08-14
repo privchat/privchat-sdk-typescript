@@ -105,11 +105,12 @@ function buildFake(opts: {
   return t;
 }
 
-const newClient = (transport: FakeTransport, withCache: boolean) => {
+const newClient = async (transport: FakeTransport, withCache: boolean) => {
   client = new PrivchatClient({
     transport,
     cache: withCache ? { enabled: true, db: new CacheDB(`mr-${++dbCounter}`) } : undefined,
   });
+  await client.connect();
   return client;
 };
 
@@ -177,7 +178,7 @@ const fireOneWay = (t: FakeTransport, bizType: number, payload: Uint8Array) => {
 describe('markRead RPC', () => {
   it('cache-disabled: pure RPC, returns server response, does not touch cache', async () => {
     const t = buildFake({ channels: [] });
-    const c = newClient(t, /* withCache */ false);
+    const c = await newClient(t, /* withCache */ false);
     const result = await c.markRead('100', 1, '50');
     expect(result.status).toBe('success');
     expect(result.accepted_read_pts).toBe(50);
@@ -188,7 +189,7 @@ describe('markRead RPC', () => {
       channels: [{ channel_id: 100, channel_type: 1, name: 'A', unread_count: 5 }],
       cursors: [{ channel_id: 100, reader_id: 999, last_read_pts: 10 }],
     });
-    const c = newClient(t, true);
+    const c = await newClient(t, true);
     await c.bootstrapChannels();
 
     const before = c.cachedChannels()[0]!;
@@ -215,7 +216,7 @@ describe('markRead RPC', () => {
           accepted_read_pts: 200,
         }),
     });
-    const c = newClient(t, true);
+    const c = await newClient(t, true);
     await c.bootstrapChannels();
 
     const result = await c.markRead('100', 1, '999');
@@ -235,7 +236,7 @@ describe('markRead RPC', () => {
           // accepted_read_pts intentionally absent
         }),
     });
-    const c = newClient(t, true);
+    const c = await newClient(t, true);
     await c.bootstrapChannels();
     await c.markRead('100', 1, '99999');
     expect(c.cachedChannels()[0]!.read_pts).toBe('75');
@@ -246,7 +247,7 @@ describe('markRead RPC', () => {
       channels: [{ channel_id: 100, channel_type: 1, name: 'A', unread_count: 0 }],
       cursors: [{ channel_id: 100, reader_id: 999, last_read_pts: 0 }],
     });
-    const c = newClient(t, true);
+    const c = await newClient(t, true);
     await c.bootstrapChannels();
     await c.markRead('100', 1, '100');
     expect(c.cachedChannels()[0]!.read_pts).toBe('100');
@@ -276,7 +277,7 @@ describe('markRead RPC', () => {
       channels: [],
       markRead: () => errRpc(10100, 'Validation: read_pts 超出频道 current_pts'),
     });
-    const c = newClient(t, true);
+    const c = await newClient(t, true);
     await expect(c.markRead('100', 1, '999')).rejects.toBeInstanceOf(MarkReadValidationError);
   });
 
@@ -285,7 +286,7 @@ describe('markRead RPC', () => {
       channels: [{ channel_id: 100, channel_type: 1, name: 'A', unread_count: 5 }],
       cursors: [{ channel_id: 100, reader_id: 999, last_read_pts: 0 }],
     });
-    const c = newClient(t, true);
+    const c = await newClient(t, true);
     await c.bootstrapChannels();
 
     const snapshots: ChannelRecord[][] = [];
@@ -304,7 +305,7 @@ describe('inbound self_read_pts_updated push', () => {
       channels: [{ channel_id: 100, channel_type: 1, name: 'A', unread_count: 5 }],
       cursors: [{ channel_id: 100, reader_id: 999, last_read_pts: 0 }],
     });
-    const c = newClient(t, true);
+    const c = await newClient(t, true);
     await c.bootstrapChannels();
 
     let pushCount = 0;
@@ -348,7 +349,7 @@ describe('inbound self_read_pts_updated push', () => {
       channels: [{ channel_id: 100, channel_type: 1, name: 'A', unread_count: 5 }],
       cursors: [{ channel_id: 100, reader_id: 999, last_read_pts: 0 }],
     });
-    const c = newClient(t, true);
+    const c = await newClient(t, true);
     await c.bootstrapChannels();
     const events: Array<{ read_pts: string }> = [];
     c.onReadCursorUpdated((event) => events.push({ read_pts: event.read_pts }));
@@ -372,7 +373,7 @@ describe('inbound self_read_pts_updated push', () => {
 
   it('cache-disabled: silently dropped (no L1, no event)', async () => {
     const t = buildFake({ channels: [] });
-    const c = newClient(t, false);
+    const c = await newClient(t, false);
     let pushCount = 0;
     c.onPushMessage(() => pushCount++);
     let cursorEventCount = 0;
@@ -389,7 +390,7 @@ describe('inbound self_read_pts_updated push', () => {
     // No bootstrap → no channel record. The handler returns early
     // without emitting (advanced=false, no previous_read_pts).
     const t = buildFake({ channels: [] });
-    const c = newClient(t, true);
+    const c = await newClient(t, true);
     let cursorEventCount = 0;
     c.onReadCursorUpdated(() => cursorEventCount++);
     fireOneWay(t, MessageType.PushMessageRequest, encodePushMessageRequest(
@@ -406,7 +407,7 @@ describe('inbound peer_read_pts_updated push', () => {
       channels: [{ channel_id: 100, channel_type: 1, name: 'A', unread_count: 0 }],
       cursors: [{ channel_id: 100, reader_id: 999, last_read_pts: 0 }],
     });
-    const c = newClient(t, true);
+    const c = await newClient(t, true);
     await c.bootstrapChannels();
     const before = c.cachedChannels()[0]!;
 
@@ -445,7 +446,7 @@ describe('inbound peer_read_pts_updated push', () => {
       const t = buildFake({
         channels: [{ channel_id: 200, channel_type: 2, name: 'G', unread_count: 0 }],
       });
-      const c = newClient(t, true);
+      const c = await newClient(t, true);
       await c.bootstrapChannels();
       const peerEvents: unknown[] = [];
       c.onPeerReadCursorUpdated((event) => peerEvents.push(event));
@@ -475,7 +476,7 @@ describe('peer_read_pts_updated persists to ChannelRecord.peer_read_pts', () => 
     const t = buildFake({
       channels: [{ channel_id: 100, channel_type: 1, name: 'A', unread_count: 0 }],
     });
-    const c = newClient(t, true);
+    const c = await newClient(t, true);
     await c.bootstrapChannels();
 
     const peerEvents: Array<{ read_pts: string }> = [];
@@ -499,7 +500,7 @@ describe('peer_read_pts_updated persists to ChannelRecord.peer_read_pts', () => 
     const t = buildFake({
       channels: [{ channel_id: 100, channel_type: 1, name: 'A', unread_count: 0 }],
     });
-    const c = newClient(t, true);
+    const c = await newClient(t, true);
     await c.bootstrapChannels();
 
     const fireAt = (read_pts: number) =>
@@ -524,7 +525,7 @@ describe('peer_read_pts_updated persists to ChannelRecord.peer_read_pts', () => 
     const t = buildFake({
       channels: [{ channel_id: 100, channel_type: 1, name: 'A', unread_count: 0 }],
     });
-    const c = newClient(t, true);
+    const c = await newClient(t, true);
     await c.bootstrapChannels();
 
     const peerEvents: Array<{ read_pts: string }> = [];
@@ -550,7 +551,7 @@ describe('peer_read_pts_updated persists to ChannelRecord.peer_read_pts', () => 
     const t = buildFake({
       channels: [{ channel_id: 100, channel_type: 1, name: 'A', unread_count: 0 }],
     });
-    const c = newClient(t, true);
+    const c = await newClient(t, true);
     await c.bootstrapChannels();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (c as any).lastAuth = { user_id: '555', token: 't', device_id: 'd' };
@@ -608,7 +609,7 @@ describe('markRead RPC also emits self read_cursor_updated', () => {
       channels: [{ channel_id: 100, channel_type: 1, name: 'A', unread_count: 5 }],
       cursors: [{ channel_id: 100, reader_id: 999, last_read_pts: 10 }],
     });
-    const c = newClient(t, true);
+    const c = await newClient(t, true);
     await c.bootstrapChannels();
     const events: Array<{ read_pts: string; previous_read_pts?: string }> = [];
     c.onReadCursorUpdated((event) =>
@@ -625,7 +626,7 @@ describe('markRead RPC also emits self read_cursor_updated', () => {
       channels: [{ channel_id: 100, channel_type: 1, name: 'A', unread_count: 0 }],
       cursors: [{ channel_id: 100, reader_id: 999, last_read_pts: 50 }],
     });
-    const c = newClient(t, true);
+    const c = await newClient(t, true);
     await c.bootstrapChannels();
     let eventCount = 0;
     c.onReadCursorUpdated(() => eventCount++);
@@ -644,7 +645,7 @@ describe('RPC + push convergence (MAX-merge)', () => {
       markRead: () =>
         okJson({ status: 'success', channel_id: 100, last_read_pts: 50, accepted_read_pts: 50 }),
     });
-    const c = newClient(t, true);
+    const c = await newClient(t, true);
     await c.bootstrapChannels();
 
     // Push arrives FIRST with 50 (e.g. another tab on same account beat us)

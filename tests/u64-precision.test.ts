@@ -122,6 +122,7 @@ describe('u64 precision — read-cursor push (previously raw JSON.parse)', () =>
       transport: t,
       cache: { enabled: true, db: new CacheDB(`u64-${++dbCounter}`) },
     });
+    await client.connect();
     await client.bootstrapChannels();
 
     // Bootstrap (lossless RPC path) keyed the channel by the EXACT id.

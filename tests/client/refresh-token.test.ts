@@ -33,6 +33,7 @@ describe('refreshAccessToken (B1 non-rotation)', () => {
     };
 
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const result = await client.refreshAccessToken('OLD_REFRESH', 'dev-1');
 
     expect(observedRoute).toBe('account/auth/refresh');
@@ -46,6 +47,7 @@ describe('refreshAccessToken (B1 non-rotation)', () => {
     const t = new FakeTransport();
     t.responder = () => okPayload('A2', 999, 'R2');
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const result = await client.refreshAccessToken('R1', 'dev-1');
     expect(result.refresh_token).toBe('R2');
   });
@@ -54,6 +56,7 @@ describe('refreshAccessToken (B1 non-rotation)', () => {
     const t = new FakeTransport();
     t.responder = () => encodeRpcResponse({ code: 10009, message: '[10009] refresh expired' });
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const err = await client.refreshAccessToken('R', 'dev-1').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(RefreshTokenError);
     expect((err as RefreshTokenError).errorCode).toBe(10009);
@@ -64,6 +67,7 @@ describe('refreshAccessToken (B1 non-rotation)', () => {
     const t = new FakeTransport();
     t.responder = () => encodeRpcResponse({ code: 10010, message: '[10010] revoked' });
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     await expect(client.refreshAccessToken('R', 'dev-1')).rejects.toMatchObject({
       name: 'RefreshTokenError',
       errorCode: 10010,

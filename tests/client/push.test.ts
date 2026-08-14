@@ -60,9 +60,10 @@ const fireOneWay = (t: FakeTransport, bizType: number, payload: Uint8Array) => {
 };
 
 describe('onPushMessage', () => {
-  it('decodes inbound push and fans out to all handlers', () => {
+  it('decodes inbound push and fans out to all handlers', async () => {
     const t = new FakeTransport();
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const seenA: PushMessageRequest[] = [];
     const seenB: PushMessageRequest[] = [];
     client.onPushMessage((m) => seenA.push(m));
@@ -80,9 +81,10 @@ describe('onPushMessage', () => {
     expect(new TextDecoder().decode(seenA[0]!.payload)).toBe('{"content":"hi"}');
   });
 
-  it('auto-ACKs Request-typed push with PushMessageResponse{succeed:true}', () => {
+  it('auto-ACKs Request-typed push with PushMessageResponse{succeed:true}', async () => {
     const t = new FakeTransport();
-    new PrivchatClient({ transport: t });
+    const client = new PrivchatClient({ transport: t });
+    await client.connect();
     fireRequest(
       t,
       MessageType.PushMessageRequest,
@@ -97,9 +99,10 @@ describe('onPushMessage', () => {
     expect(decodePushMessageResponse(ack.payload).succeed).toBe(true);
   });
 
-  it('does NOT auto-ACK OneWay-typed push (server did not request one)', () => {
+  it('does NOT auto-ACK OneWay-typed push (server did not request one)', async () => {
     const t = new FakeTransport();
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const seen: PushMessageRequest[] = [];
     client.onPushMessage((m) => seen.push(m));
 
@@ -113,9 +116,10 @@ describe('onPushMessage', () => {
     expect(t.sent).toHaveLength(0);
   });
 
-  it('returns an unsubscribe fn that detaches the handler', () => {
+  it('returns an unsubscribe fn that detaches the handler', async () => {
     const t = new FakeTransport();
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const seen: PushMessageRequest[] = [];
     const off = client.onPushMessage((m) => seen.push(m));
 
@@ -126,9 +130,10 @@ describe('onPushMessage', () => {
     expect(seen).toHaveLength(1);
   });
 
-  it('handler errors do not break the inbound loop', () => {
+  it('handler errors do not break the inbound loop', async () => {
     const t = new FakeTransport();
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const survivor: PushMessageRequest[] = [];
     client.onPushMessage(() => {
       throw new Error('boom');
@@ -141,9 +146,10 @@ describe('onPushMessage', () => {
 });
 
 describe('onPushBatch', () => {
-  it('decodes batch and auto-ACKs', () => {
+  it('decodes batch and auto-ACKs', async () => {
     const t = new FakeTransport();
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const seen: PushBatchRequest[] = [];
     client.onPushBatch((b) => seen.push(b));
 
@@ -167,9 +173,10 @@ describe('onPushBatch', () => {
 });
 
 describe('onPong', () => {
-  it('fires for OneWay PongResponse pushes', () => {
+  it('fires for OneWay PongResponse pushes', async () => {
     const t = new FakeTransport();
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const seen: number[] = [];
     client.onPong((p) => seen.push(p.timestamp));
 

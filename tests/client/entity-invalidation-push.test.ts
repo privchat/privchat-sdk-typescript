@@ -61,6 +61,7 @@ describe('entity invalidation control push', () => {
   it('coalesces duplicate hints, syncs first, and never emits a chat message', async () => {
     const transport = new FakeTransport();
     const client = new PrivchatClient({ transport });
+    await client.connect();
     const sync = vi.fn().mockResolvedValue('42');
     replaceEntitySync(client, sync);
     const events: SequencedSdkEvent[] = [];
@@ -86,6 +87,7 @@ describe('entity invalidation control push', () => {
   it('preserves a user scope for targeted incremental sync', async () => {
     const transport = new FakeTransport();
     const client = new PrivchatClient({ transport });
+    await client.connect();
     const sync = vi.fn().mockResolvedValue('44');
     replaceEntitySync(client, sync);
     const push = invalidationPush();
@@ -115,6 +117,7 @@ describe('entity invalidation control push', () => {
   it('retries a transient sync failure and emits only after success', async () => {
     const transport = new FakeTransport();
     const client = new PrivchatClient({ transport });
+    await client.connect();
     const sync = vi.fn()
       .mockRejectedValueOnce(new Error('temporary network failure'))
       .mockResolvedValueOnce('43');

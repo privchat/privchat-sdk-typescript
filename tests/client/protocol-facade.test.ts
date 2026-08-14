@@ -74,6 +74,7 @@ describe('PrivchatClient layer-1 protocol facade', () => {
     t.responseBizTypeFor = () => MessageType.AuthorizationResponse;
 
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const resp = await client.authorize(baseAuth);
 
     expect(t.sent).toHaveLength(1);
@@ -99,6 +100,7 @@ describe('PrivchatClient layer-1 protocol facade', () => {
     };
 
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const resp = await client.sendMessage(baseSend);
 
     expect(t.sent[0]!.bizType).toBe(MessageType.SendMessageRequest);
@@ -121,6 +123,7 @@ describe('PrivchatClient layer-1 protocol facade', () => {
     };
 
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const resp = await client.subscribe(baseSub);
 
     expect(t.sent[0]!.bizType).toBe(MessageType.SubscribeRequest);
@@ -143,6 +146,7 @@ describe('PrivchatClient layer-1 protocol facade', () => {
     };
 
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     await client.unsubscribe({ ...baseSub, action: SubscribeAction.Subscribe });
 
     expect(observedAction).toBe(SubscribeAction.Unsubscribe);
@@ -159,6 +163,7 @@ describe('PrivchatClient layer-1 protocol facade', () => {
     };
 
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const resp = await client.rpc({ route: '/v1/test', body: opaque });
 
     expect(t.sent[0]!.bizType).toBe(MessageType.RpcRequest);
@@ -176,6 +181,7 @@ describe('PrivchatClient layer-1 protocol facade', () => {
 
     const before = Date.now();
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const resp = await client.ping();
     const after = Date.now();
 
@@ -192,6 +198,7 @@ describe('PrivchatClient layer-1 protocol facade', () => {
       return encodePongResponse({ timestamp: 43 });
     };
     const client = new PrivchatClient({ transport: t });
+    await client.connect();
     const resp = await client.ping({ timestamp: 42 });
     expect(resp.timestamp).toBe(43);
   });

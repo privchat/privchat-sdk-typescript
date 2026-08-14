@@ -47,6 +47,7 @@ describe('account', () => {
       return ok({ users: [], total: 0, query: 'alice' });
     };
     const c = new PrivchatClient({ transport: cap.t });
+    await c.connect();
     await c.accountSearch('alice');
   });
 });
@@ -55,6 +56,7 @@ describe('friend', () => {
   it('friendApply', async () => {
     const cap = captureRpc();
     const c = new PrivchatClient({ transport: cap.t });
+    await c.connect();
     await c.friendApply(42, 'hi', 'friend', '42');
     expect(cap.get().route).toBe('contact/friend/apply');
     expect(cap.get().body).toEqual({
@@ -70,6 +72,7 @@ describe('friend', () => {
     const t = new FakeTransport();
     t.responder = () => ok(900710001);
     const c = new PrivchatClient({ transport: t });
+    await c.connect();
     const id = await c.friendAccept(42, 'ok');
     expect(id).toBe(900710001);
   });
@@ -83,6 +86,7 @@ describe('friend', () => {
     ] as const) {
       const cap = captureRpc();
       const c = new PrivchatClient({ transport: cap.t });
+      await c.connect();
       await fn(c);
       expect(cap.get().route).toBe(expectedRoute);
     }
@@ -115,6 +119,7 @@ describe('blacklist', () => {
     ] as const) {
       const cap = captureRpc();
       const c = new PrivchatClient({ transport: cap.t });
+      await c.connect();
       await fn(c);
       expect(cap.get().route).toBe(expectedRoute);
       expect(cap.get().body).toEqual(expectedBody);
@@ -131,6 +136,7 @@ describe('channel', () => {
   ] as const)('hits %#', async (fn, expectedRoute) => {
     const cap = captureRpc();
     const c = new PrivchatClient({ transport: cap.t });
+    await c.connect();
     await fn(c);
     expect(cap.get().route).toBe(expectedRoute);
   });
@@ -138,6 +144,7 @@ describe('channel', () => {
   it('channelPin preserves a snowflake channel id above 2^53', async () => {
     const cap = captureRpc();
     const c = new PrivchatClient({ transport: cap.t });
+    await c.connect();
     await c.channelPin('9007199254740993', true);
     expect(cap.get().rawBody).toContain('"channel_id":9007199254740993');
   });
@@ -172,6 +179,7 @@ describe('group', () => {
         total: 2,
       });
     const c = new PrivchatClient({ transport: t });
+    await c.connect();
 
     const response = await c.groupMemberList(1);
 
@@ -207,6 +215,7 @@ describe('group', () => {
   ] as const)('hits %#', async (fn, expectedRoute) => {
     const cap = captureRpc();
     const c = new PrivchatClient({ transport: cap.t });
+    await c.connect();
     await fn(c);
     expect(cap.get().route).toBe(expectedRoute);
   });
@@ -222,6 +231,7 @@ describe('message', () => {
   ] as const)('hits %#', async (fn, expectedRoute) => {
     const cap = captureRpc();
     const c = new PrivchatClient({ transport: cap.t });
+    await c.connect();
     await fn(c);
     expect(cap.get().route).toBe(expectedRoute);
   });
@@ -229,6 +239,7 @@ describe('message', () => {
   it('messageHistory preserves channel and cursor snowflakes above 2^53', async () => {
     const cap = captureRpc();
     const c = new PrivchatClient({ transport: cap.t });
+    await c.connect();
     await c.messageHistory('9007199254740993', 50, '9007199254740995');
     expect(cap.get().rawBody).toContain('"channel_id":9007199254740993');
     expect(cap.get().rawBody).toContain(
@@ -244,6 +255,7 @@ describe('presence', () => {
   ] as const)('hits %#', async (fn, expectedRoute) => {
     const cap = captureRpc();
     const c = new PrivchatClient({ transport: cap.t });
+    await c.connect();
     await fn(c);
     expect(cap.get().route).toBe(expectedRoute);
   });

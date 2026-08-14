@@ -62,6 +62,7 @@ describe('inbound push → cache absorption', () => {
       transport: t,
       cache: { enabled: true, db: new CacheDB(`push-${++dbCounter}`) },
     });
+    await client.connect();
 
     const patches: ConversationPatch[] = [];
     client.observeConversation('12345', 1, (_, p) => patches.push(p));
@@ -79,6 +80,7 @@ describe('inbound push → cache absorption', () => {
   it('with cache disabled, push is silently ignored by cache (still emits L1 event)', async () => {
     const t = new FakeTransport();
     client = new PrivchatClient({ transport: t });
+    await client.connect();
     let pushCount = 0;
     client.onPushMessage(() => pushCount++);
     fireOneWay(t, MessageType.PushMessageRequest, encodePushMessageRequest(samplePush()));
@@ -92,6 +94,7 @@ describe('inbound push → cache absorption', () => {
       transport: t,
       cache: { enabled: true, db: new CacheDB(`batch-${++dbCounter}`) },
     });
+    await client.connect();
     const seen: Array<string | undefined> = [];
     client.observeConversation('12345', 1, (_, p) => {
       for (const m of p.upserted) seen.push(m.server_message_id);
@@ -125,6 +128,7 @@ describe('inbound push → cache absorption', () => {
       transport: t,
       cache: { enabled: true, db: new CacheDB(`promote-${++dbCounter}`) },
     });
+    await client.connect();
     // Authenticate as alice (not the sender) so unread bumps
     await client.connect();
     setupAuthOk(t);
