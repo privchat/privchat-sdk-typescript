@@ -797,7 +797,7 @@ export class PrivchatClient {
     } = options;
     this.transport = new TransportClient({
       ...rest,
-      transport: options.transport,
+      connector: options.transport,
     });
     this.clientInfo = ci ?? defaultClientInfo();
     this.deviceInfo = di ?? omitId(defaultDeviceInfo(''));
