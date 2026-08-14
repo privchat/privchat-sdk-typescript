@@ -3,6 +3,7 @@ import {
   PacketType,
   type ConnectOptions,
   type EnqueuedInfo,
+  type TransportCloseEvent,
   type TransportConnector,
   type TransportObserver,
   type TransportSession,
@@ -54,14 +55,15 @@ export class FakeSession implements TransportSession {
     };
   }
 
-  close(reason?: unknown): Promise<void> {
+  close(event?: Partial<TransportCloseEvent>): Promise<void> {
     if (this.open) {
       this.open = false;
       // Mirror the real WebSocket session: the close report lands on the
       // next microtask, which is what runs the SDK's close-driven state
       // machine (heartbeat failure → close → auto-reconnect).
       queueMicrotask(() => {
-        for (const o of [...this.observers]) o.onClose?.(reason);
+        for (const o of [...this.observers])
+          o.onClose?.({ intentional: true, ...event });
       });
     }
     return Promise.resolve();
@@ -71,10 +73,11 @@ export class FakeSession implements TransportSession {
     if (!this.open) return;
     for (const o of [...this.observers]) o.onMessage?.(packet);
   }
-  fireClose(ev?: unknown): void {
+  fireClose(ev?: Partial<TransportCloseEvent>): void {
     if (!this.open) return;
     this.open = false;
-    for (const o of [...this.observers]) o.onClose?.(ev);
+    for (const o of [...this.observers])
+      o.onClose?.({ intentional: false, ...ev });
   }
   fireError(e: unknown): void {
     for (const o of [...this.observers]) o.onError?.(e);
@@ -120,7 +123,7 @@ export class FakeTransport implements TransportConnector {
   fireMessage(packet: Packet): void {
     this.sessions[this.sessions.length - 1]?.fireMessage(packet);
   }
-  fireClose(ev?: unknown): void {
+  fireClose(ev?: Partial<TransportCloseEvent>): void {
     this.sessions[this.sessions.length - 1]?.fireClose(ev);
   }
   fireError(e: unknown): void {
