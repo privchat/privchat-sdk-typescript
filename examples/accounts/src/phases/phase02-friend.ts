@@ -4,12 +4,12 @@ import { emptyMetrics, type PhaseResult } from '../types.js';
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-function firstUserId(search: AccountSearchResponse, username: string): number {
+function firstHit(search: AccountSearchResponse, username: string) {
   const hit = search.users.find((u) => u.username === username);
   if (!hit) {
     throw new Error(`search did not return ${username}`);
   }
-  return hit.user_id;
+  return hit;
 }
 
 export async function phase02_friend_system(
@@ -31,9 +31,18 @@ export async function phase02_friend_system(
     const search = await fromClient.accountSearch(toUsername);
     metrics.rpc_calls += 1;
     metrics.rpc_successes += 1;
-    const toUid = firstUserId(search, toUsername);
+    const hit = firstHit(search, toUsername);
+    const toUid = hit.user_id;
 
-    const apply = await fromClient.friendApply(toUid, 'hello from accounts example', 'friend', String(toUid));
+    // 隐私闸(2026-07-21)会校验 source:声明 friend 但双方还不是好友 → 10004。
+    // 正确姿势与 Rust harness 一致:search 之后用 source:'search' + 服务端
+    // 发回的 search_session_id 作为凭证申请。
+    const apply = await fromClient.friendApply(
+      toUid,
+      'hello from accounts example',
+      'search',
+      hit.search_session_id,
+    );
     metrics.rpc_calls += 1;
     if (apply.user_id > 0) metrics.rpc_successes += 1;
     else metrics.errors.push(`${from}->${to} apply failed`);

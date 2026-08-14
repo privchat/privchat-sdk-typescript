@@ -37,7 +37,8 @@ export async function phase16_profile_cache(
 
   const host = ENV('PRIVCHAT_HOST', '127.0.0.1');
   const wsPort = Number(ENV('PRIVCHAT_WS_PORT', '9080'));
-  const url = `ws://${host}:${wsPort}/`;
+  // 复用 manager 的 URL(含 /gate listener path);自拼根路径被 404 拒握手。
+  const url = mgr.url;
 
   // Spin up a fresh cache-enabled client for alice — we want a cold
   // IDB to prove bootstrap really hydrates from server, not from any

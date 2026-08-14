@@ -60,7 +60,7 @@ export class MultiAccountManager {
   readonly directChannels = new Map<string, number>();
   readonly groupChannels = new Map<string, number>();
   readonly suffix: string;
-  private readonly url: string;
+  readonly url: string;
 
   private constructor(url: string, suffix: string) {
     this.url = url;
@@ -70,7 +70,9 @@ export class MultiAccountManager {
   static async create(opts: MultiAccountManagerInit = {}): Promise<MultiAccountManager> {
     const host = opts.host ?? ENV('PRIVCHAT_HOST', '127.0.0.1');
     const wsPort = opts.wsPort ?? ENV_PORT('PRIVCHAT_WS_PORT', 9080);
-    const url = `ws://${host}:${wsPort}/`;
+    // config.toml 的 websocket listener 默认 path="/gate";根路径会被 404 拒握手。
+    const wsPath = ENV('PRIVCHAT_WS_PATH', '/gate');
+    const url = `ws://${host}:${wsPort}${wsPath}`;
     const suffix =
       opts.suffix ?? `${Date.now() % 100_000}${Math.floor(Math.random() * 1000)}`;
 

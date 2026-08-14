@@ -30,7 +30,8 @@ export async function phase17_friendship_cache(
 
   const host = ENV('PRIVCHAT_HOST', '127.0.0.1');
   const wsPort = Number(ENV('PRIVCHAT_WS_PORT', '9080'));
-  const url = `ws://${host}:${wsPort}/`;
+  // 复用 manager 的 URL(含 /gate listener path);自拼根路径被 404 拒握手。
+  const url = mgr.url;
 
   // Earlier phases (notably phase13's reconnect dance) leave the
   // manager's alice client in a closed state, so we cannot reuse it.

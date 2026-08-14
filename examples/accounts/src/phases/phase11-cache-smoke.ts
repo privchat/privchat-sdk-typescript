@@ -31,7 +31,8 @@ export async function phase11_cache_smoke(
   const aliceCfg = mgr.config('alice');
   const host = ENV('PRIVCHAT_HOST', '127.0.0.1');
   const wsPort = Number(ENV('PRIVCHAT_WS_PORT', '9080'));
-  const url = `ws://${host}:${wsPort}/`;
+  // 复用 manager 的 URL(含 /gate listener path);自拼根路径被 404 拒握手。
+  const url = mgr.url;
 
   // Cache-enabled client. Disable auto-reconnect to keep the smoke
   // bounded; we won't need it.
@@ -131,12 +132,17 @@ export async function phase11_cache_smoke(
           `last echo patch status=${ack.upserted[0]?.status} server_message_id=${ack.upserted[0]?.server_message_id}, expected sent w/ server id`,
         );
       }
-      const ackedServerId =
-        sendResp.status === 'sent' ? sendResp.response.server_message_id : undefined;
-      if (ack.removed.length === 1 && ack.removed[0] !== ackedServerId) {
+      // 三 ID 分权(CODEX-2)后 message.id 稳定:ack 是**原地更新**同一行,
+      // 不再 remove+insert。现行契约由 tests/client/local-echo.test.ts:141
+      // 钉死(removed=[]);旧断言(期望 removed=[localId])是分权前的产物。
+      if (ack.removed.length === 0 && ack.upserted[0]?.id === pending.upserted[0]?.id) {
         metrics.rpc_successes += 1;
-      } else if (ack.removed.length === 0) {
-        metrics.errors.push('ack patch missing removed=[localId]');
+      } else {
+        metrics.errors.push(
+          `ack patch shape drifted: removed=${JSON.stringify(ack.removed)} ` +
+            `pendingId=${pending.upserted[0]?.id} ackId=${ack.upserted[0]?.id} ` +
+            '(stable-id contract: in-place update, removed=[])',
+        );
       }
     }
 

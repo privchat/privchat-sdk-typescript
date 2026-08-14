@@ -53,7 +53,8 @@ export async function phase14_outbox(
 
   const host = ENV('PRIVCHAT_HOST', '127.0.0.1');
   const wsPort = Number(ENV('PRIVCHAT_WS_PORT', '9080'));
-  const url = `ws://${host}:${wsPort}/`;
+  // 复用 manager 的 URL(含 /gate listener path);自拼根路径被 404 拒握手。
+  const url = mgr.url;
 
   // Wait for bob's manager to be re-authenticated after phase12's eviction.
   if (!(await waitForState(mgr.client('bob'), 'authenticated', 15_000))) {

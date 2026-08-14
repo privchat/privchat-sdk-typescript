@@ -69,7 +69,7 @@ export async function phase18_history_search_jump(
   // 3) jumpToMessageContext：anchor + 回灌（cache API——起一个 cache-enabled
   //    客户端，等价 Web/H5 的运行形态；主测试 client 未开 cache）
   const bobCfg = mgr.config('bob');
-  const url = `ws://${ENV('PRIVCHAT_HOST', '127.0.0.1')}:${ENV('PRIVCHAT_WS_PORT', '9080')}/`;
+  const url = mgr.url;
   const cacheClient = new PrivchatClient({
     url,
     defaultTimeoutMs: 30_000,
