@@ -1,9 +1,8 @@
 {
   "name": "@privchat/sdk",
-  "version": "0.1.0-alpha.0",
+  "version": "0.1.0-beta.0",
   "description": "TypeScript SDK for PrivChat — typed FlatBuffers protocol on top of @msgtrans/client",
   "type": "module",
-  "private": true,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -30,7 +29,8 @@
     "test:watch": "vitest",
     "example:accounts": "npm run codegen && tsx examples/accounts/src/main.ts",
     "example:reconnect": "npm run build && node examples/reconnect-resume/rc2-resume-sync.mjs",
-    "example:transfer": "npm run codegen && tsx examples/transfer/src/main.ts"
+    "example:transfer": "npm run codegen && tsx examples/transfer/src/main.ts",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
     "dexie": "^4.4.2",
@@ -68,5 +68,10 @@
         "./dist/cache-idb.d.ts"
       ]
     }
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "beta",
+    "registry": "https://registry.npmjs.org"
   }
 }
