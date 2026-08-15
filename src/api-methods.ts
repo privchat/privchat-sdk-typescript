@@ -33,6 +33,8 @@ import type {
   ChannelMuteResponse,
   ChannelPinResponse,
   FileGetUrlResponse,
+  FileRequestChunkedUploadTokenRequest,
+  FileRequestChunkedUploadTokenResponse,
   FileRequestUploadTokenResponse,
   FileUploadCallbackResponse,
   FileUploadResult,
@@ -265,6 +267,12 @@ declare module './client.js' {
       sha256?: string;
       transform_version?: number;
     }): Promise<FileRequestUploadTokenResponse>;
+
+    /** 分片上传 token（RESUMABLE_UPLOAD_SPEC §2）。命中回 `claim_token`，未命中回
+     *  `upload_token` + `upload_url` + `base_unit`。上传本身用 [uploadSealedFileChunked]。 */
+    fileRequestChunkedUploadToken(
+      args: FileRequestChunkedUploadTokenRequest,
+    ): Promise<FileRequestChunkedUploadTokenResponse>;
 
     /** Dedup hit: exchange the token for a file_id **of your own**, without
      *  uploading a byte. Probing and claiming are separate calls because a
@@ -734,6 +742,19 @@ proto.fileRequestUploadToken = function (args) {
     filename: args.filename,
     sha256: args.sha256,
     transform_version: args.transform_version,
+  });
+};
+
+proto.fileRequestChunkedUploadToken = function (args) {
+  return this.rpcCallTyped(Routes.file.REQUEST_CHUNKED_UPLOAD_TOKEN, {
+    file_type: args.file_type,
+    business_type: args.business_type,
+    file_size: args.file_size,
+    file_hash: args.file_hash,
+    mime_type: args.mime_type,
+    filename: args.filename,
+    transform_version: args.transform_version ?? 0,
+    force_upload: args.force_upload ?? false,
   });
 };
 

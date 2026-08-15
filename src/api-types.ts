@@ -217,6 +217,35 @@ export interface FileRequestUploadTokenResponse {
   max_size?: number;
 }
 
+/** `file/request_chunked_upload_token` 请求（RESUMABLE_UPLOAD_SPEC §2）。 */
+export interface FileRequestChunkedUploadTokenRequest {
+  file_type: 'image' | 'video' | 'voice' | 'file' | 'other';
+  business_type: string;
+  /** 封装后字节数。 */
+  file_size: number;
+  /** 封装后 SHA-256（hex）。分片路径必带。 */
+  file_hash: string;
+  mime_type: string;
+  filename?: string;
+  transform_version?: number;
+  /** claim 失败后置 true 跳过预检；同一条消息只置一次。 */
+  force_upload?: boolean;
+}
+
+/** `file/request_chunked_upload_token` 响应。两种形态互斥。 */
+export interface FileRequestChunkedUploadTokenResponse {
+  already_exists: boolean;
+  /** 命中：拿去 `file/claim_existing`。 */
+  claim_token?: string;
+  /** 未命中：`{upload_id}.{secret}`，四个分片端点只认它。 */
+  upload_token?: string;
+  /** `.../files`：拼 `/chunk` `/status` `/complete` `/abort`。 */
+  upload_url?: string;
+  /** 寻址网格（字节）。 */
+  base_unit?: number;
+  expires_at?: number;
+}
+
 export interface FileUploadCallbackRequest {
   file_id: string;
   user_id: number;

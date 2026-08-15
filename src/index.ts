@@ -173,6 +173,16 @@ export {
   type UploadProgressEvent,
 } from './api-methods.js';
 
+// 分片上传（RESUMABLE_UPLOAD_SPEC）：编排 + 分片端点。
+export {
+  CHUNKED_UPLOAD_THRESHOLD,
+  UploadSessionGoneError,
+  claimMissShouldReupload,
+  uploadSealedAttachment,
+  uploadSealedFileChunked,
+  type ChunkedUploadSession,
+} from './chunked-upload.js';
+
 // ----- ID / number boundary helpers -----
 export {
   bigintToIdString,

@@ -94,6 +94,8 @@ export const Routes = {
   },
   file: {
     REQUEST_UPLOAD_TOKEN: 'file/request_upload_token',
+    /** 分片上传 token（RESUMABLE_UPLOAD_SPEC §2）；与整包接口彼此独立。 */
+    REQUEST_CHUNKED_UPLOAD_TOKEN: 'file/request_chunked_upload_token',
     CLAIM_EXISTING: 'file/claim_existing',
     UPLOAD_CALLBACK: 'file/upload_callback',
     GET_URL: 'file/get_url',
