@@ -1,34 +1,73 @@
 # @privchat/sdk
 
-TypeScript SDK for [PrivChat](https://privchat.dev) — a typed, wire-compatible client built on FlatBuffers + msgtrans. Targets browser (web) and Tauri/Electron desktop. Follows the same protocol contract and method-naming conventions as the Rust [`privchat-sdk`](../privchat-sdk).
+TypeScript client SDK for [PrivChat](https://privchat.dev). Typed, wire-compatible with the
+Rust core, built on FlatBuffers + msgtrans. Targets the browser and Tauri/Electron desktop.
 
-> **Status:** v0.1.0-alpha. Phase 3 complete (protocol codecs + typed protocol facade + Rust-style RPC sugar + L1 event bus + auto-reconnect + token-refresh primitive). Local message store / outbound queue / sync engine intentionally **not** yet implemented — see [Roadmap](#roadmap).
+> **Not a binding.** This is an independent TypeScript implementation that follows the same
+> protocol contract and method naming as the Rust
+> [`privchat-sdk`](https://github.com/privchat/privchat-sdk) — verified by cross-language
+> fixtures, so a TS web client and a Rust mobile client interoperate through one
+> `privchat-server`. Behaviour is mirrored deliberately; it is not generated.
 
----
+**Status:** `0.1.0-beta.0`. Phase 5 closed the SDK as a runtime foundation (tag
+`ts-sdk-phase5-web-im-runtime`) — see [Roadmap](#roadmap).
 
-## What's in vs. out
+## Ecosystem
 
-**Currently shipped (good for: admin consoles, customer-service tools, lightweight web management UIs):**
+```
+@privchat/sdk            ← this package: protocol, cache, sync, outbox
+        ↑
+@privchat/react          ← React bindings (hooks, providers, timeline state)
+        ↑
+privchat-web             privchat-h5
+(desktop web)            (Taro 4 + React 18 + NutUI, H5 only)
+```
 
-- Transport: WebSocket via `@msgtrans/client`, auto-reconnect with backoff
-- Wire format: FlatBuffers protocol codec for every PrivChat message type
-- Typed protocol facade: `authorize / sendMessage / subscribe / unsubscribe / rpc / ping`
-- Rust-style typed RPC sugar: ~30 methods covering friend / group / channel / blacklist / message / account / presence
-- Token refresh primitive (`refreshAccessToken`) + frozen `AuthErrorKind` classification
-- L1 strong-typed event bus with sequence-id-based replay (`observeEvents` / `eventsSince` / `recentEvents`)
-- Connection-state machine + session snapshot
+The three packages are **separate repositories linked by `file:`**, not a monorepo. Both
+apps depend on `@privchat/react` *and* on `@privchat/sdk` directly — React for UI state,
+the SDK for anything the hooks do not cover.
 
-**Not yet implemented (needed for: full Telegram-Web / WeChat-Web style clients):**
+| Package | Repository | Role |
+|---|---|---|
+| `@privchat/sdk` | privchat-sdk-typescript | this package |
+| `@privchat/react` | [privchat-react](https://github.com/privchat/privchat-react) | React wrapper over the SDK |
+| `privchat-web` | [privchat-web](https://github.com/privchat/privchat-web) | desktop web client |
+| `privchat-h5` | privchat-h5 *(private)* | mobile H5 client |
 
-- Persistent message store (IndexedDB / sql.js)
-- Local timeline cache + read-through fetch
-- Offline outbound queue + retry + persistence
-- Read cursor + unread count local projection
-- PTS-based sync engine (`get_difference`, `mark_read_to_pts`)
-- Multi-tab coordination (BroadcastChannel + leader election)
-- Media download state machine
+If you are building a React app, start with `@privchat/react`. Use this package directly
+for non-React hosts, or when you need the parts React does not wrap.
 
-The roadmap below maps how those will land in Phase 4 → 6.
+## What it does
+
+- **Transport** — WebSocket via `@msgtrans/client`, auto-reconnect with backoff.
+  Browser builds are WebSocket-only; TCP/QUIC exist in the Rust SDK, not here.
+- **Wire format** — FlatBuffers codec for every PrivChat message type.
+- **Typed API** — protocol facade (`authorize` / `sendMessage` / `subscribe` / `rpc` / `ping`)
+  plus ~30 Rust-style RPC methods across friend / group / channel / blacklist / message /
+  account / presence.
+- **Local cache** — IndexedDB store with cache-first read-through: channels, messages,
+  profiles, group members, avatars.
+- **Sync** — PTS-based gap-fill after reconnect (`sync/get_difference`), per-channel mutex,
+  resync and full-rebuild recovery paths.
+- **Outbound queue** — sends survive offline and page reloads; per-channel FIFO with
+  exponential backoff, ACK convergence, `'sent' | 'queued'` results instead of rejections.
+- **Read cursors** — idempotent MAX-merge, multi-device convergence, own/peer cursor events.
+- **Attachments** — client-side encryption, chunked resumable upload, thumbnails.
+- **Events** — L1 typed event bus with sequence-id replay (`observeEvents` / `eventsSince`
+  / `recentEvents`).
+- **Auth** — token-refresh primitive with a frozen `AuthErrorKind` classification.
+
+### Left to the host application
+
+Deliberately outside the SDK, because they are browser-runtime concerns and the SDK stays
+platform-neutral (it also targets Tauri, Electron, Cocos Creator):
+
+- Multi-tab coordination (`BroadcastChannel` leader election, IndexedDB ownership)
+- Page-visibility and lifecycle policy
+- Timeline UI
+
+The SDK exposes the lifecycle hooks, state queries and event observers those need. See
+[`docs/WEB_RUNTIME_INTEGRATION_NOTES.md`](./docs/WEB_RUNTIME_INTEGRATION_NOTES.md).
 
 ---
 
