@@ -45,14 +45,18 @@ for non-React hosts, or when you need the parts React does not wrap.
 - **Typed API** — protocol facade (`authorize` / `sendMessage` / `subscribe` / `rpc` / `ping`)
   plus ~30 Rust-style RPC methods across friend / group / channel / blacklist / message /
   account / presence.
-- **Local cache** — IndexedDB store with cache-first read-through: channels, messages,
-  profiles, group members, avatars.
+- **Local cache (opt-in)** — IndexedDB store with cache-first read-through: channels,
+  messages, profiles, group members, avatars. Off by default; the consumer injects a
+  `CacheDB` via `PrivchatClientOptions.cache`, so apps that skip it ship no IndexedDB code.
 - **Sync** — PTS-based gap-fill after reconnect (`sync/get_difference`), per-channel mutex,
   resync and full-rebuild recovery paths.
 - **Outbound queue** — sends survive offline and page reloads; per-channel FIFO with
   exponential backoff, ACK convergence, `'sent' | 'queued'` results instead of rejections.
 - **Read cursors** — idempotent MAX-merge, multi-device convergence, own/peer cursor events.
-- **Attachments** — client-side encryption, chunked resumable upload, thumbnails.
+- **Attachments** — client-side encryption (`sealAttachment`) and chunked resumable
+  upload. Thumbnail *references* (`thumbnail_file_id` / `thumbnail_url`) travel through
+  the protocol types; generating the thumbnail itself is the host's job — unlike the Rust
+  SDK, this package does no image encoding.
 - **Events** — L1 typed event bus with sequence-id replay (`observeEvents` / `eventsSince`
   / `recentEvents`).
 - **Auth** — token-refresh primitive with a frozen `AuthErrorKind` classification.
