@@ -107,7 +107,7 @@ async function fetchStatus(
   };
 }
 
-type ChunkVerdict = 'ok' | 'retry' | 'resync' | 'gone' | 'fatal';
+export type ChunkVerdict = 'ok' | 'retry' | 'resync' | 'gone' | 'fatal';
 
 async function putChunk(
   session: ChunkedUploadSession,
@@ -133,8 +133,19 @@ async function putChunk(
     return 'retry';
   }
   const env = await readEnvelope(resp);
-  switch (env.code) {
+  return chunkVerdict(env.code, resp.status >= 500);
+}
+
+/** 一次分片 PUT 响应 → 客户端动作。**TS 与 Rust `chunk_verdict` 必须逐字一致**。
+ *
+ *  已知业务码给定论；其余（未知码 / 20616 未对齐 / 20617 模式冲突 / 无法解析→code=-1）
+ *  按 HTTP 状态兜底：5xx 视为瞬时错误可重试，其余终局失败。
+ *
+ *  🔴 少了 5xx 这一路，一次数据库抖动返回的带未知码的 500 会被直接判死、放弃整份上传。 */
+export function chunkVerdict(code: number, isServerError: boolean): ChunkVerdict {
+  switch (code) {
     case 0:
+    case CODE_SESSION_COMPLETED:
       return 'ok';
     case CODE_CHECKSUM_MISMATCH:
     case CODE_SESSION_BUSY:
@@ -142,12 +153,10 @@ async function putChunk(
     case CODE_RANGE_OVERLAP:
     case CODE_MISSING_RANGES:
       return 'resync';
-    case CODE_SESSION_COMPLETED:
-      return 'ok';
     case CODE_SESSION_GONE:
       return 'gone';
     default:
-      return resp.status >= 500 ? 'retry' : 'fatal';
+      return isServerError ? 'retry' : 'fatal';
   }
 }
 

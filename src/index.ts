@@ -180,6 +180,8 @@ export {
   claimMissShouldReupload,
   uploadSealedAttachment,
   uploadSealedFileChunked,
+  chunkVerdict,
+  type ChunkVerdict,
   type ChunkedUploadSession,
 } from './chunked-upload.js';
 

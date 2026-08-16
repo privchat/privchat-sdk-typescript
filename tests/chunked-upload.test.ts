@@ -5,6 +5,7 @@ import {
   uploadSealedAttachment,
   uploadSealedFileChunked,
   UploadSessionGoneError,
+  chunkVerdict,
 } from '../src/chunked-upload.js';
 
 const UNIT = 64 * 1024;
@@ -81,7 +82,7 @@ describe('uploadSealedFileChunked (wire)', () => {
   beforeEach(() => {
     vi.stubGlobal('fetch', vi.fn((i: RequestInfo | URL, init?: RequestInit) => server.handler(i, init)));
   });
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => { vi.unstubAllGlobals(); });
 
   it('uploads on the grid, first chunk is one base_unit, bytes reassemble exactly', async () => {
     const blob = payload(UNIT * 3 + 999);
@@ -133,7 +134,7 @@ describe('uploadSealedAttachment (orchestration)', () => {
   beforeEach(() => {
     vi.stubGlobal('fetch', vi.fn((i: RequestInfo | URL, init?: RequestInit) => server.handler(i, init)));
   });
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => { vi.unstubAllGlobals(); });
 
   function fakeClient(opts: { hits: boolean[]; claimMiss?: boolean }) {
     const requests: Array<{ force: boolean }> = [];
@@ -202,5 +203,27 @@ describe('uploadSealedAttachment (orchestration)', () => {
     expect(f.claims()).toBe(1);
     expect(token).toBe(TOKEN);
     expect(server.assembled()).toEqual(blob);
+  });
+});
+
+
+describe('chunkVerdict (must match Rust chunk_verdict byte-for-byte)', () => {
+  it('known codes are decided regardless of HTTP status', () => {
+    expect(chunkVerdict(0, true)).toBe('ok');
+    expect(chunkVerdict(20614, false)).toBe('ok');
+    expect(chunkVerdict(20611, true)).toBe('retry');
+    expect(chunkVerdict(20612, false)).toBe('retry');
+    expect(chunkVerdict(20610, true)).toBe('resync');
+    expect(chunkVerdict(20615, false)).toBe('resync');
+    expect(chunkVerdict(20613, true)).toBe('gone');
+  });
+  it('unknown / unparseable bodies fall back on HTTP 5xx → retry, else fatal', () => {
+    expect(chunkVerdict(99999, true)).toBe('retry');
+    expect(chunkVerdict(99999, false)).toBe('fatal');
+    expect(chunkVerdict(-1, true)).toBe('retry'); // readEnvelope sets code=-1 on non-JSON
+    expect(chunkVerdict(-1, false)).toBe('fatal');
+    // 20616/20617 are 400-class; non-5xx → fatal, but a 5xx carrying them retries (parity).
+    expect(chunkVerdict(20617, false)).toBe('fatal');
+    expect(chunkVerdict(20617, true)).toBe('retry');
   });
 });
