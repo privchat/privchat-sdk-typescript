@@ -221,22 +221,48 @@ describe('uploadSealedAttachment (orchestration)', () => {
     expect(server.assembled()).toEqual(blob);
   });
 
-  it('complete fails with 20618 → session discarded, re-requested, finishes on the new session', async () => {
+  it('complete fails with 20618 → fresh token on an empty server, every byte re-uploaded from zero', async () => {
     const blob = payload(UNIT * 2);
-    server = new FakeChunkServer(blob.byteLength, TOKEN);
-    server.failFirstCompleteWith20618 = true;
-    const f = fakeClient({ hits: [false, false] });
-    const { result, token } = await uploadSealedAttachment(f.client, {
+    const TOKEN1 = TOKEN;
+    const TOKEN2 = `${'c'.repeat(32)}.${'d'.repeat(64)}`;
+    const first = new FakeChunkServer(blob.byteLength, TOKEN1);
+    const second = new FakeChunkServer(blob.byteLength, TOKEN2);
+    first.failFirstCompleteWith20618 = true;
+    // 🔴 fetch 按 token 分流到各自的 fake server：两个会话物理隔离，第二个
+    // server 是全空的——若第二轮没从零重传（比如只重新 complete），这里的
+    // puts 断言必然穿帮。
+    vi.stubGlobal('fetch', vi.fn((i: RequestInfo | URL, init?: RequestInit) => {
+      const t = ((init?.headers ?? {}) as Record<string, string>)['X-Upload-Token'];
+      return (t === TOKEN2 ? second : first).handler(i, init);
+    }));
+    const requests: Array<{ force: boolean }> = [];
+    let sessionNo = 0;
+    const client = {
+      fileRequestChunkedUploadToken: vi.fn(async (args: { force_upload?: boolean }) => {
+        requests.push({ force: args.force_upload === true });
+        const token = sessionNo++ === 0 ? TOKEN1 : TOKEN2;
+        return { already_exists: false, upload_token: token, upload_url: BASE, base_unit: UNIT, expires_at: 0 };
+      }),
+      fileClaimExisting: vi.fn(async () => { throw new Error('这条路径不该 claim'); }),
+      fileRequestUploadToken: vi.fn(async () => { throw new Error('大文件不该走整包'); }),
+    };
+    const { result, token } = await uploadSealedAttachment(client as never, {
       sealed: { blob, cek: 'cek', sha256: await sha256Hex(blob) },
       filename: 'a.bin', mime_type: 'application/octet-stream', file_type: 'file',
       chunkedThreshold: 1024,
     });
     // 旧会话被废弃、重新申请了一次（不带 force：这不是 claim miss）。
-    expect(f.requests).toEqual([{ force: false }, { force: false }]);
-    // 第一次 complete 回 20618，新会话上第二次 complete 成功。
-    expect(server.completes).toBe(2);
+    expect(requests).toEqual([{ force: false }, { force: false }]);
+    // 第一会话：字节全传过一遍，complete 被 20618 作废（仅一次）。
+    expect(first.puts.reduce((n, p) => n + p.len, 0)).toBe(blob.byteLength);
+    expect(first.completes).toBe(1);
+    // 🔴 第二会话（新 token + 空 server）：完整字节从零重传，不是只重新 complete。
+    expect(second.puts.reduce((n, p) => n + p.len, 0)).toBe(blob.byteLength);
+    expect(second.puts.every((p) => p.digestOk)).toBe(true);
+    expect(second.assembled()).toEqual(blob);
+    expect(second.completes).toBe(1);
     expect(result.file_id).toBe(4242);
-    expect(token).toBe(TOKEN);
+    expect(token).toBe(TOKEN2);
   });
 });
 
