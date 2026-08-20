@@ -216,6 +216,9 @@ describe('chunkVerdict (must match Rust chunk_verdict byte-for-byte)', () => {
     expect(chunkVerdict(20610, true)).toBe('resync');
     expect(chunkVerdict(20615, false)).toBe('resync');
     expect(chunkVerdict(20613, true)).toBe('gone');
+    // 20618 完成后校验失败：废弃会话从零重来，HTTP 状态无关（RESUMABLE §8）。
+    expect(chunkVerdict(20618, false)).toBe('restart');
+    expect(chunkVerdict(20618, true)).toBe('restart');
   });
   it('unknown / unparseable bodies fall back on HTTP 5xx → retry, else fatal', () => {
     expect(chunkVerdict(99999, true)).toBe('retry');

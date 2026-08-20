@@ -23,13 +23,15 @@ const MAX_REQUEST_SIZE = 2 * 1024 * 1024;
 /** 单片重试预算（按「没有进展」计）。 */
 const CHUNK_RETRIES = 2;
 
-/** 服务端错误码（protocol `ErrorCode` 20610-20617）。 */
+/** 服务端错误码（protocol `ErrorCode` 20610-20618）。 */
 const CODE_RANGE_OVERLAP = 20610;
 const CODE_CHECKSUM_MISMATCH = 20611;
 const CODE_SESSION_BUSY = 20612;
 const CODE_SESSION_GONE = 20613;
 const CODE_SESSION_COMPLETED = 20614;
 const CODE_MISSING_RANGES = 20615;
+/** 完成后校验失败（仅 S3 直传）：废弃会话从零重来（RESUMABLE §8）。 */
+const CODE_RESTART_UPLOAD = 20618;
 /** `ServerError::NotFound` 的协议码：claim 没命中。 */
 const RESOURCE_NOT_FOUND = 10201;
 
@@ -107,7 +109,7 @@ async function fetchStatus(
   };
 }
 
-export type ChunkVerdict = 'ok' | 'retry' | 'resync' | 'gone' | 'fatal';
+export type ChunkVerdict = 'ok' | 'retry' | 'resync' | 'gone' | 'restart' | 'fatal';
 
 async function putChunk(
   session: ChunkedUploadSession,
@@ -155,6 +157,8 @@ export function chunkVerdict(code: number, isServerError: boolean): ChunkVerdict
       return 'resync';
     case CODE_SESSION_GONE:
       return 'gone';
+    case CODE_RESTART_UPLOAD:
+      return 'restart';
     default:
       return isServerError ? 'retry' : 'fatal';
   }
@@ -225,6 +229,9 @@ export async function uploadSealedFileChunked(args: {
       continue;
     }
     if (verdict === 'gone') throw new UploadSessionGoneError();
+    // 20618 只在 complete 路径产生，chunk 路径不会碰到；语义同为「废弃会话、
+    // 从零重新申请」，并入 gone 同一出口（RESUMABLE §8）。
+    if (verdict === 'restart') throw new UploadSessionGoneError();
     if (verdict === 'fatal') throw new Error(`chunk upload rejected at offset=${gap.offset}`);
     failuresSinceProgress += 1;
     if (failuresSinceProgress > CHUNK_RETRIES) {
