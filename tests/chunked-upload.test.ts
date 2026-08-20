@@ -17,6 +17,8 @@ class FakeChunkServer {
   puts: Array<{ offset: number; len: number; digestOk: boolean }> = [];
   completes = 0;
   gone = false;
+  /** 第一次 complete 回 20618（完成后校验失败，仅 S3 直传）；后续正常。 */
+  failFirstCompleteWith20618 = false;
   constructor(readonly total: number, readonly token: string) {}
 
   missing(): Array<{ offset: number; length: number }> {
@@ -60,6 +62,7 @@ class FakeChunkServer {
     }
     if (url.startsWith(`${BASE}/complete`)) {
       this.completes += 1;
+      if (this.failFirstCompleteWith20618 && this.completes === 1) return json(20618, undefined, 422);
       if (this.missing().length > 0) return json(20615, undefined, 409);
       const body = JSON.parse(String(init!.body)) as { cek?: string; encryption_version?: number };
       if (body.encryption_version !== 1 || !body.cek) return json(1, undefined, 400);
@@ -126,6 +129,19 @@ describe('uploadSealedFileChunked (wire)', () => {
         session: { uploadToken: TOKEN, uploadUrl: BASE, baseUnit: UNIT },
       }),
     ).rejects.toBeInstanceOf(UploadSessionGoneError);
+  });
+
+  it('a 20618 complete surfaces as UploadSessionGoneError (restart from zero)', async () => {
+    const blob = payload(UNIT * 2);
+    server = new FakeChunkServer(blob.byteLength, TOKEN);
+    server.failFirstCompleteWith20618 = true;
+    await expect(
+      uploadSealedFileChunked({
+        sealed: { blob, cek: 'cek', sha256: await sha256Hex(blob) },
+        session: { uploadToken: TOKEN, uploadUrl: BASE, baseUnit: UNIT },
+      }),
+    ).rejects.toBeInstanceOf(UploadSessionGoneError);
+    expect(server.completes).toBe(1);
   });
 });
 
@@ -203,6 +219,24 @@ describe('uploadSealedAttachment (orchestration)', () => {
     expect(f.claims()).toBe(1);
     expect(token).toBe(TOKEN);
     expect(server.assembled()).toEqual(blob);
+  });
+
+  it('complete fails with 20618 → session discarded, re-requested, finishes on the new session', async () => {
+    const blob = payload(UNIT * 2);
+    server = new FakeChunkServer(blob.byteLength, TOKEN);
+    server.failFirstCompleteWith20618 = true;
+    const f = fakeClient({ hits: [false, false] });
+    const { result, token } = await uploadSealedAttachment(f.client, {
+      sealed: { blob, cek: 'cek', sha256: await sha256Hex(blob) },
+      filename: 'a.bin', mime_type: 'application/octet-stream', file_type: 'file',
+      chunkedThreshold: 1024,
+    });
+    // 旧会话被废弃、重新申请了一次（不带 force：这不是 claim miss）。
+    expect(f.requests).toEqual([{ force: false }, { force: false }]);
+    // 第一次 complete 回 20618，新会话上第二次 complete 成功。
+    expect(server.completes).toBe(2);
+    expect(result.file_id).toBe(4242);
+    expect(token).toBe(TOKEN);
   });
 });
 

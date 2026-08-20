@@ -177,7 +177,12 @@ async function complete(
     signal,
   });
   const env = await readEnvelope(resp);
-  if (env.code === CODE_SESSION_GONE) throw new UploadSessionGoneError();
+  // 🔴 20618（完成后校验失败，仅 S3 直传，RESUMABLE §8）与 20613 动作相同：废弃
+  // 会话从零重新申请。漏掉这条，20618 会被包成普通 Error，编排层进不了重新
+  // prepare 分支，真实 S3 complete 失败后永远无法自愈。
+  if (env.code === CODE_SESSION_GONE || env.code === CODE_RESTART_UPLOAD) {
+    throw new UploadSessionGoneError();
+  }
   if (env.code !== 0 || env.data === undefined) {
     throw new Error(`upload complete failed: code=${env.code} ${env.message ?? ''}`);
   }
