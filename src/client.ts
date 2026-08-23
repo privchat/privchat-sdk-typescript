@@ -4125,8 +4125,12 @@ export class PrivchatClient {
       }
       // Bump unread_count when this push is NEW past read_pts AND not
       // sent by the current user (best-effort: lastAuth.user_id check).
+      // System messages never count (SYSTEM_MESSAGE_SPEC §6) — same rule as
+      // the server-side counter and the Rust SDK's local projection; without
+      // it the "you are now friends" grey line raises the badge by one.
       const isOwnMessage = this.lastAuth?.user_id === record.from_uid;
-      if (!isOwnMessage && !record.revoked && ptsBig > BigInt(channel.read_pts)) {
+      const isSystemMessage = record.message_type === 'system';
+      if (!isOwnMessage && !isSystemMessage && !record.revoked && ptsBig > BigInt(channel.read_pts)) {
         next = { ...next, unread_count: channel.unread_count + 1 };
         mutated = true;
       }
