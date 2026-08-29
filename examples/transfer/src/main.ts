@@ -143,23 +143,23 @@ async function main(): Promise<void> {
     case 0:
       console.log('✓ OK — wire + relay + dispatch + handler all green.');
       break;
-    case 20900:
+    case 21500:
       console.log('× ChannelNotSubscribed — subscribe the channel first.');
       break;
-    case 20901:
+    case 21501:
       console.log(
         `× ChannelNotBound — no privchat_business_channel row for channel ${channelId} (or dispatch_transfer_enabled=0).`,
       );
       break;
-    case 20902:
+    case 21502:
       console.log(
         `× TransferServiceNotFound — route prefix '${route.split('/')[0]}' doesn't match any registered service.`,
       );
       break;
-    case 20903:
+    case 21503:
       console.log('× TransferServiceDisabled — service.status = 0.');
       break;
-    case 20904:
+    case 21504:
       console.log('× TransferCallbackFailed — external callback URL unreachable.');
       break;
     default:
