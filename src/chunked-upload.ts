@@ -25,13 +25,13 @@ const CHUNK_RETRIES = 2;
 
 /** 服务端错误码（protocol `ErrorCode` 20610-20618）。 */
 const CODE_RANGE_OVERLAP = 20610;
-const CODE_CHECKSUM_MISMATCH = 20611;
+const CODE_UPLOAD_CHUNK_CHECKSUM_MISMATCH = 20611;
 const CODE_SESSION_BUSY = 20612;
 const CODE_SESSION_GONE = 20613;
 const CODE_SESSION_COMPLETED = 20614;
 const CODE_MISSING_RANGES = 20615;
 /** 完成后校验失败（仅 S3 直传）：废弃会话从零重来（RESUMABLE §8）。 */
-const CODE_RESTART_UPLOAD = 20618;
+const CODE_UPLOAD_RESTART_REQUIRED = 20618;
 /** `ServerError::NotFound` 的协议码：claim 没命中。 */
 const RESOURCE_NOT_FOUND = 10201;
 
@@ -149,7 +149,7 @@ export function chunkVerdict(code: number, isServerError: boolean): ChunkVerdict
     case 0:
     case CODE_SESSION_COMPLETED:
       return 'ok';
-    case CODE_CHECKSUM_MISMATCH:
+    case CODE_UPLOAD_CHUNK_CHECKSUM_MISMATCH:
     case CODE_SESSION_BUSY:
       return 'retry';
     case CODE_RANGE_OVERLAP:
@@ -157,7 +157,7 @@ export function chunkVerdict(code: number, isServerError: boolean): ChunkVerdict
       return 'resync';
     case CODE_SESSION_GONE:
       return 'gone';
-    case CODE_RESTART_UPLOAD:
+    case CODE_UPLOAD_RESTART_REQUIRED:
       return 'restart';
     default:
       return isServerError ? 'retry' : 'fatal';
@@ -180,7 +180,7 @@ async function complete(
   // 🔴 20618（完成后校验失败，仅 S3 直传，RESUMABLE §8）与 20613 动作相同：废弃
   // 会话从零重新申请。漏掉这条，20618 会被包成普通 Error，编排层进不了重新
   // prepare 分支，真实 S3 complete 失败后永远无法自愈。
-  if (env.code === CODE_SESSION_GONE || env.code === CODE_RESTART_UPLOAD) {
+  if (env.code === CODE_SESSION_GONE || env.code === CODE_UPLOAD_RESTART_REQUIRED) {
     throw new UploadSessionGoneError();
   }
   if (env.code !== 0 || env.data === undefined) {
