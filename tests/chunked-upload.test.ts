@@ -131,6 +131,22 @@ describe('uploadSealedFileChunked (wire)', () => {
     ).rejects.toBeInstanceOf(UploadSessionGoneError);
   });
 
+  it('rejects a public insecure upload URL before sending bytes', async () => {
+    const blob = payload(UNIT);
+    server = new FakeChunkServer(blob.byteLength, TOKEN);
+    await expect(
+      uploadSealedFileChunked({
+        sealed: { blob, cek: 'cek', sha256: await sha256Hex(blob) },
+        session: {
+          uploadToken: TOKEN,
+          uploadUrl: 'http://203.0.113.1/api/app/files',
+          baseUnit: UNIT,
+        },
+      }),
+    ).rejects.toThrow('refusing insecure upload URL');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it('a 20618 complete surfaces as UploadSessionGoneError (restart from zero)', async () => {
     const blob = payload(UNIT * 2);
     server = new FakeChunkServer(blob.byteLength, TOKEN);
@@ -153,12 +169,12 @@ describe('uploadSealedAttachment (orchestration)', () => {
   afterEach(() => { vi.unstubAllGlobals(); });
 
   function fakeClient(opts: { hits: boolean[]; claimMiss?: boolean }) {
-    const requests: Array<{ force: boolean }> = [];
+    const requests: Array<{ force: boolean; transports: string[] | undefined }> = [];
     let claims = 0;
     const client = {
-      fileRequestChunkedUploadToken: vi.fn(async (args: { force_upload?: boolean }) => {
+      fileRequestChunkedUploadToken: vi.fn(async (args: { force_upload?: boolean; supported_upload_transports?: string[] }) => {
         const n = requests.length;
-        requests.push({ force: args.force_upload === true });
+        requests.push({ force: args.force_upload === true, transports: args.supported_upload_transports });
         const hit = !args.force_upload && (opts.hits[n] ?? false);
         return hit
           ? { already_exists: true, claim_token: `claim-${n}` }
@@ -189,7 +205,10 @@ describe('uploadSealedAttachment (orchestration)', () => {
     });
     expect(result.file_id).toBe(4242);
     expect(token).toBe(TOKEN);
-    expect(f.requests).toEqual([{ force: false }]);
+    expect(f.requests).toEqual([{
+      force: false,
+      transports: ['proxy_offset_v1', 's3_multipart_v1'],
+    }]);
   });
 
   it('hit → claim, nothing uploaded', async () => {
@@ -215,7 +234,7 @@ describe('uploadSealedAttachment (orchestration)', () => {
       filename: 'a.bin', mime_type: 'application/octet-stream', file_type: 'file',
       chunkedThreshold: 1024,
     });
-    expect(f.requests).toEqual([{ force: false }, { force: true }]);
+    expect(f.requests.map((r) => r.force)).toEqual([false, true]);
     expect(f.claims()).toBe(1);
     expect(token).toBe(TOKEN);
     expect(server.assembled()).toEqual(blob);
@@ -263,6 +282,96 @@ describe('uploadSealedAttachment (orchestration)', () => {
     expect(second.completes).toBe(1);
     expect(result.file_id).toBe(4242);
     expect(token).toBe(TOKEN2);
+  });
+});
+
+describe('S3 multipart data plane', () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('requests signed parts, forwards required headers, and completes', async () => {
+    const partSize = UNIT;
+    const blob = payload(partSize * 2 + 17);
+    const uploaded = new Map<number, Uint8Array>();
+    const required = 'checksum-from-server';
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push(url);
+      const envelope = (data: unknown) => new Response(JSON.stringify({ code: 0, data }));
+      if (url === `${BASE}/status`) {
+        const missing = [1, 2, 3]
+          .filter((n) => !uploaded.has(n))
+          .map((n) => ({ offset: (n - 1) * partSize, length: n === 3 ? 17 : partSize }));
+        return envelope({ missing, completed: false });
+      }
+      if (url === `${BASE}/part-url`) {
+        const body = JSON.parse(String(init?.body)) as { parts: Array<{ part_number: number }> };
+        return envelope({ parts: body.parts.map((p) => ({
+          part_number: p.part_number,
+          url: `https://cos.example/part/${p.part_number}`,
+          required_headers: { 'x-amz-checksum-sha256': required },
+        })) });
+      }
+      if (url.startsWith('https://cos.example/part/')) {
+        expect((init?.headers as Record<string, string>)['x-amz-checksum-sha256']).toBe(required);
+        expect(init?.credentials).toBe('omit');
+        const part = Number(url.split('/').at(-1));
+        uploaded.set(part, new Uint8Array(init?.body as ArrayBuffer));
+        return new Response('', { status: 200 });
+      }
+      if (url === `${BASE}/complete`) {
+        return envelope({ file_id: 99, file_url: '', file_size: blob.length, mime_type: '', uploaded_at: 0, storage_source_id: 1 });
+      }
+      throw new Error(`unexpected URL ${url}`);
+    }));
+
+    const result = await uploadSealedFileChunked({
+      sealed: { blob, cek: 'cek', sha256: await sha256Hex(blob) },
+      session: {
+        uploadToken: TOKEN,
+        uploadUrl: BASE,
+        baseUnit: UNIT,
+        transport: 's3_multipart_v1',
+        partSize,
+        totalParts: 3,
+      },
+    });
+
+    expect(result.file_id).toBe(99);
+    expect([...uploaded.keys()]).toEqual([1, 2, 3]);
+    expect(uploaded.get(3)?.byteLength).toBe(17);
+    expect(calls).not.toContain(`${BASE}/chunk`);
+  });
+
+  it('uses the resumable token flow even for small payloads', async () => {
+    const blob = payload(128);
+    const server = new FakeChunkServer(blob.length, TOKEN);
+    vi.stubGlobal('fetch', vi.fn((i: RequestInfo | URL, init?: RequestInit) => server.handler(i, init)));
+    const request = vi.fn(async (args: { supported_upload_transports?: string[] }) => ({
+      already_exists: false,
+      upload_token: TOKEN,
+      upload_url: BASE,
+      base_unit: UNIT,
+      transport: 'proxy_offset_v1' as const,
+      echoed: args.supported_upload_transports,
+    }));
+    const whole = vi.fn();
+    await uploadSealedAttachment({
+      fileRequestChunkedUploadToken: request,
+      fileClaimExisting: vi.fn(),
+      fileRequestUploadToken: whole,
+    } as never, {
+      sealed: { blob, cek: 'cek', sha256: await sha256Hex(blob) },
+      filename: 'small.bin',
+      mime_type: 'application/octet-stream',
+      file_type: 'file',
+    });
+    expect(request).toHaveBeenCalledOnce();
+    expect(whole).not.toHaveBeenCalled();
+    expect(request.mock.calls[0]?.[0].supported_upload_transports).toEqual([
+      'proxy_offset_v1',
+      's3_multipart_v1',
+    ]);
   });
 });
 

@@ -12,10 +12,10 @@
 import { PrivchatClient, RpcError } from './client.js';
 import { parseRpcJson } from './codec/safe-json.js';
 import { sha256Hex, type SealedAttachment } from './attachment-crypto.js';
-import { uploadSealedFileViaToken, type UploadProgressEvent } from './api-methods.js';
+import type { UploadProgressEvent } from './api-methods.js';
 import type { FileUploadResult } from './api-types.js';
 
-/** 超过这个大小走分片（spec §2.4）。客户端常量，不进协议。 */
+/** Legacy compatibility export. All uploads now use the resumable flow. */
 export const CHUNKED_UPLOAD_THRESHOLD = 1024 * 1024;
 
 /** 单次请求上限。 */
@@ -47,10 +47,23 @@ export interface ChunkedUploadSession {
   /** `.../files` */
   uploadUrl: string;
   baseUnit: number;
+  transport?: 'proxy_offset_v1' | 's3_multipart_v1';
+  partSize?: number;
+  totalParts?: number;
   expiresAt?: number;
 }
 
 type Range = { offset: number; length: number };
+
+function assertSecureUploadUrl(value: string): void {
+  const url = new URL(value);
+  const hostname = url.hostname.replace(/^\[|\]$/g, '');
+  const local = hostname === 'localhost' || hostname === '127.0.0.1' ||
+    hostname === '::1' || hostname.endsWith('.local');
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && local)) {
+    throw new Error(`refusing insecure upload URL: ${url.origin}`);
+  }
+}
 
 /** 请求大小自适应：端到端吞吐 EWMA，目标一片约 1 秒；每步最多 4 倍；失败立即减半。 */
 class ChunkSizer {
@@ -138,6 +151,120 @@ async function putChunk(
   return chunkVerdict(env.code, resp.status >= 500);
 }
 
+interface SignedPart {
+  part_number: number;
+  url: string;
+  required_headers: Record<string, string>;
+}
+
+function s3PartLength(session: ChunkedUploadSession, total: number, partNumber: number): number {
+  const partSize = session.partSize;
+  const totalParts = session.totalParts;
+  if (!partSize || !totalParts || partNumber < 1 || partNumber > totalParts) {
+    throw new Error('invalid S3 multipart session geometry');
+  }
+  return partNumber === totalParts ? total - partSize * (totalParts - 1) : partSize;
+}
+
+function missingS3Parts(session: ChunkedUploadSession, total: number, missing: Range[]): number[] {
+  const totalParts = session.totalParts;
+  const partSize = session.partSize;
+  if (!totalParts || !partSize) throw new Error('missing S3 multipart session geometry');
+  const parts: number[] = [];
+  for (let partNumber = 1; partNumber <= totalParts; partNumber += 1) {
+    const offset = (partNumber - 1) * partSize;
+    const length = s3PartLength(session, total, partNumber);
+    if (missing.some((gap) => gap.offset <= offset && gap.offset + gap.length >= offset + length)) {
+      parts.push(partNumber);
+    }
+  }
+  return parts;
+}
+
+async function requestPartUrls(
+  session: ChunkedUploadSession,
+  parts: Array<{ part_number: number; content_length: number; checksum_sha256_hex: string }>,
+  signal?: AbortSignal,
+): Promise<SignedPart[]> {
+  const resp = await fetch(`${session.uploadUrl}/part-url`, {
+    method: 'POST',
+    headers: { 'X-Upload-Token': session.uploadToken, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ parts }),
+    signal,
+  });
+  const env = await readEnvelope(resp);
+  if (env.code === CODE_SESSION_GONE) throw new UploadSessionGoneError();
+  if (env.code !== 0 || env.data === undefined) {
+    throw new Error(`part URL request failed: code=${env.code} ${env.message ?? ''}`);
+  }
+  return (env.data as { parts?: SignedPart[] }).parts ?? [];
+}
+
+async function uploadS3Parts(args: {
+  sealed: SealedAttachment;
+  session: ChunkedUploadSession;
+  missing: Range[];
+  onProgress?: (event: UploadProgressEvent) => void;
+  signal?: AbortSignal;
+}): Promise<void> {
+  const { sealed, session } = args;
+  const total = sealed.blob.byteLength;
+  const partSize = session.partSize;
+  if (!partSize) throw new Error('missing S3 part_size');
+  const numbers = missingS3Parts(session, total, args.missing);
+  let loaded = total - args.missing.reduce((sum, gap) => sum + gap.length, 0);
+
+  for (let batchStart = 0; batchStart < numbers.length; batchStart += 100) {
+    const batch = numbers.slice(batchStart, batchStart + 100);
+    const declarations = await Promise.all(batch.map(async (partNumber) => {
+      const offset = (partNumber - 1) * partSize;
+      const length = s3PartLength(session, total, partNumber);
+      const bytes = sealed.blob.subarray(offset, offset + length);
+      return {
+        part_number: partNumber,
+        content_length: length,
+        checksum_sha256_hex: await sha256Hex(bytes),
+      };
+    }));
+    const signed = await requestPartUrls(session, declarations, args.signal);
+    const byNumber = new Map(signed.map((part) => [part.part_number, part]));
+
+    for (const declaration of declarations) {
+      const part = byNumber.get(declaration.part_number);
+      if (!part) throw new Error(`part URL response omitted part ${declaration.part_number}`);
+      assertSecureUploadUrl(part.url);
+      const offset = (declaration.part_number - 1) * partSize;
+      const bytes = sealed.blob.subarray(offset, offset + declaration.content_length);
+      let uploaded = false;
+      let lastError: unknown;
+      for (let attempt = 0; attempt <= CHUNK_RETRIES && !uploaded; attempt += 1) {
+        try {
+          const response = await fetch(part.url, {
+            method: 'PUT',
+            headers: part.required_headers,
+            body: bytes.slice().buffer as ArrayBuffer,
+            signal: args.signal,
+            credentials: 'omit',
+          });
+          if (!response.ok) throw new Error(`object storage returned HTTP ${response.status}`);
+          uploaded = true;
+        } catch (error) {
+          if ((error as Error)?.name === 'AbortError') throw error;
+          lastError = error;
+          if (attempt < CHUNK_RETRIES) {
+            await new Promise((resolve) => setTimeout(resolve, 300 * 2 ** attempt));
+          }
+        }
+      }
+      if (!uploaded) {
+        throw new Error(`S3 part ${declaration.part_number} upload failed: ${String(lastError)}`);
+      }
+      loaded = Math.min(loaded + declaration.content_length, total);
+      args.onProgress?.({ loaded, total, percent: Math.round((loaded / total) * 100) });
+    }
+  }
+}
+
 /** 一次分片 PUT 响应 → 客户端动作。**TS 与 Rust `chunk_verdict` 必须逐字一致**。
  *
  *  已知业务码给定论；其余（未知码 / 20616 未对齐 / 20617 模式冲突 / 无法解析→code=-1）
@@ -204,8 +331,21 @@ export async function uploadSealedFileChunked(args: {
   const base = Math.max(session.baseUnit | 0, 1);
   const sizer = new ChunkSizer(base);
 
+  assertSecureUploadUrl(session.uploadUrl);
   const first = await fetchStatus(session, args.signal);
   if (first.completed) return complete(session, sealed.cek, args.businessId, args.signal);
+  if (session.transport === 's3_multipart_v1') {
+    let missing = first.missing;
+    for (let round = 0; missing.length > 0 && round <= CHUNK_RETRIES; round += 1) {
+      await uploadS3Parts({ ...args, missing });
+      const after = await fetchStatus(session, args.signal);
+      missing = after.missing;
+    }
+    if (missing.length > 0) {
+      throw new Error(`S3 upload still has ${missing.length} missing range(s)`);
+    }
+    return complete(session, sealed.cek, args.businessId, args.signal);
+  }
   let gaps = first.missing.slice().sort((a, b) => a.offset - b.offset);
   const report = () => {
     const missingBytes = gaps.reduce((n, g) => n + g.length, 0);
@@ -262,24 +402,40 @@ export function claimMissShouldReupload(e: unknown): boolean {
 }
 
 function sessionOf(
-  r: { upload_token?: string; upload_url?: string; base_unit?: number; expires_at?: number },
+  r: {
+    upload_token?: string;
+    upload_url?: string;
+    base_unit?: number;
+    expires_at?: number;
+    transport?: 'proxy_offset_v1' | 's3_multipart_v1';
+    part_size?: number;
+    total_parts?: number;
+  },
 ): ChunkedUploadSession {
   if (!r.upload_token || !r.upload_url) {
     throw new Error('request_chunked_upload_token: missing upload_token/upload_url');
   }
+  const transport = r.transport ?? 'proxy_offset_v1';
+  if (transport === 's3_multipart_v1' && (!r.part_size || !r.total_parts)) {
+    throw new Error('request_chunked_upload_token: missing S3 multipart geometry');
+  }
+  const uploadUrl = r.upload_url.replace(/\/+$/, '');
+  assertSecureUploadUrl(uploadUrl);
   return {
     uploadToken: r.upload_token,
-    uploadUrl: r.upload_url.replace(/\/+$/, ''),
+    uploadUrl,
     baseUnit: r.base_unit && r.base_unit > 0 ? r.base_unit : 64 * 1024,
+    transport,
+    partSize: r.part_size,
+    totalParts: r.total_parts,
     expiresAt: r.expires_at,
   };
 }
 
 /** 一份**已封装**附件的完整上传编排（与 Rust SDK `plan_attachment_upload` 同构）：
  *
- *  - 超过 [CHUNKED_UPLOAD_THRESHOLD] → 分片：命中 claim；claim 没成 → `force_upload=true`
- *    再申请一次（跳过预检，否则死循环）；会话没了 → 重新申请一次
- *  - 否则 → 整包：命中 claim；claim 没成 → 不带摘要再申请一张普通 token
+ *  - every payload uses a resumable token; the server selects its configured data plane
+ *  - claim miss → `force_upload=true` once; a gone session starts a fresh session
  *
  *  返回 `{ result, token }`：`token` 是随后 `file/upload_callback` 要带的那张。 */
 export async function uploadSealedAttachment(
@@ -293,16 +449,14 @@ export async function uploadSealedAttachment(
     businessId?: string;
     onProgress?: (event: UploadProgressEvent) => void;
     signal?: AbortSignal;
-    /** 测试用；默认 [CHUNKED_UPLOAD_THRESHOLD]。 */
+    /** @deprecated All uploads use the resumable token flow. */
     chunkedThreshold?: number;
   },
 ): Promise<{ result: FileUploadResult; token: string }> {
   const { sealed, filename, mime_type, file_type } = args;
   const business_type = args.business_type ?? 'message';
   const size = sealed.blob.byteLength;
-  const threshold = args.chunkedThreshold ?? CHUNKED_UPLOAD_THRESHOLD;
-
-  if (size > threshold) {
+  {
     const request = (force_upload: boolean) =>
       client.fileRequestChunkedUploadToken({
         file_type,
@@ -312,6 +466,7 @@ export async function uploadSealedAttachment(
         mime_type,
         filename,
         force_upload,
+        supported_upload_transports: ['proxy_offset_v1', 's3_multipart_v1'],
       });
     let prepared = await request(false);
     if (prepared.already_exists && prepared.claim_token) {
@@ -343,32 +498,4 @@ export async function uploadSealedAttachment(
     }
   }
 
-  // ---- 整包 ----
-  let token = await client.fileRequestUploadToken({
-    file_size: size,
-    mime_type,
-    file_type,
-    business_type,
-    filename,
-    sha256: sealed.sha256,
-  });
-  if (token.already_exists === true) {
-    try {
-      const result = await client.fileClaimExisting({ token: token.token, sha256: sealed.sha256 });
-      return { result, token: token.token };
-    } catch (e) {
-      if (!claimMissShouldReupload(e)) throw e;
-      token = await client.fileRequestUploadToken({ file_size: size, mime_type, file_type, business_type, filename });
-    }
-  }
-  const result = await uploadSealedFileViaToken({
-    sealed,
-    filename,
-    uploadUrl: token.upload_url,
-    token: token.token,
-    businessId: args.businessId,
-    onProgress: args.onProgress,
-    signal: args.signal,
-  });
-  return { result, token: token.token };
 }

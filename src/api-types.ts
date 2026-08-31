@@ -230,9 +230,8 @@ export interface FileRequestChunkedUploadTokenRequest {
   transform_version?: number;
   /** claim 失败后置 true 跳过预检；同一条消息只置一次。 */
   force_upload?: boolean;
-  /** 可选：客户端支持的上传数据面（RESUMABLE_UPLOAD_SPEC §8.2，纯加法）。
-   *  如 `['proxy_offset_v1', 's3_multipart_v1']`。旧客户端不带 → 服务端行为与
-   *  响应逐字节不变；带则必须包含 `proxy_offset_v1`，否则参数错误。 */
+  /** Client-supported upload data planes. Current clients declare both;
+   *  the server selects exactly one configured data plane and never falls back. */
   supported_upload_transports?: string[];
 }
 
@@ -248,8 +247,7 @@ export interface FileRequestChunkedUploadTokenResponse {
   /** 寻址网格（字节）。 */
   base_unit?: number;
   expires_at?: number;
-  /** 协商结果（RESUMABLE_UPLOAD_SPEC §8.2）：仅当请求声明了
-   *  supported_upload_transports 时下发；当前恒 `proxy_offset_v1`。 */
+  /** Selected data plane. Present when the request declares capabilities. */
   transport?: 'proxy_offset_v1' | 's3_multipart_v1';
   /** 仅 `s3_multipart_v1`：固定分片大小（字节）。 */
   part_size?: number;
