@@ -17,7 +17,7 @@ import {
   encodeMessagePayloadEnvelope,
   type MessageMetadata,
 } from './codec/payload.js';
-import { decodeSiteKey, decryptDownloadedAttachment, sealAttachment, sha256Hex, type SealedAttachment } from './attachment-crypto.js';
+import { decodeSiteKey, decryptDownloadedAttachment, sealAttachment, type SealedAttachment } from './attachment-crypto.js';
 import { Routes } from './routes.js';
 import type {
   AttachmentKey,
@@ -310,14 +310,10 @@ declare module './client.js' {
      *  fetch 密文 blob → WebCrypto 解密 → 返回明文 `Blob`（带 mime）。
      *  v0（legacy 明文）直接 fetch signed_url 返回。**CEK 不进 URL/日志。**
      *  图片预览用 `URL.createObjectURL(blob)`，不能 `img.src = cdnUrl`（CDN 是密文）。 */
-    /** 下载一份附件，并把「它是什么」和**服务端存的那串密文**一并带回。
+    /** 下载一份附件，并把「它是什么」一并带回。
      *
-     *  🔴 `sealed` 不是转发专用的东西：它就是这份内容当前的封装结果。再发一次
-     *  同一份内容时，普通上传路径直接拿它去预检就能秒传；重新封装会用新的随机
-     *  CEK/nonce，字节一变摘要就变，命中率恒为 0。
-     *
-     *  只有与服务端 `sha256` 核对一致的密文才会出现在这里；对不上就没有，
-     *  调用方照常走重新封装。 */
+     *  🔴 只返回明文。再发一次同一份内容时把明文交给普通上传路径即可——判重键
+     *  就是明文摘要，秒传照常命中。 */
     downloadAttachmentDetailed(fileId: number): Promise<DownloadedAttachment>;
 
     /** [downloadAttachmentDetailed] 的兼容包装，只取明文。 */
@@ -793,18 +789,8 @@ proto.downloadAttachmentDetailed = async function (
   // 用响应里的 mime（v1 密文 fetch 的 content-type 不可信，以 file 元信息为准）。
   const mime = meta.mime_type || 'application/octet-stream';
 
-  // 🔴 密文一并带回来：再发一次同一份内容时可以直接复用，不必重新封装
-  // （重新封装每块都用新 nonce，那是另一串字节 = 另一个物理对象）。
-  //
-  // 判重用的是**明文**摘要（`meta.plaintext_sha256`），密文摘要只在本地自检。
-  let sealed: DownloadedAttachment['sealed'];
-  if (meta.attachment_key != null) {
-    sealed = { blob: new Blob([cipher as BlobPart]), sha256: await sha256Hex(cipher) };
-  }
-
   return {
     blob: new Blob([plaintext as BlobPart], { type: mime }),
-    sealed,
     originalFilename: meta.original_filename || undefined,
     mimeType: meta.mime_type || undefined,
     fileType: (meta.file_type || undefined) as DownloadedAttachment['fileType'],
