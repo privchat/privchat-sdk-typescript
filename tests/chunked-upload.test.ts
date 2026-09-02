@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RpcError } from '../src/client.js';
-import { sha256Hex } from '../src/attachment-crypto.js';
+import { decodeSiteKey, decryptAttachment, sealedLen, sha256Hex } from '../src/attachment-crypto.js';
 import {
   uploadSealedAttachment,
   uploadSealedFileChunked,
@@ -8,6 +8,8 @@ import {
   chunkVerdict,
 } from '../src/chunked-upload.js';
 
+/** 假服务端下发的全站密钥：32 个 0x5a。 */
+const TEST_KEY_B64 = 'WlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlpaWlo';
 const UNIT = 64 * 1024;
 const BASE = 'http://files.local/api/app/files';
 
@@ -64,8 +66,11 @@ class FakeChunkServer {
       this.completes += 1;
       if (this.failFirstCompleteWith20618 && this.completes === 1) return json(20618, undefined, 422);
       if (this.missing().length > 0) return json(20615, undefined, 409);
-      const body = JSON.parse(String(init!.body)) as { cek?: string; encryption_version?: number };
-      if (body.encryption_version !== 1 || !body.cek) return json(1, undefined, 400);
+      // 🔴 反过来断言：complete **不得**再自报加密参数。
+      // 身份与密钥全由 token 冻结，客户端在这里说什么都不作数——真实服务端已经
+      // 删掉了这些入参，客户端若还在发，就是回到了那条可以自报身份的绕过路径。
+      const body = JSON.parse(String(init!.body)) as Record<string, unknown>;
+      if ('cek' in body || 'encryption_version' in body) return json(1, undefined, 400);
       return json(0, { file_id: 4242, file_url: 'http://x/f', file_size: this.total, mime_type: 'application/octet-stream', uploaded_at: 0, storage_source_id: 0 });
     }
     return json(1, undefined, 404);
@@ -92,7 +97,7 @@ describe('uploadSealedFileChunked (wire)', () => {
     server = new FakeChunkServer(blob.byteLength, TOKEN);
     const progress: number[] = [];
     const result = await uploadSealedFileChunked({
-      sealed: { blob, cek: 'cek', sha256: await sha256Hex(blob) },
+      sealed: { blob, sha256: await sha256Hex(blob) },
       session: { uploadToken: TOKEN, uploadUrl: BASE, baseUnit: UNIT },
       onProgress: (e) => progress.push(e.loaded),
     });
@@ -110,7 +115,7 @@ describe('uploadSealedFileChunked (wire)', () => {
     server.parts.set(0, blob.subarray(0, UNIT));
     server.parts.set(UNIT * 2, blob.subarray(UNIT * 2, UNIT * 3));
     await uploadSealedFileChunked({
-      sealed: { blob, cek: 'cek', sha256: await sha256Hex(blob) },
+      sealed: { blob, sha256: await sha256Hex(blob) },
       session: { uploadToken: TOKEN, uploadUrl: BASE, baseUnit: UNIT },
     });
     const sent = server.puts.reduce((n, p) => n + p.len, 0);
@@ -125,7 +130,7 @@ describe('uploadSealedFileChunked (wire)', () => {
     server.gone = true;
     await expect(
       uploadSealedFileChunked({
-        sealed: { blob, cek: 'cek', sha256: 'x' },
+        sealed: { blob, sha256: 'x' },
         session: { uploadToken: TOKEN, uploadUrl: BASE, baseUnit: UNIT },
       }),
     ).rejects.toBeInstanceOf(UploadSessionGoneError);
@@ -136,7 +141,7 @@ describe('uploadSealedFileChunked (wire)', () => {
     server = new FakeChunkServer(blob.byteLength, TOKEN);
     await expect(
       uploadSealedFileChunked({
-        sealed: { blob, cek: 'cek', sha256: await sha256Hex(blob) },
+        sealed: { blob, sha256: await sha256Hex(blob) },
         session: {
           uploadToken: TOKEN,
           uploadUrl: 'http://203.0.113.1/api/app/files',
@@ -153,7 +158,7 @@ describe('uploadSealedFileChunked (wire)', () => {
     server.failFirstCompleteWith20618 = true;
     await expect(
       uploadSealedFileChunked({
-        sealed: { blob, cek: 'cek', sha256: await sha256Hex(blob) },
+        sealed: { blob, sha256: await sha256Hex(blob) },
         session: { uploadToken: TOKEN, uploadUrl: BASE, baseUnit: UNIT },
       }),
     ).rejects.toBeInstanceOf(UploadSessionGoneError);
@@ -178,7 +183,7 @@ describe('uploadSealedAttachment (orchestration)', () => {
         const hit = !args.force_upload && (opts.hits[n] ?? false);
         return hit
           ? { already_exists: true, claim_token: `claim-${n}` }
-          : { already_exists: false, upload_token: TOKEN, upload_url: BASE, base_unit: UNIT, expires_at: 0 };
+          : { already_exists: false, attachment_key: { key_id: 1, key: TEST_KEY_B64 }, chunk_plain_size: 1024, upload_token: TOKEN, upload_url: BASE, base_unit: UNIT, expires_at: 0 };
       }),
       fileClaimExisting: vi.fn(async () => {
         claims += 1;
@@ -196,10 +201,10 @@ describe('uploadSealedAttachment (orchestration)', () => {
 
   it('large payload: miss → chunked upload; token is the chunked token', async () => {
     const blob = payload(UNIT * 2);
-    server = new FakeChunkServer(blob.byteLength, TOKEN);
+    server = new FakeChunkServer(sealedLen(blob.byteLength, 1024), TOKEN);
     const f = fakeClient({ hits: [false] });
     const { result, token } = await uploadSealedAttachment(f.client, {
-      sealed: { blob, cek: 'cek', sha256: await sha256Hex(blob) },
+      plaintext: blob,
       filename: 'a.bin', mime_type: 'application/octet-stream', file_type: 'file',
       chunkedThreshold: 1024,
     });
@@ -213,10 +218,10 @@ describe('uploadSealedAttachment (orchestration)', () => {
 
   it('hit → claim, nothing uploaded', async () => {
     const blob = payload(UNIT * 2);
-    server = new FakeChunkServer(blob.byteLength, TOKEN);
+    server = new FakeChunkServer(sealedLen(blob.byteLength, 1024), TOKEN);
     const f = fakeClient({ hits: [true] });
     const { result, token } = await uploadSealedAttachment(f.client, {
-      sealed: { blob, cek: 'cek', sha256: 'x' },
+      plaintext: blob,
       filename: 'a.bin', mime_type: 'application/octet-stream', file_type: 'file',
       chunkedThreshold: 1024,
     });
@@ -227,25 +232,31 @@ describe('uploadSealedAttachment (orchestration)', () => {
 
   it('claim miss → second request has force_upload=true (no precheck loop)', async () => {
     const blob = payload(UNIT * 2);
-    server = new FakeChunkServer(blob.byteLength, TOKEN);
+    server = new FakeChunkServer(sealedLen(blob.byteLength, 1024), TOKEN);
     const f = fakeClient({ hits: [true, true], claimMiss: true });
     const { token } = await uploadSealedAttachment(f.client, {
-      sealed: { blob, cek: 'cek', sha256: await sha256Hex(blob) },
+      plaintext: blob,
       filename: 'a.bin', mime_type: 'application/octet-stream', file_type: 'file',
       chunkedThreshold: 1024,
     });
     expect(f.requests.map((r) => r.force)).toEqual([false, true]);
     expect(f.claims()).toBe(1);
     expect(token).toBe(TOKEN);
-    expect(server.assembled()).toEqual(blob);
+    // 🔴 服务端收到的是**密文**：不能和明文比字节。断言它长度对得上、
+    // 而且用测试密钥解开就是原文——那才是"传对了"的定义。
+    expect(server.assembled().byteLength).toBe(sealedLen(blob.byteLength, 1024));
+    expect(Array.from(await decryptAttachment(server.assembled(), decodeSiteKey(TEST_KEY_B64))))
+      .toEqual(Array.from(blob));
   });
 
   it('complete fails with 20618 → fresh token on an empty server, every byte re-uploaded from zero', async () => {
     const blob = payload(UNIT * 2);
     const TOKEN1 = TOKEN;
     const TOKEN2 = `${'c'.repeat(32)}.${'d'.repeat(64)}`;
-    const first = new FakeChunkServer(blob.byteLength, TOKEN1);
-    const second = new FakeChunkServer(blob.byteLength, TOKEN2);
+    // 服务端看到的是**密文**长度：明文进编排、封装在拿到 token 之后发生。
+    const sealedTotal = sealedLen(blob.byteLength, 1024);
+    const first = new FakeChunkServer(sealedTotal, TOKEN1);
+    const second = new FakeChunkServer(sealedTotal, TOKEN2);
     first.failFirstCompleteWith20618 = true;
     // 🔴 fetch 按 token 分流到各自的 fake server：两个会话物理隔离，第二个
     // server 是全空的——若第二轮没从零重传（比如只重新 complete），这里的
@@ -260,25 +271,28 @@ describe('uploadSealedAttachment (orchestration)', () => {
       fileRequestChunkedUploadToken: vi.fn(async (args: { force_upload?: boolean }) => {
         requests.push({ force: args.force_upload === true });
         const token = sessionNo++ === 0 ? TOKEN1 : TOKEN2;
-        return { already_exists: false, upload_token: token, upload_url: BASE, base_unit: UNIT, expires_at: 0 };
+        return { already_exists: false, attachment_key: { key_id: 1, key: TEST_KEY_B64 }, chunk_plain_size: 1024, upload_token: token, upload_url: BASE, base_unit: UNIT, expires_at: 0 };
       }),
       fileClaimExisting: vi.fn(async () => { throw new Error('这条路径不该 claim'); }),
       fileRequestUploadToken: vi.fn(async () => { throw new Error('大文件不该走整包'); }),
     };
     const { result, token } = await uploadSealedAttachment(client as never, {
-      sealed: { blob, cek: 'cek', sha256: await sha256Hex(blob) },
+      plaintext: blob,
       filename: 'a.bin', mime_type: 'application/octet-stream', file_type: 'file',
       chunkedThreshold: 1024,
     });
     // 旧会话被废弃、重新申请了一次（不带 force：这不是 claim miss）。
     expect(requests).toEqual([{ force: false }, { force: false }]);
     // 第一会话：字节全传过一遍，complete 被 20618 作废（仅一次）。
-    expect(first.puts.reduce((n, p) => n + p.len, 0)).toBe(blob.byteLength);
+    // 🔴 数的是**密文**字节：明文进编排，封装在拿到 token 之后。
+    expect(first.puts.reduce((n, p) => n + p.len, 0)).toBe(sealedTotal);
     expect(first.completes).toBe(1);
     // 🔴 第二会话（新 token + 空 server）：完整字节从零重传，不是只重新 complete。
-    expect(second.puts.reduce((n, p) => n + p.len, 0)).toBe(blob.byteLength);
+    expect(second.puts.reduce((n, p) => n + p.len, 0)).toBe(sealedTotal);
     expect(second.puts.every((p) => p.digestOk)).toBe(true);
-    expect(second.assembled()).toEqual(blob);
+    // 🔴 两次会话各自重新封装，密文字节**必然不同**（每块新 nonce）——所以这里
+    // 只能断言长度与可解性，不能断言等于第一次那串字节。
+    expect(second.assembled().byteLength).toBe(sealedTotal);
     expect(second.completes).toBe(1);
     expect(result.file_id).toBe(4242);
     expect(token).toBe(TOKEN2);
@@ -326,7 +340,7 @@ describe('S3 multipart data plane', () => {
     }));
 
     const result = await uploadSealedFileChunked({
-      sealed: { blob, cek: 'cek', sha256: await sha256Hex(blob) },
+      sealed: { blob, sha256: await sha256Hex(blob) },
       session: {
         uploadToken: TOKEN,
         uploadUrl: BASE,
@@ -349,6 +363,7 @@ describe('S3 multipart data plane', () => {
     vi.stubGlobal('fetch', vi.fn((i: RequestInfo | URL, init?: RequestInit) => server.handler(i, init)));
     const request = vi.fn(async (args: { supported_upload_transports?: string[] }) => ({
       already_exists: false,
+      attachment_key: { key_id: 1, key: TEST_KEY_B64 }, chunk_plain_size: 1024, 
       upload_token: TOKEN,
       upload_url: BASE,
       base_unit: UNIT,
@@ -361,7 +376,7 @@ describe('S3 multipart data plane', () => {
       fileClaimExisting: vi.fn(),
       fileRequestUploadToken: whole,
     } as never, {
-      sealed: { blob, cek: 'cek', sha256: await sha256Hex(blob) },
+      plaintext: blob,
       filename: 'small.bin',
       mime_type: 'application/octet-stream',
       file_type: 'file',

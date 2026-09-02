@@ -198,12 +198,17 @@ export interface FileRequestUploadTokenRequest {
    *  Because encryption uses a random key and nonce, re-encrypting after the
    *  probe produces different bytes and a different digest, so the client
    *  must upload the very blob it hashed — including on retry. */
-  sha256?: string;
-  /** Producer version of those bytes; metadata only, not part of identity. */
-  transform_version?: number;
+  plaintext_sha256?: string;
 }
 
 export interface FileRequestUploadTokenResponse {
+  /** 本次上传该用的全站密钥。🔴 没有它就封不出服务端认的密文——服务端未配置密钥时
+   *  签发直接失败，不存在"没密钥就传明文"的退路。 */
+  attachment_key?: AttachmentKey | null;
+  /** 服务端冻结的块大小：必须**原样**用，否则封出来的长度与 token 冻结的对不上。 */
+  chunk_plain_size?: number | null;
+  /** 封装之后的密文总字节数 = sealedLen(plaintext_size, chunk_plain_size)。 */
+  total_size?: number | null;
   token: string;
   upload_url: string;
   /** Empty string at request stage; the actual file_id is returned by
@@ -221,13 +226,12 @@ export interface FileRequestUploadTokenResponse {
 export interface FileRequestChunkedUploadTokenRequest {
   file_type: 'image' | 'video' | 'voice' | 'file' | 'other';
   business_type: string;
-  /** 封装后字节数。 */
-  file_size: number;
-  /** 封装后 SHA-256（hex）。分片路径必带。 */
-  file_hash: string;
+  /** **明文**字节数。🔴 分片几何按服务端算出的密文长度定，见响应的 total_size。 */
+  plaintext_size: number;
+  /** **明文** SHA-256（hex）。分片路径必带：判重键 + complete 的身份判据。 */
+  plaintext_sha256: string;
   mime_type: string;
   filename?: string;
-  transform_version?: number;
   /** claim 失败后置 true 跳过预检；同一条消息只置一次。 */
   force_upload?: boolean;
   /** Client-supported upload data planes. Current clients declare both;
@@ -237,6 +241,12 @@ export interface FileRequestChunkedUploadTokenRequest {
 
 /** `file/request_chunked_upload_token` 响应。两种形态互斥。 */
 export interface FileRequestChunkedUploadTokenResponse {
+  /** 本次上传该用的全站密钥。口径同整包，见 FileRequestUploadTokenResponse。 */
+  attachment_key?: AttachmentKey | null;
+  /** 服务端冻结的块大小：必须原样用。 */
+  chunk_plain_size?: number | null;
+  /** 封装后的密文总长 = 真正要传的字节数，也是分片几何的基准。 */
+  total_size?: number | null;
   already_exists: boolean;
   /** 命中：拿去 `file/claim_existing`。 */
   claim_token?: string;
@@ -277,7 +287,7 @@ export interface DownloadedAttachment {
   /** 解密后的明文，可直接预览/播放。 */
   blob: Blob;
   /** 服务端存的密文原样（已核对摘要）。老记录没有摘要时为 undefined。 */
-  sealed?: { blob: Blob; cek: string; sha256: string };
+  sealed?: { blob: Blob; sha256: string };
   /** 服务端记录的原始文件名。 */
   originalFilename?: string;
   /** 服务端记录的 MIME。 */
@@ -286,13 +296,27 @@ export interface DownloadedAttachment {
   fileType?: 'image' | 'video' | 'voice' | 'file' | 'other';
 }
 
+/** 服务端下发的全站附件密钥。 */
+export interface AttachmentKey {
+  key_id: number;
+  /** base64url(no-pad) 的 32 字节。**绝不进日志/URL/localStorage。** */
+  key: string;
+}
+
 export interface FileGetUrlResponse {
+  /** 解开这个附件要用的密钥（按对象行的 key_id 选出的那一把）。
+   *
+   *  🔴 这是**全站**密钥，不是 per-file key：同 key_id 的对象共用它。文件级隔离
+   *  来自私有桶、短期 URL 与 get_url 的鉴权，不来自密钥本身。
+   *
+   *  不下发 = 这是明文对象（公开资源），下载到的字节原样就是内容。 */
+  attachment_key?: AttachmentKey | null;
   /** 服务端对**已存储字节**算出的 SHA-256。
    *
    *  再次发送一份已有附件时用它：直接拿这个摘要去 prepare，必然命中，
    *  然后 claim 换自己的 file_id——不用把文件下下来重算，也不重新加密
    *  （重新加密会产出另一串字节，那本来就是另一个物理文件）。 */
-  sha256?: string | null;
+  plaintext_sha256?: string | null;
   /** 服务端记录的真实文件类型：`image` / `video` / `voice` / `file` / `other`。
    *
    *  复用一份已有附件时按它申请 token。**不要靠 mime 推**：`audio/mp3` 可能是

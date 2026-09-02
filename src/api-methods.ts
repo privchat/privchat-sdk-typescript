@@ -17,9 +17,10 @@ import {
   encodeMessagePayloadEnvelope,
   type MessageMetadata,
 } from './codec/payload.js';
-import { decryptDownloadedAttachment, sealAttachment, sha256Hex, type SealedAttachment } from './attachment-crypto.js';
+import { decodeSiteKey, decryptDownloadedAttachment, sealAttachment, sha256Hex, type SealedAttachment } from './attachment-crypto.js';
 import { Routes } from './routes.js';
 import type {
+  AttachmentKey,
   DownloadedAttachment,
   AccountSearchQueryRequest,
   AccountSearchResponse,
@@ -257,15 +258,15 @@ declare module './client.js' {
      *  size limits and returns `expires_at` so callers can re-request
      *  if the upload UI takes too long. */
     fileRequestUploadToken(args: {
-      file_size: number;
+      plaintext_size: number;
       mime_type: string;
       file_type: 'image' | 'video' | 'voice' | 'file' | 'other';
       business_type?: string;
       filename?: string;
       /** SHA-256 (hex) of the final blob about to be uploaded — after
        *  encryption. Omit to skip the dedup probe. */
-      sha256?: string;
-      transform_version?: number;
+      /** 🔴 明文摘要（不是密文摘要），见 api-types.ts 的说明。 */
+      plaintext_sha256?: string;
     }): Promise<FileRequestUploadTokenResponse>;
 
     /** 分片上传 token（RESUMABLE_UPLOAD_SPEC §2）。命中回 `claim_token`，未命中回
@@ -735,13 +736,12 @@ proto.fileRequestUploadToken = function (args) {
   // user_id is filled server-side from auth ctx; client passes 0.
   return this.rpcCallTyped(Routes.file.REQUEST_UPLOAD_TOKEN, {
     user_id: 0,
-    file_size: args.file_size,
+    plaintext_size: args.plaintext_size,
     mime_type: args.mime_type,
     file_type: args.file_type,
     business_type: args.business_type ?? 'message',
     filename: args.filename,
-    sha256: args.sha256,
-    transform_version: args.transform_version,
+    plaintext_sha256: args.plaintext_sha256,
   });
 };
 
@@ -749,11 +749,10 @@ proto.fileRequestChunkedUploadToken = function (args) {
   return this.rpcCallTyped(Routes.file.REQUEST_CHUNKED_UPLOAD_TOKEN, {
     file_type: args.file_type,
     business_type: args.business_type,
-    file_size: args.file_size,
-    file_hash: args.file_hash,
+    plaintext_size: args.plaintext_size,
+    plaintext_sha256: args.plaintext_sha256,
     mime_type: args.mime_type,
     filename: args.filename,
-    transform_version: args.transform_version ?? 0,
     force_upload: args.force_upload ?? false,
   });
 };
@@ -790,25 +789,17 @@ proto.downloadAttachmentDetailed = async function (
     throw new Error(`download failed: HTTP ${resp.status} ${resp.statusText}`);
   }
   const cipher = new Uint8Array(await resp.arrayBuffer());
-  const plaintext = await decryptDownloadedAttachment(
-    meta.encryption_version ?? 0,
-    meta.cek,
-    cipher,
-  );
+  const plaintext = await decryptDownloadedAttachment(cipher, meta.attachment_key?.key);
   // 用响应里的 mime（v1 密文 fetch 的 content-type 不可信，以 file 元信息为准）。
   const mime = meta.mime_type || 'application/octet-stream';
 
-  // 🔴 密文一并带回来。再发一次同一份内容时，普通上传路径直接拿它去预检——
-  // 重新封装会用新的随机 CEK/nonce，字节一变摘要就变，秒传恒不命中。
+  // 🔴 密文一并带回来：再发一次同一份内容时可以直接复用，不必重新封装
+  // （重新封装每块都用新 nonce，那是另一串字节 = 另一个物理对象）。
   //
-  // 只有**核对过摘要**的密文才交出去：服务端给的 sha256 是它存的那串字节的，
-  // 对不上说明中途被改过或响应串了，那就当没有，照常重新封装。
+  // 判重用的是**明文**摘要（`meta.plaintext_sha256`），密文摘要只在本地自检。
   let sealed: DownloadedAttachment['sealed'];
-  if (meta.encryption_version === 1 && meta.cek != null && meta.sha256 != null) {
-    const actual = await sha256Hex(cipher);
-    if (actual === meta.sha256) {
-      sealed = { blob: new Blob([cipher as BlobPart]), cek: meta.cek, sha256: meta.sha256 };
-    }
+  if (meta.attachment_key != null) {
+    sealed = { blob: new Blob([cipher as BlobPart]), sha256: await sha256Hex(cipher) };
   }
 
   return {
@@ -1120,12 +1111,12 @@ export interface UploadProgressEvent {
  * no transport state.
  */
 export async function uploadFileViaToken(args: {
-  /** 明文文件。本函数内部封装一次再上传（**旧签名，保持不变**）。
-   *
-   *  想让秒传能命中，用 [uploadSealedFileViaToken]：那条路要求调用方先封装、
-   *  用封装结果的摘要去预检，再上传**同一个** blob。这里每次封装都是新的
-   *  随机 CEK/nonce，产出的字节每次都不同。 */
+  /** 明文文件。本函数内部用**服务端给的密钥**封装一次再上传。 */
   file: Blob;
+  /** 🔴 来自 token 响应：封装只能用服务端下发的这把全站密钥，客户端造不出。 */
+  attachmentKey: AttachmentKey;
+  /** 🔴 来自 token 响应：块大小由服务端冻结，用别的值封出来的长度对不上。 */
+  chunkPlainSize: number;
   filename: string;
   uploadUrl: string;
   token: string;
@@ -1138,7 +1129,14 @@ export async function uploadFileViaToken(args: {
    *  promise rejects with an AbortError-shaped error. */
   signal?: AbortSignal;
 }): Promise<FileUploadResult> {
-  const sealed = await sealAttachment(new Uint8Array(await args.file.arrayBuffer()));
+  // 🔴 顺序：先拿 token（密钥与块大小都在响应里），再封装。这个便捷入口要求
+  // 调用方把 token 响应里的三项一起传进来——它们算不出来，只能由服务端给。
+  const sealed = await sealAttachment(
+    new Uint8Array(await args.file.arrayBuffer()),
+    decodeSiteKey(args.attachmentKey.key),
+    args.attachmentKey.key_id,
+    args.chunkPlainSize,
+  );
   return uploadSealedFileViaToken({ ...args, sealed });
 }
 
@@ -1157,7 +1155,7 @@ export async function uploadSealedFileViaToken(args: {
   onProgress?: (event: UploadProgressEvent) => void;
   signal?: AbortSignal;
 }): Promise<FileUploadResult> {
-  const { blob: cipherBlob, cek } = args.sealed;
+  const { blob: cipherBlob } = args.sealed;
   const encryptedFile = new Blob([cipherBlob as BlobPart], { type: 'application/octet-stream' });
   return new Promise<FileUploadResult>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -1227,8 +1225,6 @@ export async function uploadSealedFileViaToken(args: {
 
     const form = new FormData();
     form.append('file', encryptedFile, args.filename);
-    form.append('encryption_version', '1');
-    form.append('cek', cek);
     if (args.businessId !== undefined) form.append('business_id', args.businessId);
     xhr.send(form);
   });

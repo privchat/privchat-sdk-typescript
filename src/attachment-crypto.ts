@@ -1,19 +1,45 @@
-// 附件加密 v1（ATTACHMENT_ENCRYPTION_SPEC §3）：AES-256-GCM 整文件加密，浏览器 WebCrypto。
+// 附件加密（ATTACHMENT_ENCRYPTION_SPEC）：全站密钥 + **分块** AES-256-GCM，浏览器 WebCrypto。
 //
-// 与 Rust SDK（crates/privchat-sdk/src/attachment_crypto.rs）**字节级互通**：
-//   - blob = nonce(12B) || ciphertext || tag(16B)
-//     WebCrypto 的 `crypto.subtle.encrypt({name:'AES-GCM'})` 输出已把 16B tag 拼在密文尾，
-//     与 Rust `aes-gcm` 一致，故双方按此 blob 约定即可互解。
-//   - cek = base64url(no-pad) 的 32 字节随机密钥。
-//   - nonce 写进 blob 头部，不入库、不进 API。
+// 与 Rust（privchat-protocol/src/attachment_crypto.rs）**字节级互通**。线格式：
 //
-// **CEK 绝不进日志 / URL / localStorage / IndexedDB。**
+//   header(36B) || chunk[0] || chunk[1] || ...
+//   header = magic("PC") || format_version(1) || key_id(1) || object_id(16)
+//            || chunk_plain_size(4, BE) || chunk_count(4, BE) || plaintext_size(8, BE)
+//   chunk  = nonce(12) || plaintext_len(4, BE) || ciphertext || tag(16)
+//   AAD    = sha256(header) || index(4, BE) || plaintext_len(4, BE)
+//
+// 🔴 **每块一个独立随机 nonce**，不是"对象前缀 + 序号"：全站共用一把密钥时，
+//    前缀碰撞会导致 GCM nonce 重用——那是灾难性的（泄露明文异或、可伪造）。
+//
+// 🔴 **AAD 绑定 header 摘要 + 块序号 + 块长度**：独立 tag 只能证明某块没被改，
+//    证明不了它属于这个文件、在这个位置。绑上之后乱序、跨对象嫁接、截断全部变成认证失败。
+//
+// 🔴 密钥是**服务端下发的全站密钥**，不是 per-file CEK：申请 token 时才拿得到，
+//    所以封装只能发生在 prepare 之后。判重键是**明文**摘要（密文每次封装都不同）。
+//
+// **密钥绝不进日志 / URL / localStorage / IndexedDB。**
 
 export const NONCE_LEN = 12;
 export const TAG_LEN = 16;
-export const CEK_LEN = 32;
-/** 最小密文 blob：12 nonce + 16 tag（空明文边界）。 */
-export const MIN_BLOB_LEN = NONCE_LEN + TAG_LEN;
+export const KEY_LEN = 32;
+export const OBJECT_ID_LEN = 16;
+/** magic(2)+ver(1)+key_id(1)+object_id(16)+chunk_size(4)+chunk_count(4)+plain_size(8) */
+export const HEADER_LEN = 36;
+/** 每块定长开销：nonce(12) + plaintext_len(4) + tag(16)。 */
+export const CHUNK_OVERHEAD = NONCE_LEN + 4 + TAG_LEN;
+export const FORMAT_VERSION = 1;
+const MAGIC = [0x50, 0x43]; // "PC"
+
+/** 封装之后的总字节数——必须与服务端 `sealed_len` 逐字节一致。 */
+export function sealedLen(plaintextSize: number, chunkPlainSize: number): number {
+  if (chunkPlainSize <= 0) throw new Error('chunk_plain_size must be > 0');
+  const chunks = plaintextSize === 0 ? 1 : Math.ceil(plaintextSize / chunkPlainSize);
+  return HEADER_LEN + chunks * CHUNK_OVERHEAD + plaintextSize;
+}
+
+function chunkCountFor(plaintextSize: number, chunkPlainSize: number): number {
+  return plaintextSize === 0 ? 1 : Math.ceil(plaintextSize / chunkPlainSize);
+}
 
 /** 浏览器 + Node 通用的 WebCrypto 句柄。 */
 function subtleCrypto(): SubtleCrypto {
@@ -56,90 +82,171 @@ async function importKey(cek: Uint8Array, usage: KeyUsage): Promise<CryptoKey> {
  * 加密明文 → `{ blob, cek }`。CSPRNG 生成 cek + nonce。
  * blob 直接上传对象存储；cek 走 file 表 / 鉴权后的 get_url 响应。
  */
-export async function encryptAttachment(
+function be32(v: number): Uint8Array {
+  const b = new Uint8Array(4);
+  new DataView(b.buffer).setUint32(0, v, false);
+  return b;
+}
+
+function buildHeader(
+  keyId: number,
+  objectId: Uint8Array,
+  chunkPlainSize: number,
+  chunkCount: number,
+  plaintextSize: number,
+): Uint8Array {
+  const h = new Uint8Array(HEADER_LEN);
+  h[0] = MAGIC[0]!;
+  h[1] = MAGIC[1]!;
+  h[2] = FORMAT_VERSION;
+  h[3] = keyId;
+  h.set(objectId, 4);
+  const dv = new DataView(h.buffer);
+  dv.setUint32(20, chunkPlainSize, false);
+  dv.setUint32(24, chunkCount, false);
+  // plaintext_size 是 u64 BE；JS 用 BigInt 写，避免 >2^53 时静默失真。
+  dv.setBigUint64(28, BigInt(plaintextSize), false);
+  return h;
+}
+
+async function sha256Bytes(bytes: Uint8Array): Promise<Uint8Array> {
+  const d = await subtleCrypto().digest('SHA-256', bytes.slice().buffer as ArrayBuffer);
+  return new Uint8Array(d);
+}
+
+/** AAD = sha256(header) || index(4 BE) || plaintext_len(4 BE)。 */
+function chunkAad(headerDigest: Uint8Array, index: number, plaintextLen: number): Uint8Array {
+  const aad = new Uint8Array(headerDigest.length + 8);
+  aad.set(headerDigest, 0);
+  aad.set(be32(index), headerDigest.length);
+  aad.set(be32(plaintextLen), headerDigest.length + 4);
+  return aad;
+}
+
+/** 服务端下发的密钥是 base64url(no-pad) 的 32 字节。 */
+export function decodeSiteKey(encoded: string): Uint8Array {
+  const raw = fromBase64Url(encoded.trim());
+  if (raw.length !== KEY_LEN) {
+    throw new Error(`attachment key must be ${KEY_LEN} bytes, got ${raw.length}`);
+  }
+  return raw;
+}
+
+/**
+ * 明文 → 待上传密文，用**服务端下发的**全站密钥与冻结的块大小。
+ *
+ * 🔴 顺序是"先申请 token、后封装"，不能反：密钥在 token 响应里。块大小也必须原样
+ * 用服务端给的——token 冻结的密文长度是按它算的，用别的值封出来的对象在 complete
+ * 的长度核对上必然被拒。
+ */
+export async function sealAttachment(
   plaintext: Uint8Array,
-): Promise<{ blob: Uint8Array; cek: string }> {
-  const cekBytes = randomBytes(CEK_LEN);
-  const nonce = randomBytes(NONCE_LEN);
-  const key = await importKey(cekBytes, 'encrypt');
-  const ctWithTag = new Uint8Array(
-    await subtleCrypto().encrypt({ name: 'AES-GCM', iv: nonce as BufferSource }, key, plaintext as BufferSource),
-  );
-  const blob = new Uint8Array(NONCE_LEN + ctWithTag.length);
-  blob.set(nonce, 0);
-  blob.set(ctWithTag, NONCE_LEN);
-  return { blob, cek: toBase64Url(cekBytes) };
-}
+  siteKey: Uint8Array,
+  keyId: number,
+  chunkPlainSize: number,
+): Promise<SealedAttachment> {
+  if (siteKey.length !== KEY_LEN) throw new Error('site key must be 32 bytes');
+  const chunkCount = chunkCountFor(plaintext.length, chunkPlainSize);
+  const objectId = randomBytes(OBJECT_ID_LEN);
+  const header = buildHeader(keyId, objectId, chunkPlainSize, chunkCount, plaintext.length);
+  const headerDigest = await sha256Bytes(header);
+  const key = await importKey(siteKey, 'encrypt');
 
-/**
- * 解密 `blob (nonce||ct||tag)` + `cek(base64url)` → 明文。
- * GCM tag 校验失败（错 key / 篡改）抛错。
- */
-export async function decryptAttachment(blob: Uint8Array, cekB64: string): Promise<Uint8Array> {
-  if (blob.length < MIN_BLOB_LEN) {
-    throw new Error(`attachment blob too short: ${blob.length} < ${MIN_BLOB_LEN}`);
-  }
-  const cek = fromBase64Url(cekB64);
-  if (cek.length !== CEK_LEN) {
-    throw new Error(`cek must be ${CEK_LEN} bytes, got ${cek.length}`);
-  }
-  const nonce = blob.subarray(0, NONCE_LEN);
-  const ctWithTag = blob.subarray(NONCE_LEN);
-  const key = await importKey(cek, 'decrypt');
-  try {
-    return new Uint8Array(
-      await subtleCrypto().decrypt({ name: 'AES-GCM', iv: nonce as BufferSource }, key, ctWithTag as BufferSource),
+  const out = new Uint8Array(sealedLen(plaintext.length, chunkPlainSize));
+  out.set(header, 0);
+  let off = HEADER_LEN;
+  for (let index = 0; index < chunkCount; index++) {
+    const start = index * chunkPlainSize;
+    const part = plaintext.subarray(start, Math.min(start + chunkPlainSize, plaintext.length));
+    const nonce = randomBytes(NONCE_LEN);
+    const sealed = new Uint8Array(
+      await subtleCrypto().encrypt(
+        { name: 'AES-GCM', iv: nonce as BufferSource, additionalData: chunkAad(headerDigest, index, part.length) as BufferSource },
+        key,
+        part.slice().buffer as ArrayBuffer,
+      ),
     );
-  } catch {
-    throw new Error('attachment decrypt/auth failed');
+    out.set(nonce, off);
+    out.set(be32(part.length), off + NONCE_LEN);
+    out.set(sealed, off + NONCE_LEN + 4);
+    off += CHUNK_OVERHEAD + part.length;
   }
+  if (off !== out.length) {
+    throw new Error(`sealed length mismatch: wrote ${off}, expected ${out.length}`);
+  }
+  return { blob: out, sha256: await sha256Hex(out) };
+}
+
+/** 这段字节是不是本格式的密文（自描述文件头）。 */
+export function looksLikeAttachment(bytes: Uint8Array): boolean {
+  return bytes.length >= HEADER_LEN && bytes[0] === MAGIC[0] && bytes[1] === MAGIC[1]
+    && bytes[2] === FORMAT_VERSION;
 }
 
 /**
- * 下载完成后按加密信息把 blob 还原成明文。
- *   - version=0（或缺失视为 0）→ legacy 明文，原样返回。
- *   - version=1 → cek **必须存在**，blob 校验 + 解密；缺 cek 或解密失败一律抛错，
- *     **绝不 fallback 成明文**（否则把密文当图片，UI 显示坏图并掩盖错误）。
+ * 密文 → 明文。逐块验证 AAD：乱序、嫁接、截断都会在这里认证失败。
+ *
+ * 🔴 解不开就抛，绝不退回"把密文当明文返回"——那产出的是一张坏图，
+ * 错误被藏起来只在用户眼前显形。
  */
-export async function decryptDownloadedAttachment(
-  encryptionVersion: number,
-  cek: string | null | undefined,
-  blob: Uint8Array,
-): Promise<Uint8Array> {
-  if (encryptionVersion === 0) return blob;
-  if (encryptionVersion === 1) {
-    if (cek === null || cek === undefined || cek === '') {
-      throw new Error('encryption_version=1 but cek missing');
-    }
-    return decryptAttachment(blob, cek);
+export async function decryptAttachment(blob: Uint8Array, siteKey: Uint8Array): Promise<Uint8Array> {
+  if (!looksLikeAttachment(blob)) throw new Error('not an encrypted attachment blob');
+  const dv = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+  const keyIdInBlob = blob[3]!;
+  const chunkPlainSize = dv.getUint32(20, false);
+  const chunkCount = dv.getUint32(24, false);
+  const plaintextSize = Number(dv.getBigUint64(28, false));
+  if (chunkPlainSize === 0 || chunkCount === 0) throw new Error('invalid attachment geometry');
+  if (blob.length !== sealedLen(plaintextSize, chunkPlainSize)) {
+    throw new Error('attachment length does not match its header');
   }
-  throw new Error(`unsupported encryption_version: ${encryptionVersion}`);
+  void keyIdInBlob; // 选钥匙由调用方按 key_id 做；这里只解。
+
+  const headerDigest = await sha256Bytes(blob.subarray(0, HEADER_LEN));
+  const key = await importKey(siteKey, 'decrypt');
+  const out = new Uint8Array(plaintextSize);
+  let off = HEADER_LEN;
+  let written = 0;
+  for (let index = 0; index < chunkCount; index++) {
+    const nonce = blob.subarray(off, off + NONCE_LEN);
+    const plainLen = dv.getUint32(off + NONCE_LEN, false);
+    const body = blob.subarray(off + NONCE_LEN + 4, off + CHUNK_OVERHEAD + plainLen);
+    const opened = new Uint8Array(
+      await subtleCrypto().decrypt(
+        { name: 'AES-GCM', iv: nonce.slice() as BufferSource, additionalData: chunkAad(headerDigest, index, plainLen) as BufferSource },
+        key,
+        body.slice().buffer as ArrayBuffer,
+      ),
+    );
+    out.set(opened, written);
+    written += opened.length;
+    off += CHUNK_OVERHEAD + plainLen;
+  }
+  if (written !== plaintextSize) throw new Error('plaintext length does not match the header');
+  return out;
+}
+
+/** 下载完成后把字节还原成明文。没有密钥 = 明文对象，原样返回。 */
+export async function decryptDownloadedAttachment(
+  blob: Uint8Array,
+  attachmentKey: string | null | undefined,
+): Promise<Uint8Array> {
+  if (attachmentKey === null || attachmentKey === undefined || attachmentKey === '') {
+    // 🔴 分流由**票据**说了算（服务端按对象行的 key_id 决定发不发密钥），
+    // 不看字节的 magic——那只是一段可以被构造出来的前缀。
+    return blob;
+  }
+  return decryptAttachment(blob, decodeSiteKey(attachmentKey));
 }
 
 /** 已封装好、可以直接上传的最终 blob。 */
 export interface SealedAttachment {
-  /** 密文 blob = nonce||ct||tag —— **就是要上传的那串字节**。 */
+  /** 要上传的那串字节。 */
   blob: Uint8Array;
-  /** base64url(32B)，随 multipart 交服务端。 */
-  cek: string;
-  /** 上面那串字节的 SHA-256（hex），秒传按它判重。 */
+  /** 上面那串字节的 SHA-256（hex）。**不是判重键**，只用于本地缓存自检。 */
   sha256: string;
 }
 
-/** 明文 → 最终 blob：加密一次，算一次摘要，之后都用它。
- *
- * 🔴 顺序不能反。秒传按「最终上传字节」判重，而加密用随机 CEK/nonce——
- * 预检之后再加密一次，字节就变了、摘要也变了，本来就不该命中。
- * 所以这里产出的 blob 必须留住：上传用它，重试也用它。
- */
-export async function sealAttachment(
-  plaintext: Uint8Array,
-): Promise<SealedAttachment> {
-  const { blob, cek } = await encryptAttachment(plaintext);
-  return { blob, cek, sha256: await sha256Hex(blob) };
-}
-
-/** 秒传判重用的摘要口径：对**最终上传的字节**算 SHA-256，hex 小写。 */
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', bytes.slice().buffer as ArrayBuffer);
   return Array.from(new Uint8Array(digest))

@@ -11,9 +11,9 @@
 
 import { PrivchatClient, RpcError } from './client.js';
 import { parseRpcJson } from './codec/safe-json.js';
-import { sha256Hex, type SealedAttachment } from './attachment-crypto.js';
+import { decodeSiteKey, sealAttachment, sha256Hex, type SealedAttachment } from './attachment-crypto.js';
 import type { UploadProgressEvent } from './api-methods.js';
-import type { FileUploadResult } from './api-types.js';
+import type { FileRequestChunkedUploadTokenResponse, FileUploadResult } from './api-types.js';
 
 /** Legacy compatibility export. All uploads now use the resumable flow. */
 export const CHUNKED_UPLOAD_THRESHOLD = 1024 * 1024;
@@ -293,14 +293,15 @@ export function chunkVerdict(code: number, isServerError: boolean): ChunkVerdict
 
 async function complete(
   session: ChunkedUploadSession,
-  cek: string,
   businessId?: string,
   signal?: AbortSignal,
 ): Promise<FileUploadResult> {
   const resp = await fetch(`${session.uploadUrl}/complete`, {
     method: 'POST',
     headers: { 'X-Upload-Token': session.uploadToken, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ cek, encryption_version: 1, business_id: businessId }),
+    // 🔴 只带业务字段：加密参数与身份全部由 token 冻结，客户端在这里自报什么都
+    // 不作数（服务端已经删掉了那些入参）。
+    body: JSON.stringify({ business_id: businessId }),
     signal,
   });
   const env = await readEnvelope(resp);
@@ -333,7 +334,7 @@ export async function uploadSealedFileChunked(args: {
 
   assertSecureUploadUrl(session.uploadUrl);
   const first = await fetchStatus(session, args.signal);
-  if (first.completed) return complete(session, sealed.cek, args.businessId, args.signal);
+  if (first.completed) return complete(session, args.businessId, args.signal);
   if (session.transport === 's3_multipart_v1') {
     let missing = first.missing;
     for (let round = 0; missing.length > 0 && round <= CHUNK_RETRIES; round += 1) {
@@ -344,7 +345,7 @@ export async function uploadSealedFileChunked(args: {
     if (missing.length > 0) {
       throw new Error(`S3 upload still has ${missing.length} missing range(s)`);
     }
-    return complete(session, sealed.cek, args.businessId, args.signal);
+    return complete(session, args.businessId, args.signal);
   }
   let gaps = first.missing.slice().sort((a, b) => a.offset - b.offset);
   const report = () => {
@@ -393,7 +394,32 @@ export async function uploadSealedFileChunked(args: {
       report();
     }
   }
-  return complete(session, sealed.cek, args.businessId, args.signal);
+  return complete(session, args.businessId, args.signal);
+}
+
+
+/** 用 token 响应里下发的密钥与块大小封装，并核对长度。
+ *
+ * 🔴 三项缺一不可：没有密钥封不出服务端认的密文；没有块大小封出来的长度与 token
+ * 冻结的对不上；`total_size` 是服务端算的密文长度，封完先比一次——不一致说明两边
+ * 几何不同，此刻失败远好过传完再被拒。
+ */
+async function sealForSession(
+  prepared: FileRequestChunkedUploadTokenResponse,
+  plaintext: Uint8Array,
+): Promise<SealedAttachment> {
+  const key = prepared.attachment_key;
+  if (key == null) throw new Error('upload token did not carry an attachment key');
+  const chunk = prepared.chunk_plain_size;
+  if (chunk == null || chunk <= 0) throw new Error('upload token did not carry chunk_plain_size');
+  const sealed = await sealAttachment(plaintext, decodeSiteKey(key.key), key.key_id, chunk);
+  const expected = prepared.total_size;
+  if (expected != null && expected !== sealed.blob.byteLength) {
+    throw new Error(
+      `sealed length ${sealed.blob.byteLength} != server-frozen ${expected}`,
+    );
+  }
+  return sealed;
 }
 
 /** claim 失败是不是「服务端拿不到那份内容」——只有它该退回实体上传。 */
@@ -441,7 +467,8 @@ function sessionOf(
 export async function uploadSealedAttachment(
   client: PrivchatClient,
   args: {
-    sealed: SealedAttachment;
+    /** 🔴 明文进来，封装在这条流程**内部**发生——因为密钥要等 token 响应。 */
+    plaintext: Uint8Array;
     filename: string;
     mime_type: string;
     file_type: 'image' | 'video' | 'voice' | 'file' | 'other';
@@ -453,16 +480,22 @@ export async function uploadSealedAttachment(
     chunkedThreshold?: number;
   },
 ): Promise<{ result: FileUploadResult; token: string }> {
-  const { sealed, filename, mime_type, file_type } = args;
+  // 🔴 顺序：**先申请 token，再封装**。
+  //
+  // 封装要用的全站密钥在 token 响应里——申请之前客户端手上根本没有它，所以
+  // "先封装再申请"（旧实现那样自造随机 CEK）在这套设计里走不通。
+  // 判重键也换成了**明文**摘要：每块都用新的随机 nonce，同一份明文封两次得到
+  // 两串不同的密文，密文摘要按定义无法跨用户命中。
+  const { plaintext, filename, mime_type, file_type } = args;
   const business_type = args.business_type ?? 'message';
-  const size = sealed.blob.byteLength;
+  const plaintextSha = await sha256Hex(plaintext);
   {
     const request = (force_upload: boolean) =>
       client.fileRequestChunkedUploadToken({
         file_type,
         business_type,
-        file_size: size,
-        file_hash: sealed.sha256,
+        plaintext_size: plaintext.byteLength,
+        plaintext_sha256: plaintextSha,
         mime_type,
         filename,
         force_upload,
@@ -471,7 +504,7 @@ export async function uploadSealedAttachment(
     let prepared = await request(false);
     if (prepared.already_exists && prepared.claim_token) {
       try {
-        const result = await client.fileClaimExisting({ token: prepared.claim_token, sha256: sealed.sha256 });
+        const result = await client.fileClaimExisting({ token: prepared.claim_token, sha256: plaintextSha });
         return { result, token: prepared.claim_token };
       } catch (e) {
         if (!claimMissShouldReupload(e)) throw e;
@@ -482,6 +515,7 @@ export async function uploadSealedAttachment(
       throw new Error('force_upload=true still reported already_exists');
     }
     let session = sessionOf(prepared);
+    let sealed = await sealForSession(prepared, plaintext);
     try {
       const result = await uploadSealedFileChunked({ sealed, session, businessId: args.businessId, onProgress: args.onProgress, signal: args.signal });
       return { result, token: session.uploadToken };
@@ -489,10 +523,12 @@ export async function uploadSealedAttachment(
       if (!(e instanceof UploadSessionGoneError)) throw e;
       const again = await request(false);
       if (again.already_exists && again.claim_token) {
-        const result = await client.fileClaimExisting({ token: again.claim_token, sha256: sealed.sha256 });
+        const result = await client.fileClaimExisting({ token: again.claim_token, sha256: plaintextSha });
         return { result, token: again.claim_token };
       }
       session = sessionOf(again);
+      // 新会话可能换了密钥/块大小，必须按它重新封。
+      sealed = await sealForSession(again, plaintext);
       const result = await uploadSealedFileChunked({ sealed, session, businessId: args.businessId, onProgress: args.onProgress, signal: args.signal });
       return { result, token: session.uploadToken };
     }
