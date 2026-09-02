@@ -32,7 +32,7 @@ export async function phase18_history_search_jump(
   if (!ab) return fail('missing alice-bob channel — phase02 must run first');
 
   // 唯一标记：进程号+时间片，避免多轮运行互相命中
-  const marker = `福寿搜索标记${(Date.now() % 100000).toString()}`;
+  const marker = `搜索标记${(Date.now() % 100000).toString()}`;
   const text = `全局搜索验收 ${marker} 完毕`;
   const resp = await mgr.sendText('bob', ab, DIRECT_SYNC_CHANNEL_TYPE, text);
   metrics.rpc_calls += 2;
