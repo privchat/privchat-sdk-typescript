@@ -11,10 +11,8 @@ export const Routes = {
     UPDATE: 'account/user/update',
     SHARE_CARD: 'account/user/share_card',
   },
-  account_profile: {
-    GET: 'account/profile/get',
-    UPDATE: 'account/profile/update',
-  },
+  // account_profile 不导出：server 的 account/mod.rs 把 profile::register_routes
+  // 注释掉了，两条路由不可达，且 handler 是占位实现。
   account_search: {
     QUERY: 'account/search/query',
     BY_QRCODE: 'account/search/by_qrcode',

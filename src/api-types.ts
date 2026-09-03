@@ -1186,12 +1186,21 @@ export interface MessageReadListRequest {
 }
 export interface MessageReadUserEntry {
   user_id: number;
-  read_at?: number;
-  [k: string]: unknown;
+  /** 公开投影，服务端不回他人 username，恒为空串。 */
+  username: string;
+  nickname: string;
+  avatar_url?: string | null;
+  read_at: number;
 }
+/**
+ * 字段名照 server 实际发的 JSON。protocol 那边 Rust 结构体上挂了 serde alias，
+ * 但 alias 只在 Rust 反序列化时生效，浏览器拿到的就是 read_list / total_members。
+ */
 export interface MessageReadListResponse {
-  readers: MessageReadUserEntry[];
-  total: number;
+  message_id: number;
+  channel_id: number;
+  read_list: MessageReadUserEntry[];
+  total_members: number;
   read_count: number;
   unread_count: number;
 }
@@ -1216,36 +1225,9 @@ export interface MessageReactionStatsResponse {
   stats: Record<string, unknown>;
 }
 
-/** 读取用户资料。`account/profile/get` */
-export interface AccountProfileGetRequest {
-  user_id: number;
-}
-export interface AccountProfileActionResponse {
-  status: string;
-  action: string;
-  timestamp: number;
-}
-
-/** 更新自己的资料。`account/profile/update` */
-export interface AccountProfileUpdateRequest {
-  user_id: number;
-  display_name?: string;
-  avatar_url?: string;
-  bio?: string;
-  extra_fields?: Record<string, string>;
-}
-
-/** 更新用户基础字段。`account/user/update` */
-export interface AccountUserUpdateRequest {
-  user_id: number;
-  display_name?: string;
-  avatar_url?: string;
-  bio?: string;
-}
-
 /** 生成名片分享。`account/user/share_card` */
 export interface AccountUserShareCardRequest {
-  sharer_id: number;
+  // sharer_id 不传：server 用会话身份覆盖。
   target_user_id: number;
   receiver_id: number;
   expire_seconds?: number;
@@ -1260,11 +1242,23 @@ export interface AccountUserShareCardResponse {
   expire_at?: number;
 }
 
-/** 通用二维码。`qrcode/*`——服务端 handler 逐字段读 body，键名照它。 */
+/**
+ * 通用二维码。`qrcode/*`——服务端 handler 逐字段读 body，键名照它。
+ * creator_id 不在任何请求里：服务端一律从会话取（privchat-server 6d8c8fe），
+ * 客户端传了也会被忽略。
+ */
+export interface AccountSearchByQrcodeResponse {
+  user_id: number;
+  /** 非好友时服务端投影成空串。 */
+  username: string;
+  nickname: string;
+  avatar_url?: string | null;
+  search_session_id: string;
+}
+
 export interface QrcodeGenerateRequest {
   qr_type: string;
   target_id: string;
-  creator_id: number;
   expire_seconds?: number;
   max_usage?: number;
   one_time?: boolean;
@@ -1282,9 +1276,33 @@ export interface QrcodeRecord {
   used_count: number;
 }
 export interface QrcodeResolveRequest { qr_key: string; token?: string }
-export interface QrcodeRefreshRequest { qr_type: string; target_id: string; creator_id: number }
+export interface QrcodeResolveResponse {
+  qr_type: string;
+  target_id: string;
+  action: string;
+  data: unknown;
+  used_count: number;
+  max_usage?: number | null;
+  expire_at?: number | null;
+}
+/** refresh 回的不是一条完整记录，只有新旧 key。 */
+export interface QrcodeRefreshResponse {
+  old_qr_key: string;
+  new_qr_key: string;
+  new_qr_code: string;
+  revoked_at: number;
+}
+export interface QrcodeRevokeResponse {
+  success: boolean;
+  qr_key: string;
+  revoked_at: number;
+}
+export interface QrcodeListResponse {
+  qr_keys: Array<QrcodeRecord & { used_count: number; revoked: boolean }>;
+}
+export interface QrcodeRefreshRequest { qr_type: string; target_id: string }
 export interface QrcodeRevokeRequest { qr_key: string }
-export interface QrcodeListRequest { creator_id: number; include_revoked?: boolean }
+export interface QrcodeListRequest { include_revoked?: boolean }
 
 /** 表情包。`sticker/package/*` */
 export interface StickerInfo {

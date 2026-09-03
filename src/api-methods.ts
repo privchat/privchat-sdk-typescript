@@ -51,16 +51,18 @@ import type {
   MessageReadListResponse,
   MessageReadStatsResponse,
   MessageReactionStatsResponse,
-  AccountProfileActionResponse,
-  AccountProfileUpdateRequest,
-  AccountUserUpdateRequest,
   AccountUserShareCardRequest,
   AccountUserShareCardResponse,
+  AccountSearchByQrcodeResponse,
   QrcodeGenerateRequest,
   QrcodeRecord,
   QrcodeResolveRequest,
+  QrcodeResolveResponse,
   QrcodeRefreshRequest,
+  QrcodeRefreshResponse,
+  QrcodeRevokeResponse,
   QrcodeListRequest,
+  QrcodeListResponse,
   StickerPackageListResponse,
   StickerPackageDetailResponse,
   GetOrCreateDirectChannelResponse,
@@ -133,9 +135,9 @@ declare module './client.js' {
     friendRemove(friendId: number): Promise<FriendRemoveResponse>;
     friendSetAlias(targetUserId: number, alias: string): Promise<FriendSetAliasResponse>;
     /** 拒绝好友申请。 */
-    friendReject(fromUserId: number, targetUserId: number, message?: string): Promise<FriendRejectResponse>;
+    friendReject(fromUserId: number, message?: string): Promise<FriendRejectResponse>;
     /** 撤回自己发出的好友申请。 */
-    friendRecall(targetUserId: number, fromUserId: number): Promise<FriendRecallResponse>;
+    friendRecall(targetUserId: number): Promise<FriendRecallResponse>;
 
     // message/status ── 已读明细与未读计数
     /** 未读计数；不传 channelId = 全部会话。 */
@@ -145,26 +147,23 @@ declare module './client.js' {
     /** 某条消息的已读统计。 */
     messageReadStats(messageId: number, channelId: number): Promise<MessageReadStatsResponse>;
     /** 表态统计。 */
-    messageReactionStats(serverMessageId: number, userId: number): Promise<MessageReactionStatsResponse>;
+    messageReactionStats(serverMessageId: number): Promise<MessageReactionStatsResponse>;
 
-    // account/profile ── 资料读写
-    /** 读取用户资料。 */
-    accountProfileGet(userId: number): Promise<AccountProfileActionResponse>;
-    /** 更新自己的资料。 */
-    accountProfileUpdate(req: AccountProfileUpdateRequest): Promise<AccountProfileActionResponse>;
-    /** 更新用户基础字段。 */
-    accountUserUpdate(req: AccountUserUpdateRequest): Promise<AccountProfileActionResponse>;
+    // account/profile/get、account/profile/update、account/user/update 曾经封装在
+    // 这里，已撤回：前两条的模块在 server 的 account/mod.rs 里被注释掉、根本没注册，
+    // 三条的 handler 都是 `Ok(json!({"status":"success"}))` 占位实现。调用方会拿到
+    // 假成功而资料没有任何变化。server 真正实现之后再加回来。
     /** 生成名片分享。 */
     accountUserShareCard(req: AccountUserShareCardRequest): Promise<AccountUserShareCardResponse>;
     /** 扫码查人。 */
-    accountSearchByQrcode(qrKey: string): Promise<unknown>;
+    accountSearchByQrcode(qrKey: string): Promise<AccountSearchByQrcodeResponse>;
 
     // qrcode ── 通用二维码（user/group 专用码之外的底层能力）
     qrcodeGenerate(req: QrcodeGenerateRequest): Promise<QrcodeRecord>;
-    qrcodeResolve(req: QrcodeResolveRequest): Promise<unknown>;
-    qrcodeRefresh(req: QrcodeRefreshRequest): Promise<QrcodeRecord>;
-    qrcodeRevoke(qrKey: string): Promise<unknown>;
-    qrcodeList(req: QrcodeListRequest): Promise<unknown>;
+    qrcodeResolve(req: QrcodeResolveRequest): Promise<QrcodeResolveResponse>;
+    qrcodeRefresh(req: QrcodeRefreshRequest): Promise<QrcodeRefreshResponse>;
+    qrcodeRevoke(qrKey: string): Promise<QrcodeRevokeResponse>;
+    qrcodeList(req?: QrcodeListRequest): Promise<QrcodeListResponse>;
 
     // sticker ── 表情包
     stickerPackageList(): Promise<StickerPackageListResponse>;
@@ -481,7 +480,7 @@ proto.qrcodeRevoke = function (qrKey) {
   return this.rpcCallTyped(Routes.qrcode.REVOKE, { qr_key: qrKey });
 };
 proto.qrcodeList = function (req) {
-  return this.rpcCallTyped(Routes.qrcode.LIST, req);
+  return this.rpcCallTyped(Routes.qrcode.LIST, { include_revoked: req?.include_revoked ?? false });
 };
 proto.stickerPackageList = function () {
   return this.rpcCallTyped(Routes.sticker_package.LIST, {});
@@ -490,19 +489,18 @@ proto.stickerPackageDetail = function (packageId) {
   return this.rpcCallTyped(Routes.sticker_package.DETAIL, { package_id: packageId });
 };
 
-proto.friendReject = function (fromUserId, targetUserId, message) {
+// target_user_id / from_user_id / user_id 这些「我是谁」的字段一律不传：server 会
+// 用 ctx 里的会话身份覆盖掉（get_current_user_id）。protocol 的 Rust 结构体带着
+// 它们是因为那是完整反序列化目标，不是客户端可提交的字段集。
+proto.friendReject = function (fromUserId, message) {
   return this.rpcCallTyped(Routes.friend.REJECT, {
     from_user_id: fromUserId,
-    target_user_id: targetUserId,
     message,
   });
 };
 
-proto.friendRecall = function (targetUserId, fromUserId) {
-  return this.rpcCallTyped(Routes.friend.RECALL, {
-    target_user_id: targetUserId,
-    from_user_id: fromUserId,
-  });
+proto.friendRecall = function (targetUserId) {
+  return this.rpcCallTyped(Routes.friend.RECALL, { target_user_id: targetUserId });
 };
 
 proto.messageStatusCount = function (channelId) {
@@ -523,23 +521,10 @@ proto.messageReadStats = function (messageId, channelId) {
   });
 };
 
-proto.messageReactionStats = function (serverMessageId, userId) {
+proto.messageReactionStats = function (serverMessageId) {
   return this.rpcCallTyped(Routes.message_reaction.STATS, {
     server_message_id: serverMessageId,
-    user_id: userId,
   });
-};
-
-proto.accountProfileGet = function (userId) {
-  return this.rpcCallTyped(Routes.account_profile.GET, { user_id: userId });
-};
-
-proto.accountProfileUpdate = function (req) {
-  return this.rpcCallTyped(Routes.account_profile.UPDATE, req);
-};
-
-proto.accountUserUpdate = function (req) {
-  return this.rpcCallTyped(Routes.account_user.UPDATE, req);
 };
 
 proto.accountUserShareCard = function (req) {
