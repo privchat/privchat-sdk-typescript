@@ -101,6 +101,18 @@ export const Routes = {
     LIST: 'message/reaction/list',
     STATS: 'message/reaction/stats',
   },
+  /** 通用二维码（与 user_qrcode / group_qrcode 并列的底层能力）。 */
+  qrcode: {
+    GENERATE: 'qrcode/generate',
+    RESOLVE: 'qrcode/resolve',
+    REFRESH: 'qrcode/refresh',
+    REVOKE: 'qrcode/revoke',
+    LIST: 'qrcode/list',
+  },
+  sticker_package: {
+    LIST: 'sticker/package/list',
+    DETAIL: 'sticker/package/detail',
+  },
   presence: {
     TYPING: 'presence/typing',
     STATUS_GET: 'presence/status/get',

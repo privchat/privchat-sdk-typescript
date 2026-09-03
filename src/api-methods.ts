@@ -56,6 +56,13 @@ import type {
   AccountUserUpdateRequest,
   AccountUserShareCardRequest,
   AccountUserShareCardResponse,
+  QrcodeGenerateRequest,
+  QrcodeRecord,
+  QrcodeResolveRequest,
+  QrcodeRefreshRequest,
+  QrcodeListRequest,
+  StickerPackageListResponse,
+  StickerPackageDetailResponse,
   GetOrCreateDirectChannelResponse,
   GroupCreateResponse,
   GroupInfoResponse,
@@ -151,6 +158,17 @@ declare module './client.js' {
     accountUserShareCard(req: AccountUserShareCardRequest): Promise<AccountUserShareCardResponse>;
     /** 扫码查人。 */
     accountSearchByQrcode(qrKey: string): Promise<unknown>;
+
+    // qrcode ── 通用二维码（user/group 专用码之外的底层能力）
+    qrcodeGenerate(req: QrcodeGenerateRequest): Promise<QrcodeRecord>;
+    qrcodeResolve(req: QrcodeResolveRequest): Promise<unknown>;
+    qrcodeRefresh(req: QrcodeRefreshRequest): Promise<QrcodeRecord>;
+    qrcodeRevoke(qrKey: string): Promise<unknown>;
+    qrcodeList(req: QrcodeListRequest): Promise<unknown>;
+
+    // sticker ── 表情包
+    stickerPackageList(): Promise<StickerPackageListResponse>;
+    stickerPackageDetail(packageId: string): Promise<StickerPackageDetailResponse>;
 
     // contact/blacklist (caller must supply current user_id since server
     // does NOT auto-fill it for blacklist routes — verified via wire test)
@@ -448,6 +466,28 @@ proto.privacyGet = function () {
 
 proto.privacyUpdate = function (patch) {
   return this.rpcCallTyped(Routes.account_privacy.UPDATE, patch);
+};
+
+proto.qrcodeGenerate = function (req) {
+  return this.rpcCallTyped(Routes.qrcode.GENERATE, req);
+};
+proto.qrcodeResolve = function (req) {
+  return this.rpcCallTyped(Routes.qrcode.RESOLVE, req);
+};
+proto.qrcodeRefresh = function (req) {
+  return this.rpcCallTyped(Routes.qrcode.REFRESH, req);
+};
+proto.qrcodeRevoke = function (qrKey) {
+  return this.rpcCallTyped(Routes.qrcode.REVOKE, { qr_key: qrKey });
+};
+proto.qrcodeList = function (req) {
+  return this.rpcCallTyped(Routes.qrcode.LIST, req);
+};
+proto.stickerPackageList = function () {
+  return this.rpcCallTyped(Routes.sticker_package.LIST, {});
+};
+proto.stickerPackageDetail = function (packageId) {
+  return this.rpcCallTyped(Routes.sticker_package.DETAIL, { package_id: packageId });
 };
 
 proto.friendReject = function (fromUserId, targetUserId, message) {

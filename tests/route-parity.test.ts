@@ -12,11 +12,9 @@ import '../src/api-methods.js'; // 方法在模块加载时挂到 prototype 上
 function makeStub() {
   const calls: Array<{ route: string; body: unknown }> = [];
   // 不构造真 client：只借它的原型，把 rpcCallTyped 换成记录器。
-  const proto = Object.create(PrivchatClient.prototype) as Record<
-    string,
-    (...a: never[]) => Promise<unknown>
-  >;
-  (proto as Record<string, unknown>).rpcCallTyped = (route: string, body: unknown) => {
+  const proto = Object.create(PrivchatClient.prototype) as PrivchatClient;
+  (proto as unknown as { rpcCallTyped: (r: string, b: unknown) => Promise<unknown> })
+    .rpcCallTyped = (route, body) => {
     calls.push({ route, body });
     return Promise.resolve({});
   };
@@ -36,6 +34,24 @@ describe('新增路由与协议一致', () => {
     expect(Routes.account_user.UPDATE).toBe('account/user/update');
     expect(Routes.account_user.SHARE_CARD).toBe('account/user/share_card');
     expect(Routes.account_search.BY_QRCODE).toBe('account/search/by_qrcode');
+    expect(Routes.qrcode.GENERATE).toBe('qrcode/generate');
+    expect(Routes.qrcode.RESOLVE).toBe('qrcode/resolve');
+    expect(Routes.qrcode.REFRESH).toBe('qrcode/refresh');
+    expect(Routes.qrcode.REVOKE).toBe('qrcode/revoke');
+    expect(Routes.qrcode.LIST).toBe('qrcode/list');
+    expect(Routes.sticker_package.LIST).toBe('sticker/package/list');
+    expect(Routes.sticker_package.DETAIL).toBe('sticker/package/detail');
+  });
+
+  it('二维码与表情包的请求体字段名与 handler 读的键一致', async () => {
+    const { proto, calls } = makeStub();
+    await proto.qrcodeRevoke('k1');
+    await proto.stickerPackageDetail('pkg-1');
+    expect(calls[0]).toEqual({ route: 'qrcode/revoke', body: { qr_key: 'k1' } });
+    expect(calls[1]).toEqual({
+      route: 'sticker/package/detail',
+      body: { package_id: 'pkg-1' },
+    });
   });
 
   it('请求体字段名走 snake_case，与服务端结构对齐', async () => {
@@ -66,7 +82,9 @@ describe('新增路由与协议一致', () => {
   it('未读计数不传 channelId 时也要发出请求（= 全部会话）', async () => {
     const { proto, calls } = makeStub();
     await proto.messageStatusCount();
-    expect(calls[0].route).toBe('message/status/count');
-    expect(calls[0].body).toEqual({ channel_id: undefined });
+    expect(calls[0]).toEqual({
+      route: 'message/status/count',
+      body: { channel_id: undefined },
+    });
   });
 });

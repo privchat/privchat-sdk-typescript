@@ -1259,3 +1259,44 @@ export interface AccountUserShareCardResponse {
   share_url?: string;
   expire_at?: number;
 }
+
+/** 通用二维码。`qrcode/*`——服务端 handler 逐字段读 body，键名照它。 */
+export interface QrcodeGenerateRequest {
+  qr_type: string;
+  target_id: string;
+  creator_id: number;
+  expire_seconds?: number;
+  max_usage?: number;
+  one_time?: boolean;
+  revoke_old?: boolean;
+  metadata?: Record<string, unknown>;
+}
+export interface QrcodeRecord {
+  qr_key: string;
+  qr_code: string;
+  qr_type: string;
+  target_id: string;
+  created_at: number;
+  expire_at?: number | null;
+  max_usage?: number | null;
+  used_count: number;
+}
+export interface QrcodeResolveRequest { qr_key: string; token?: string }
+export interface QrcodeRefreshRequest { qr_type: string; target_id: string; creator_id: number }
+export interface QrcodeRevokeRequest { qr_key: string }
+export interface QrcodeListRequest { creator_id: number; include_revoked?: boolean }
+
+/** 表情包。`sticker/package/*` */
+export interface StickerInfo {
+  sticker_id: string;
+  package_id: string;
+  image_url: string;
+  alt_text: string;
+  emoji?: string;
+  width: number;
+  height: number;
+  mime_type: string;
+}
+export interface StickerPackageInfo { package_id: string; [k: string]: unknown }
+export interface StickerPackageListResponse { packages: StickerPackageInfo[] }
+export interface StickerPackageDetailResponse { package: StickerPackageInfo }
