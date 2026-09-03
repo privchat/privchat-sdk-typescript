@@ -1149,3 +1149,113 @@ export interface UserDetailResponse {
   source_type: string;
   source_id: string;
 }
+
+// ---------------------------------------------------------------------------
+// 与原生 SDK 对齐补上的路由（字段逐项照 privchat-protocol，不另造契约）。
+// 服务端这些路由早就注册了，只有 TS 这边没接，所以 Web/H5 做不了这些事。
+// ---------------------------------------------------------------------------
+
+/** 拒绝好友申请。`contact/friend/reject` */
+export interface FriendRejectRequest {
+  from_user_id: number;
+  target_user_id: number;
+  message?: string;
+}
+export type FriendRejectResponse = boolean;
+
+/** 撤回自己发出的好友申请。`contact/friend/recall` */
+export interface FriendRecallRequest {
+  target_user_id: number;
+  from_user_id: number;
+}
+export type FriendRecallResponse = boolean;
+
+/** 未读计数。`message/status/count`；不传 channel_id = 全部会话。 */
+export interface MessageStatusCountRequest {
+  channel_id?: number;
+}
+export interface MessageStatusCountResponse {
+  unread_count: number;
+  channel_id?: string;
+}
+
+/** 某条消息的已读者明细。`message/status/read_list` */
+export interface MessageReadListRequest {
+  message_id: number;
+  channel_id: number;
+}
+export interface MessageReadUserEntry {
+  user_id: number;
+  read_at?: number;
+  [k: string]: unknown;
+}
+export interface MessageReadListResponse {
+  readers: MessageReadUserEntry[];
+  total: number;
+  read_count: number;
+  unread_count: number;
+}
+
+/** 某条消息的已读统计。`message/status/read_stats` */
+export interface MessageReadStatsRequest {
+  message_id: number;
+  channel_id: number;
+}
+export interface MessageReadStatsResponse {
+  read_count: number;
+  total_count: number;
+}
+
+/** 表态统计。`message/reaction/stats` */
+export interface MessageReactionStatsRequest {
+  server_message_id: number;
+  user_id: number;
+}
+export interface MessageReactionStatsResponse {
+  success: boolean;
+  stats: Record<string, unknown>;
+}
+
+/** 读取用户资料。`account/profile/get` */
+export interface AccountProfileGetRequest {
+  user_id: number;
+}
+export interface AccountProfileActionResponse {
+  status: string;
+  action: string;
+  timestamp: number;
+}
+
+/** 更新自己的资料。`account/profile/update` */
+export interface AccountProfileUpdateRequest {
+  user_id: number;
+  display_name?: string;
+  avatar_url?: string;
+  bio?: string;
+  extra_fields?: Record<string, string>;
+}
+
+/** 更新用户基础字段。`account/user/update` */
+export interface AccountUserUpdateRequest {
+  user_id: number;
+  display_name?: string;
+  avatar_url?: string;
+  bio?: string;
+}
+
+/** 生成名片分享。`account/user/share_card` */
+export interface AccountUserShareCardRequest {
+  sharer_id: number;
+  target_user_id: number;
+  receiver_id: number;
+  expire_seconds?: number;
+}
+export interface AccountUserShareCardResponse {
+  share_id: string;
+  target_user_id: number;
+  receiver_id: number;
+  created_at: number;
+  share_key?: string;
+  share_url?: string;
+  expire_at?: number;
+}

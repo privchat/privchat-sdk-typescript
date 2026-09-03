@@ -45,6 +45,17 @@ import type {
   FriendPendingResponse,
   FriendRemoveResponse,
   FriendSetAliasResponse,
+  FriendRejectResponse,
+  FriendRecallResponse,
+  MessageStatusCountResponse,
+  MessageReadListResponse,
+  MessageReadStatsResponse,
+  MessageReactionStatsResponse,
+  AccountProfileActionResponse,
+  AccountProfileUpdateRequest,
+  AccountUserUpdateRequest,
+  AccountUserShareCardRequest,
+  AccountUserShareCardResponse,
   GetOrCreateDirectChannelResponse,
   GroupCreateResponse,
   GroupInfoResponse,
@@ -114,6 +125,32 @@ declare module './client.js' {
     friendCheck(friendId: number): Promise<FriendCheckResponse>;
     friendRemove(friendId: number): Promise<FriendRemoveResponse>;
     friendSetAlias(targetUserId: number, alias: string): Promise<FriendSetAliasResponse>;
+    /** 拒绝好友申请。 */
+    friendReject(fromUserId: number, targetUserId: number, message?: string): Promise<FriendRejectResponse>;
+    /** 撤回自己发出的好友申请。 */
+    friendRecall(targetUserId: number, fromUserId: number): Promise<FriendRecallResponse>;
+
+    // message/status ── 已读明细与未读计数
+    /** 未读计数；不传 channelId = 全部会话。 */
+    messageStatusCount(channelId?: number): Promise<MessageStatusCountResponse>;
+    /** 某条消息的已读者明细。 */
+    messageReadList(messageId: number, channelId: number): Promise<MessageReadListResponse>;
+    /** 某条消息的已读统计。 */
+    messageReadStats(messageId: number, channelId: number): Promise<MessageReadStatsResponse>;
+    /** 表态统计。 */
+    messageReactionStats(serverMessageId: number, userId: number): Promise<MessageReactionStatsResponse>;
+
+    // account/profile ── 资料读写
+    /** 读取用户资料。 */
+    accountProfileGet(userId: number): Promise<AccountProfileActionResponse>;
+    /** 更新自己的资料。 */
+    accountProfileUpdate(req: AccountProfileUpdateRequest): Promise<AccountProfileActionResponse>;
+    /** 更新用户基础字段。 */
+    accountUserUpdate(req: AccountUserUpdateRequest): Promise<AccountProfileActionResponse>;
+    /** 生成名片分享。 */
+    accountUserShareCard(req: AccountUserShareCardRequest): Promise<AccountUserShareCardResponse>;
+    /** 扫码查人。 */
+    accountSearchByQrcode(qrKey: string): Promise<unknown>;
 
     // contact/blacklist (caller must supply current user_id since server
     // does NOT auto-fill it for blacklist routes — verified via wire test)
@@ -411,6 +448,66 @@ proto.privacyGet = function () {
 
 proto.privacyUpdate = function (patch) {
   return this.rpcCallTyped(Routes.account_privacy.UPDATE, patch);
+};
+
+proto.friendReject = function (fromUserId, targetUserId, message) {
+  return this.rpcCallTyped(Routes.friend.REJECT, {
+    from_user_id: fromUserId,
+    target_user_id: targetUserId,
+    message,
+  });
+};
+
+proto.friendRecall = function (targetUserId, fromUserId) {
+  return this.rpcCallTyped(Routes.friend.RECALL, {
+    target_user_id: targetUserId,
+    from_user_id: fromUserId,
+  });
+};
+
+proto.messageStatusCount = function (channelId) {
+  return this.rpcCallTyped(Routes.message_status.COUNT, { channel_id: channelId });
+};
+
+proto.messageReadList = function (messageId, channelId) {
+  return this.rpcCallTyped(Routes.message_status.READ_LIST, {
+    message_id: messageId,
+    channel_id: channelId,
+  });
+};
+
+proto.messageReadStats = function (messageId, channelId) {
+  return this.rpcCallTyped(Routes.message_status.READ_STATS, {
+    message_id: messageId,
+    channel_id: channelId,
+  });
+};
+
+proto.messageReactionStats = function (serverMessageId, userId) {
+  return this.rpcCallTyped(Routes.message_reaction.STATS, {
+    server_message_id: serverMessageId,
+    user_id: userId,
+  });
+};
+
+proto.accountProfileGet = function (userId) {
+  return this.rpcCallTyped(Routes.account_profile.GET, { user_id: userId });
+};
+
+proto.accountProfileUpdate = function (req) {
+  return this.rpcCallTyped(Routes.account_profile.UPDATE, req);
+};
+
+proto.accountUserUpdate = function (req) {
+  return this.rpcCallTyped(Routes.account_user.UPDATE, req);
+};
+
+proto.accountUserShareCard = function (req) {
+  return this.rpcCallTyped(Routes.account_user.SHARE_CARD, req);
+};
+
+proto.accountSearchByQrcode = function (qrKey) {
+  return this.rpcCallTyped(Routes.account_search.BY_QRCODE, { qr_key: qrKey });
 };
 
 proto.friendAccept = function (fromUserId, message) {

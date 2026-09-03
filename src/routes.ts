@@ -8,9 +8,16 @@ export const Routes = {
   account_user: {
     REGISTER: 'account/user/register',
     DETAIL: 'account/user/detail',
+    UPDATE: 'account/user/update',
+    SHARE_CARD: 'account/user/share_card',
+  },
+  account_profile: {
+    GET: 'account/profile/get',
+    UPDATE: 'account/profile/update',
   },
   account_search: {
     QUERY: 'account/search/query',
+    BY_QRCODE: 'account/search/by_qrcode',
   },
   account_privacy: {
     GET: 'account/privacy/get',
@@ -26,6 +33,8 @@ export const Routes = {
   friend: {
     APPLY: 'contact/friend/apply',
     ACCEPT: 'contact/friend/accept',
+    REJECT: 'contact/friend/reject',
+    RECALL: 'contact/friend/recall',
     REMOVE: 'contact/friend/remove',
     PENDING: 'contact/friend/pending',
     CHECK: 'contact/friend/check',
@@ -75,6 +84,9 @@ export const Routes = {
   },
   message_status: {
     READ_PTS: 'message/status/read_pts',
+    COUNT: 'message/status/count',
+    READ_LIST: 'message/status/read_list',
+    READ_STATS: 'message/status/read_stats',
   },
   message_history: {
     GET: 'message/history/get',
@@ -87,6 +99,7 @@ export const Routes = {
     ADD: 'message/reaction/add',
     REMOVE: 'message/reaction/remove',
     LIST: 'message/reaction/list',
+    STATS: 'message/reaction/stats',
   },
   presence: {
     TYPING: 'presence/typing',
