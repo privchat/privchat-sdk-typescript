@@ -351,12 +351,14 @@ declare module './client.js' {
      *  already commits the file row server-side, so the happy path
      *  doesn't strictly require this — keep for failure reporting. */
     fileUploadCallback(args: {
+      /** 本次上传的 token；服务端靠它定位这次上传，缺了会被拒。 */
+      token: string;
       file_id: string;
       status: 'success' | 'failed';
     }): Promise<FileUploadCallbackResponse>;
 
-    /** Resolve a file_id to a fresh signed URL. Use when the embedded
-     *  url in a message bubble has expired. */
+    /** 用 file_id 换一张当次有效的签名地址。
+     *  消息里不携带任何下载地址（会过期），所以每次下载都要走这里。 */
     fileGetUrl(fileId: number): Promise<FileGetUrlResponse>;
 
     /** 附件加密 v1 下载（ATTACHMENT_ENCRYPTION_SPEC §6/§7）：
@@ -883,9 +885,13 @@ proto.fileClaimExisting = function (args) {
 };
 
 proto.fileUploadCallback = function (args) {
+  // token 是**必填**：服务端靠它（前半段就是 upload_id）定位这次上传，再核对
+  // 报上来的 file_id 确实是这次的结果。以前这里没发 token，服务端必然回
+  // "缺少 token 参数"——这个方法从来没有被调用过，所以一直没人发现。
   return this.rpcCallTyped(Routes.file.UPLOAD_CALLBACK, {
-    user_id: 0,
+    token: args.token,
     file_id: args.file_id,
+    user_id: 0,
     status: args.status,
   });
 };
