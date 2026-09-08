@@ -293,6 +293,27 @@ export interface RefreshAccessTokenResult {
 
 const AUTH_REFRESH_ROUTE = 'account/auth/refresh';
 const ENTITY_SYNC_ROUTE = 'entity/sync_entities';
+/** 依赖补齐的重试退避上限。慢下来，但**永不放弃**——放弃意味着那条会话永远
+ *  显示不出对端名字，而界面无法解释为什么。 */
+const ENTITY_RETRY_MAX_DELAY_MS = 60_000;
+
+/**
+ * 「同步请求成功了，但目标依赖仍然没到」。
+ *
+ * 与网络错误区分开：这类失败不该被当成完成（否则再也不会重试），也不该被当成
+ * 协议异常告警。可能的原因是可见性遮蔽、实体尚未生成、分页边界。
+ * 服务端**明确**给出注销标记才是终态，见
+ * CONVERSATION_DEPENDENCY_READINESS_SPEC §5.4。
+ */
+export class EntityDependencyUnresolvedError extends Error {
+  constructor(
+    readonly entityType: string,
+    readonly entityId: string,
+  ) {
+    super(`entity dependency unresolved: ${entityType}:${entityId}`);
+    this.name = 'EntityDependencyUnresolvedError';
+  }
+}
 
 export interface BootstrapChannelsOptions {
   /** Resume token for the channel page; default 0 = full bootstrap. */
@@ -3500,6 +3521,21 @@ export class PrivchatClient {
    * **只补缺的那几个**，绝不退化成全量 user sync
    * （CONVERSATION_DEPENDENCY_READINESS_SPEC §5.2）。
    */
+  /**
+   * 这个 user 在本地**是否已经能算出显示名**。
+   *
+   * 判据与 UI 解析 DM 标题的口径一致（nickname / username 取其一非空），否则会
+   * 出现「SDK 认为就绪、界面仍是 fallback」。**不含头像**：一张图片的网络故障
+   * 不该让整条会话不可见。
+   */
+  private hasDisplayableUser(userId: string): boolean {
+    const record = this.userStore?.get(userId);
+    if (record === undefined) return false;
+    const nickname = record.nickname?.trim() ?? '';
+    const username = record.username.trim();
+    return nickname !== '' || username !== '';
+  }
+
   private queueUnresolvedDmPeers(): void {
     if (this.userStore === null || this.cacheDb === null) return;
     let channels: ChannelRecord[];
@@ -3577,7 +3613,14 @@ export class PrivchatClient {
             error,
           });
           pending.attempts += 1;
-          if (pending.attempts <= 5 && !this.disposed) {
+          // 🔴 **不因为重试次数就丢弃**。原来 5 次之后这条依赖就静默消失，
+          // 弱网下（或服务端实体稍后才生成）对端资料会永久停在缺失状态，
+          // 而界面没有任何东西说明为什么。指数退避封顶即可：慢下来，但不放弃。
+          //
+          // 队列本身仍是内存的，进程退出会丢——这没关系：未就绪是「本地有没有这行
+          // user」算出来的，冷启动和重连后的 queueUnresolvedDmPeers() 会重新发现，
+          // 不需要第二份持久真源（那反而会出现「队列说没了、实体其实缺着」）。
+          if (!this.disposed) {
             const key = `${pending.entity_type}\u0000${pending.scope ?? ''}`;
             const newer = this.pendingEntityInvalidations.get(key);
             if (newer === undefined) {
@@ -3588,14 +3631,17 @@ export class PrivchatClient {
               }
               newer.attempts = Math.max(newer.attempts, pending.attempts);
             }
-            retryDelayMs = Math.max(retryDelayMs, 250 * (2 ** (pending.attempts - 1)));
+            retryDelayMs = Math.max(
+              retryDelayMs,
+              Math.min(250 * 2 ** Math.min(pending.attempts - 1, 10), ENTITY_RETRY_MAX_DELAY_MS),
+            );
           }
         }
       }));
     } finally {
       this.entityInvalidationFlushRunning = false;
       if (this.pendingEntityInvalidations.size > 0) {
-        this.scheduleEntityInvalidationFlush(Math.min(retryDelayMs, 4_000));
+        this.scheduleEntityInvalidationFlush(Math.min(retryDelayMs, ENTITY_RETRY_MAX_DELAY_MS));
       }
     }
   }
@@ -3611,10 +3657,19 @@ export class PrivchatClient {
         if (this.friendshipStore === null) return undefined;
         await this.bootstrapFriendships(db, this.friendshipStore, 100);
         return String(this.friendshipStore.maxSyncVersion());
-      case 'user':
+      case 'user': {
         if (this.userStore === null) return undefined;
         await this.bootstrapUsers(db, this.userStore, 100, scope);
+        // 🔴 完成判据是**目标实体真的到了**，不是 RPC 没报错。
+        // 定向补齐（scope = `user:{id}`）时，服务端可能因为可见性遮蔽、实体尚未
+        // 生成或分页边界返回空页——那时请求是成功的、依赖仍然缺着。把整个 store 的
+        // maxSyncVersion 当成功信号，这个对端就再也不会被重试，会话标题永久空着。
+        const targetUid = scope?.startsWith('user:') === true ? scope.slice(5) : undefined;
+        if (targetUid !== undefined && !this.hasDisplayableUser(targetUid)) {
+          throw new EntityDependencyUnresolvedError('user', targetUid);
+        }
         return String(this.userStore.maxSyncVersion());
+      }
       case 'group':
         if (this.groupStore === null) return undefined;
         await this.bootstrapGroups(db, this.groupStore, 100);
@@ -4453,6 +4508,10 @@ export class PrivchatClient {
     // never reached us) drop the matching outbox row first, so this
     // flush never re-sends a message the server already accepted.
     await this.flushOutboxOnReconnect();
+    // 断网期间失败/丢掉的依赖补齐在这里重新发现：未就绪是「本地有没有这行 user」
+    // 算出来的，不需要持久化队列——网络一恢复就重扫一遍会话列表即可，
+    // 也就不会出现「队列说没了、实体其实还缺着」的第二份真源。
+    this.queueUnresolvedDmPeers();
     this.cancelReconnect();
   }
 
