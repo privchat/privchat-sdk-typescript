@@ -2290,6 +2290,10 @@ export class PrivchatClient {
     //    their inbox, which is the wrong trade-off. Each sync pages
     //    its own `since_version` independently.
     void this.bootstrapProfilesBestEffort(opts.limit ?? 100);
+    // 上面那次 profile 同步是**增量**的（按 since_version 走游标）：对端的 user 实体
+    // 若版本低于本地游标就拉不到，DM 标题因此可能永远算不出来。这里按会话列表反查
+    // 缺失的对端，逐个定向补——只补缺的那几个，不退化成全量 user sync。
+    this.queueUnresolvedDmPeers();
 
     return records;
   }
@@ -3481,6 +3485,42 @@ export class PrivchatClient {
       console.warn('[privchat:entity-sync] invalid invalidation payload', error);
     }
     return true;
+  }
+
+  /**
+   * 会话列表里**标题算不出来**的 DM 对端（本地缺 `users` 行）→ 排定向补齐。
+   *
+   * DM 的标题由 UI 侧 join `users` 得到（`useUserProfile(peer_user_id)`），
+   * 而那个 hook 只读缓存、缺失时不会去拉。于是「对端从未同步过」的会话会一直顶着
+   * fallback 显示，直到下一次 bootstrap —— Rust SDK 上同样的缺口在真机复现过
+   * （新 DM 标题停在 typed loading 直到冷启动）。
+   *
+   * 复用既有的失效队列：key 是 `entity_type\0scope`，同一个 peer 天然 singleflight，
+   * 失败重试与退避也由 `flushEntityInvalidations` 统一处理，不另建一套调度。
+   * **只补缺的那几个**，绝不退化成全量 user sync
+   * （CONVERSATION_DEPENDENCY_READINESS_SPEC §5.2）。
+   */
+  private queueUnresolvedDmPeers(): void {
+    if (this.userStore === null || this.cacheDb === null) return;
+    let channels: ChannelRecord[];
+    try {
+      channels = this.cachedChannels();
+    } catch {
+      return; // 缓存未就绪（bootstrap 还没跑），下次读列表时再发现。
+    }
+    for (const channel of channels) {
+      if (channel.channel_type !== 1) continue;
+      const peer = channel.peer_user_id;
+      if (peer === undefined || peer === '' || peer === '0') continue;
+      if (this.userStore.get(peer) !== undefined) continue;
+      this.queueEntityInvalidation({
+        entity_type: 'user',
+        entity_id: peer,
+        scope: `user:${peer}`,
+        target_version: '0',
+        mutation_hint: 'upsert',
+      });
+    }
   }
 
   private queueEntityInvalidation(item: EntityInvalidation): void {
