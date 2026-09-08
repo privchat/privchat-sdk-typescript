@@ -3536,6 +3536,36 @@ export class PrivchatClient {
     return nickname !== '' || username !== '';
   }
 
+  /**
+   * 这条会话现在能否**完整展示**（发布屏障，CONVERSATION_DEPENDENCY_READINESS_SPEC §4）。
+   *
+   * 判据与 Rust SDK `list_channels` 的 `resolved_channel_name <> ''` 同构：
+   * 算得出标题就可展示，算不出就先不发布，由定向补齐到位后一次性出现。
+   *
+   * 两个刻意的设计：
+   * - **不看「上次同步成没成功」，只看名字算不算得出来**。曾经展示过的会话，
+   *   旧快照还在 users store 里，刷新失败也照样可见——「新会话未就绪不发布」
+   *   和「已有会话不消失」是两个场景，必须同时成立。
+   * - **头像不参与**：一张图片下载失败不该让整条会话不可见。
+   *
+   * 群不适用：群名有 group 实体 / 成员拼接 / channel_id 兜底，总能算出来。
+   */
+  isConversationDisplayable(channel: ChannelRecord): boolean {
+    if (channel.channel_type !== 1) return true;
+    // channel 实体自带的解析后标题（系统会话、存量真名）——纯数字是老版本写进去的
+    // uid，不算名字。
+    if (
+      channel.title !== undefined &&
+      channel.title !== '' &&
+      !/^\d+$/.test(channel.title)
+    ) {
+      return true;
+    }
+    const peer = channel.peer_user_id;
+    if (peer === undefined || peer === '' || peer === '0') return false;
+    return this.hasDisplayableUser(peer);
+  }
+
   private queueUnresolvedDmPeers(): void {
     if (this.userStore === null || this.cacheDb === null) return;
     let channels: ChannelRecord[];
