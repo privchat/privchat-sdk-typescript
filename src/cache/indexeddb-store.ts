@@ -594,12 +594,75 @@ export async function upsertSyncState(
 
 // ----- User profile cache (R2A) -----
 
+/**
+ * Merge profile rows, honouring version order and field ownership.
+ *
+ * A blind `bulkPut` was wrong in three ways, all of which the Rust SDK hit in
+ * production (ENTITY_INVALIDATION_SYNC_SPEC §4.2):
+ *
+ * 1. **No version comparison.** A detail response that started before an entity
+ *    update but arrived after it overwrote the newer row, and the stored
+ *    version stayed at the newer number — stale content wearing a fresh
+ *    version, which nothing later can correct.
+ * 2. **No field ownership.** `nickname` / `avatar_url` belong to the `user`
+ *    entity. A writer that carries no version (a channel-member row knows an
+ *    account name and nothing else) may fill them only while no snapshot
+ *    exists; once one does they are the owner's, *including the owner's empty
+ *    values*. "Locally empty" is not a licence to write: an authoritative clear
+ *    is a value, and resurrecting it leaves the row permanently wrong.
+ * 3. **No three-state fields.** `undefined` means the writer has no information
+ *    and the stored value stands; `''` is the server saying this user has no
+ *    such value, and must clear.
+ *
+ * `username` is owned elsewhere — PROFILE_VISIBILITY D5 keeps another user's
+ * username off the shared `user` projection and carries it on `friend` — so it
+ * stays fillable when locally absent.
+ */
 export async function upsertUsers(
   db: CacheDB,
   records: UserRecord[],
 ): Promise<void> {
   if (records.length === 0) return;
-  await db.users.bulkPut(records);
+  const ids = records.map((r) => r.user_id);
+  const existing = new Map<string, UserRecord>();
+  for (const row of await db.users.bulkGet(ids)) {
+    if (row !== undefined) existing.set(row.user_id, row);
+  }
+  const merged: UserRecord[] = [];
+  for (const incoming of records) {
+    const prev = existing.get(incoming.user_id);
+    if (prev === undefined) {
+      merged.push({
+        ...incoming,
+        profile_snapshot: incoming.sync_version > 0,
+      });
+      continue;
+    }
+    const versioned = incoming.sync_version > 0;
+    if (versioned && incoming.sync_version < prev.sync_version) {
+      continue; // older snapshot than what we hold
+    }
+    const ownedLocked = !versioned && prev.profile_snapshot === true;
+    const pick = (next: string | undefined, current: string | undefined) =>
+      next === undefined ? current : next;
+    merged.push({
+      ...prev,
+      username: pick(
+        // a versionless writer may only fill a username we do not have
+        !versioned && (prev.username ?? '') !== '' ? undefined : incoming.username,
+        prev.username,
+      ) as string,
+      nickname: ownedLocked ? prev.nickname : pick(incoming.nickname, prev.nickname),
+      avatar_url: ownedLocked
+        ? prev.avatar_url
+        : pick(incoming.avatar_url, prev.avatar_url),
+      user_type: ownedLocked ? prev.user_type : incoming.user_type,
+      is_friend: incoming.is_friend || prev.is_friend,
+      sync_version: Math.max(prev.sync_version, incoming.sync_version),
+      profile_snapshot: prev.profile_snapshot === true || versioned,
+    });
+  }
+  if (merged.length > 0) await db.users.bulkPut(merged);
 }
 
 export async function listUsers(db: CacheDB): Promise<UserRecord[]> {

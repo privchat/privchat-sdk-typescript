@@ -72,6 +72,19 @@ export interface UserRecord {
   is_friend: boolean;
   /** Monotonic increment from `entity/sync_entities("user").items[*].version`. */
   sync_version: number;
+  /**
+   * Whether this row has ever held an authoritative profile snapshot.
+   *
+   * Separate from `sync_version` on purpose. The version says *where* a
+   * snapshot sits in the entity sequence; this says *whether one exists* at
+   * all, which is what decides if a writer carrying no version may fill
+   * `nickname` / `avatar_url`. Bundled into one number there is no safe repair
+   * for a corrupted version: zeroing it would also mean "never synced" and
+   * reopen the door for a partial writer to put back a value the owner cleared.
+   *
+   * Mirrors `profile_snapshot` in the Rust SDK's local store.
+   */
+  profile_snapshot?: boolean;
 }
 
 /**
