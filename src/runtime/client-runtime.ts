@@ -59,6 +59,15 @@ export interface ConnectivityRuntimeState {
   lastConnectedAt: number | null;
   lastDisconnectedAt: number | null;
   lastError: ClientRuntimeError | null;
+  /**
+   * The drop happened while the app was backgrounded, so the user never saw it.
+   *
+   * Technically a reconnect — the session had connected before — but the banner speaks to
+   * the user, and from their side nothing happened while they were away. Showing
+   * "reconnecting" invents a failure. Flagged drops render as `connecting`, matching a first
+   * connect. Cleared on authentication. A real mid-session drop does not set it.
+   */
+  resumedFromBackground: boolean;
 }
 
 export interface SyncRuntimeState {
@@ -88,6 +97,7 @@ const initialConnectivity: ConnectivityRuntimeState = {
   lastConnectedAt: null,
   lastDisconnectedAt: null,
   lastError: null,
+  resumedFromBackground: false,
 };
 
 const initialSync: SyncRuntimeState = {
@@ -167,7 +177,10 @@ export function resolveRuntimeBanner(
     if (sync.resumeSyncRunning) return 'syncing';
     return showConnectedBanner ? 'connected' : 'hidden';
   }
-  if (connectivity.reconnecting && hasStartedConnectionFlow) return 'reconnecting';
+  if (connectivity.reconnecting && hasStartedConnectionFlow) {
+    // A drop the user never saw reads as connecting, not reconnecting.
+    return connectivity.resumedFromBackground ? 'connecting' : 'reconnecting';
+  }
   if (connectivity.gatewayConnected) return 'connecting';
   if (hasStartedConnectionFlow) return 'offline';
   return 'hidden';
@@ -246,6 +259,7 @@ export function createClientRuntime(client: RuntimeClientLike): ClientRuntime {
               reconnecting: false,
               reconnectAttempt: 0,
               serverBusy: false,
+              resumedFromBackground: false,
               lastConnectedAt: now,
               lastError: null,
             };

@@ -100,6 +100,7 @@ const conn = (over: Partial<ConnectivityRuntimeState>): ConnectivityRuntimeState
   gatewayConnected: false,
   authenticated: false,
   reconnecting: false,
+  resumedFromBackground: false,
   reconnectAttempt: 0,
   serverBusy: false,
   lastConnectedAt: null,
@@ -167,6 +168,16 @@ describe('resolveRuntimeBanner priority', () => {
     );
     expect(resolveRuntimeBanner(conn({}), syncState(), false, false)).toBe('hidden');
     expect(resolveRuntimeBanner(conn({}), syncState(), true, false)).toBe('offline');
+  });
+
+  // The app is suspended, the system closes the socket, the user returns an hour later.
+  // They saw no failure, so the banner must not claim one; it reads like a first connect.
+  it('a drop taken while backgrounded reads as connecting, a visible one as reconnecting', () => {
+    const visible = conn({ reconnecting: true, lastConnectedAt: 1 });
+    expect(resolveRuntimeBanner(visible, syncState(), true, false)).toBe('reconnecting');
+
+    const unseen = conn({ reconnecting: true, lastConnectedAt: 1, resumedFromBackground: true });
+    expect(resolveRuntimeBanner(unseen, syncState(), true, false)).toBe('connecting');
   });
 });
 
