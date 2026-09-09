@@ -1148,6 +1148,13 @@ export interface UserDetailResponse {
   is_follow: boolean;
   source_type: string;
   source_id: string;
+  /**
+   * 这份资料在 `user` 实体序列里的位置，与上面的字段来自服务端**同一次读取**。
+   *
+   * 客户端据此把详情响应放到和实体增量同一条版本轴上比较——少了它，详情只能以
+   * 「无版本」入库，晚到的旧响应会盖掉刚同步下来的新资料。老 server 不下发 ⇒ 缺席。
+   */
+  sync_version?: number;
 }
 
 // ---------------------------------------------------------------------------

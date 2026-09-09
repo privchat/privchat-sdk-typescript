@@ -2603,6 +2603,25 @@ export class PrivchatClient {
     return this.userStore.get(user_id);
   }
 
+  /**
+   * Store one profile row through the same merge every other writer uses.
+   *
+   * Used by `refreshUserProfile`, so a forced profile fetch takes the version
+   * comparison and the field-ownership rules rather than replacing the row —
+   * a slow response must not overwrite content that arrived while it was in
+   * flight (ENTITY_INVALIDATION_SYNC_SPEC §4.2).
+   */
+  persistUserRecord(record: UserRecord): void {
+    if (this.userStore === null) throw new CacheDisabledError();
+    this.userStore.upsertMany([record]);
+    const db = this.cacheDb;
+    if (db !== null) {
+      void cacheUpsertUsers(db, [record]).catch(() => {
+        /* best-effort persist; the in-memory store is already updated */
+      });
+    }
+  }
+
   /** Snapshot of every cached user profile. Order is unspecified; the
    *  caller should sort/filter for display. */
   cachedUsers(): UserRecord[] {

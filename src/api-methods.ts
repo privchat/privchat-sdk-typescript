@@ -19,6 +19,7 @@ import {
 } from './codec/payload.js';
 import { decodeSiteKey, decryptDownloadedAttachment, sealAttachment, type SealedAttachment } from './attachment-crypto.js';
 import { Routes } from './routes.js';
+import type { UserRecord } from './cache/types.js';
 import type {
   AttachmentKey,
   DownloadedAttachment,
@@ -125,6 +126,14 @@ declare module './client.js' {
     friendApply(targetUserId: number, message?: string, source?: string, sourceId?: string, grantId?: string): Promise<FriendApplyResponse>;
     /** 查看用户详情(必须带可靠来源;响应含 can_add_friend/grant_id 投影)。 */
     userDetail(req: UserDetailRequest): Promise<UserDetailResponse>;
+    /**
+     * 强制回源并**落库**，返回落库后的那一行。
+     *
+     * 与 [userDetail] 的区别是它把结果写进用户缓存：会话标题、联系人行、头像读的
+     * 都是那一行，只把响应返回给调用方的话，除了当前这个页面别处都不会更新。
+     * AVATAR_CACHE_SPEC §2「查看资料页强制远端 fetch」要的是后者。
+     */
+    refreshUserProfile(req: UserDetailRequest): Promise<UserRecord>;
     /** 读取自己的隐私设置(「添加我的方式」等)。 */
     privacyGet(): Promise<UserPrivacySettings>;
     /** 更新自己的隐私设置(部分字段)。 */
@@ -459,6 +468,38 @@ proto.userDetail = function (req) {
     source: req.source,
     source_id: req.source_id,
   });
+};
+
+/**
+ * Fetch a profile from the server and store it, then return the stored row.
+ *
+ * AVATAR_CACHE_SPEC §2 requires opening a profile to force a remote fetch so a
+ * changed avatar URL is picked up. `userDetail` alone only returns the response
+ * to the caller — the conversation title, the contact row and the avatar all
+ * read the cached user row, so without persisting, the screen the user is
+ * looking at is the only place that updates, and it reverts on the next render
+ * from cache.
+ *
+ * The response carries `sync_version` from the same read as its fields, so it
+ * takes the normal version comparison in `upsertUsers`: a response that started
+ * before an entity update but lands after it loses, instead of overwriting
+ * newer content. Reading back afterwards returns whatever won.
+ */
+proto.refreshUserProfile = async function (req) {
+  const detail = await this.userDetail(req);
+  const record = {
+    user_id: String(detail.user_id),
+    username: detail.username ?? '',
+    nickname: detail.nickname ?? '',
+    avatar_url: detail.avatar_url ?? '',
+    user_type: detail.user_type ?? 0,
+    is_friend: detail.is_friend === true,
+    sync_version: detail.sync_version ?? 0,
+  };
+  // 先落库再回读：会话标题、联系人行、头像读的都是这一行，页面拿到新值而库里还是
+  // 旧值就成了两份真相。回读的意义在于版本闸可能判定这次响应更旧——那就以库里为准。
+  this.persistUserRecord(record);
+  return this.cachedUser(record.user_id) ?? record;
 };
 
 proto.privacyGet = function () {
