@@ -182,21 +182,34 @@ export function scanMessageTextEntities(
     (raw) => raw.replace(/[\s-]/g, ''),
   );
 
-  let mentionIndex = 0;
+  // An `@token` that overlaps a url or a phone is not a mention, and it must be excluded
+  // before counting, or one such message throws the pairing below off by one.
+  const mentionSpans: Array<{ start: number; raw: string }> = [];
   for (const match of text.matchAll(/@[\p{L}\p{N}_-]+/gu)) {
     const start = match.index;
     const raw = match[0];
     if (start === undefined || raw === undefined) continue;
+    const end = start + raw.length;
+    if (candidates.some((c) => start < c.end && end > c.start)) continue;
+    mentionSpans.push({ start, raw });
+  }
+
+  // Pairing the nth `@` with the nth id only holds when the counts agree. Anything that
+  // merely looks like a mention — `@here`, a hand-typed `@someone` — takes a slot and
+  // shifts every later mention by one, so @alice opens bob's profile. That is worse than
+  // resolving nothing, because it looks right and nobody double-checks it. When the counts
+  // disagree, leave every id empty and let the UI resolve by name against the roster.
+  const positionalOk = mentionSpans.length === mentionedUserIds.length;
+  mentionSpans.forEach(({ start, raw }, index) => {
     candidates.push({
       type: 'mention',
       start,
       end: start + raw.length,
       text: raw,
       value: raw.slice(1),
-      user_id: mentionedUserIds[mentionIndex],
+      user_id: positionalOk ? mentionedUserIds[index] : undefined,
     });
-    mentionIndex += 1;
-  }
+  });
 
   candidates.sort((a, b) => a.start - b.start || b.end - a.end);
   const accepted: MessageTextEntity[] = [];

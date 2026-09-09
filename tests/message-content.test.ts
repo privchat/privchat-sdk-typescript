@@ -3,6 +3,7 @@ import {
   decodeLegacyMessageEnvelope,
   normalizeMessageDisplayContent,
   projectMessageContent,
+  scanMessageTextEntities,
 } from '../src/message-content.js';
 import { resolveCanonicalTimelineEvent } from '../src/codec/timeline.js';
 
@@ -186,5 +187,28 @@ describe('reply anchor sanitisation', () => {
         reply_to_message_id: 'null' as never,
       }).reply_to_message_id,
     ).toBeUndefined();
+  });
+});
+
+describe('mention id pairing', () => {
+  // A stray `@here` takes the first slot, so pairing by position hands the real mention
+  // someone else's id. Wrong is worse than unknown here: it looks right.
+  it('drops every id when the counts disagree', () => {
+    const entities = scanMessageTextEntities('@here 麻烦 @客服 看下', ['9']);
+    const mentions = entities.filter((e) => e.type === 'mention');
+    expect(mentions).toHaveLength(2);
+    expect(mentions.every((e) => e.user_id === undefined)).toBe(true);
+  });
+
+  it('pairs by position when the counts agree', () => {
+    const entities = scanMessageTextEntities('@alice @bob', ['11', '22']);
+    expect(entities.filter((e) => e.type === 'mention').map((e) => e.user_id)).toEqual(['11', '22']);
+  });
+
+  it('an @ inside a url does not consume a slot', () => {
+    const entities = scanMessageTextEntities('https://x.com/@handle 叫一下 @客服', ['9']);
+    const mentions = entities.filter((e) => e.type === 'mention');
+    expect(mentions).toHaveLength(1);
+    expect(mentions[0]?.user_id).toBe('9');
   });
 });
