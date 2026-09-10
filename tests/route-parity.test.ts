@@ -76,7 +76,9 @@ describe('新增路由与协议一致', () => {
     });
     expect(calls[2]).toEqual({
       route: 'message/status/read_list',
-      body: { message_id: 10, channel_id: 20 },
+      // 键集分页：首页游标显式传 0，不省略——服务端把缺省当 0 是巧合，
+      // 客户端把"从头开始"写出来，翻页时才有对称的形状可传。
+      body: { message_id: 10, channel_id: 20, after_user_id: 0 },
     });
     expect(calls[3]).toEqual({
       route: 'message/reaction/stats',

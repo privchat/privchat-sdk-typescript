@@ -231,17 +231,23 @@ export interface ReadCursorUpdatedEvent {
  * this anywhere — no cache write, no IDB row, no in-memory map.
  * Host apps render their own "read by" markers off this event.
  *
- * Group channels do NOT generate peer events (the server's group
- * read-state surface is query-based, not push-based); the SDK
- * defensively suppresses any peer push with `channel_type !== 1`
- * and logs a warning.
+ * Groups now emit this too, with `reader_id = "0"` (READ_STATUS_SPEC §6.5.8).
+ * That is not a missing value: the group push carries an **aggregate** — the
+ * furthest anyone else has read — and deliberately names nobody, because a
+ * per-reader stream pushed to the sender would hand out the reader list
+ * outside the query window. Who read a group message is answered by
+ * `messageReadList`, on demand and windowed.
+ *
+ * This used to say group peer reads were query-only and dropped any push with
+ * `channel_type !== 1` as a server bug. It was true when written, and it is
+ * exactly what left group bubbles stuck on "sent".
  */
 export interface PeerReadCursorUpdatedEvent {
   type: 'peer_read_cursor_updated';
   channel_id: string;
-  /** Always 1 in v1; the SDK suppresses anything else. */
+  /** 1 for a direct channel, 2 for a group aggregate. */
   channel_type: number;
-  /** The peer who advanced — NOT the current user. */
+  /** The peer who advanced, or `"0"` for a group aggregate (nobody named). */
   reader_id: string;
   read_pts: string;
   /** Reserved for shape symmetry with the self variant. v1 always

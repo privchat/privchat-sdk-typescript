@@ -151,9 +151,20 @@ declare module './client.js' {
     // message/status ── 已读明细与未读计数
     /** 未读计数；不传 channelId = 全部会话。 */
     messageStatusCount(channelId?: number): Promise<MessageStatusCountResponse>;
-    /** 某条消息的已读者明细。 */
-    messageReadList(messageId: number, channelId: number): Promise<MessageReadListResponse>;
-    /** 某条消息的已读统计。 */
+    /**
+     * 某条群消息的已读名单，按 user_id 键集分页（READ_STATUS_SPEC §6.5.7）。
+     *
+     * `afterUserId` 传上一页返回的 `next_after_user_id`，首页传 0 或省略。
+     * 只有消息的发送者能调用，且只在窗口期内（服务端配置，默认 7 天）；
+     * 过期返回错误而不是空名单——空名单和"没人读过"分不开。
+     */
+    messageReadList(
+      messageId: number,
+      channelId: number,
+      afterUserId?: number,
+      limit?: number,
+    ): Promise<MessageReadListResponse>;
+    /** 某条群消息的已读人数统计。与名单同一套授权与窗口。 */
     messageReadStats(messageId: number, channelId: number): Promise<MessageReadStatsResponse>;
     /** 表态统计。 */
     messageReactionStats(serverMessageId: number): Promise<MessageReactionStatsResponse>;
@@ -550,10 +561,12 @@ proto.messageStatusCount = function (channelId) {
   return this.rpcCallTyped(Routes.message_status.COUNT, { channel_id: channelId });
 };
 
-proto.messageReadList = function (messageId, channelId) {
+proto.messageReadList = function (messageId, channelId, afterUserId, limit) {
   return this.rpcCallTyped(Routes.message_status.READ_LIST, {
     message_id: messageId,
     channel_id: channelId,
+    after_user_id: afterUserId ?? 0,
+    ...(limit === undefined ? {} : { limit }),
   });
 };
 

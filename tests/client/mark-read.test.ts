@@ -171,6 +171,18 @@ const buildPeerReadPush = (opts: {
   return { ...p, payload: new TextEncoder().encode(JSON.stringify(decoded)) };
 };
 
+/** 群聚合推送：与对端推送同构，只是 visibility 不同、reader_id 恒为 0。 */
+const buildGroupAggregatePush = (opts: {
+  channel_id: string;
+  channel_type: number;
+  read_pts: number;
+}): PushMessageRequest => {
+  const p = buildSelfReadPush({ ...opts, reader_id: '0' });
+  const decoded = JSON.parse(new TextDecoder().decode(p.payload));
+  decoded.metadata.visibility = 'group_read_aggregate_updated';
+  return { ...p, payload: new TextEncoder().encode(JSON.stringify(decoded)) };
+};
+
 const fireOneWay = (t: FakeTransport, bizType: number, payload: Uint8Array) => {
   t.fireMessage(new Packet({ packetType: PacketType.OneWay, messageId: 0, bizType, payload }));
 };
@@ -438,6 +450,61 @@ describe('inbound peer_read_pts_updated push', () => {
     expect(peerEvents).toEqual([
       { reader_id: '888', read_pts: '50', channel_type: 1 },
     ]);
+  });
+
+  it('group aggregate advances peer_read_pts and names nobody', async () => {
+    // 🔴 这条挡的是「群消息永远显示已发送」。
+    //
+    // 之前这里认定"群已读只能查、不会推"，于是 channel_type=2 的推送被当成
+    // 服务端 bug 直接丢掉。服务端现在按 §6.5.8 推匿名聚合，丢掉它等于把群里
+    // 所有人的已读状态一起丢掉。
+    const t = buildFake({
+      channels: [{ channel_id: 300, channel_type: 2, name: 'G', unread_count: 0 }],
+    });
+    const c = await newClient(t, true);
+    await c.bootstrapChannels();
+    const events: Array<{ reader_id: string; read_pts: string; channel_type: number }> = [];
+    c.onPeerReadCursorUpdated((event) => {
+      events.push({
+        reader_id: event.reader_id,
+        read_pts: event.read_pts,
+        channel_type: event.channel_type,
+      });
+    });
+
+    fireOneWay(t, MessageType.PushMessageRequest, encodePushMessageRequest(
+      buildGroupAggregatePush({ channel_id: '300', channel_type: 2, read_pts: 70 }),
+    ));
+    await new Promise((r) => setTimeout(r, 5));
+
+    expect(c.cachedChannels()[0]!.peer_read_pts).toBe('70');
+    // reader_id 必须是 0：聚合不指向任何人，这是窗口之外拿不到名单的前提。
+    expect(events).toEqual([
+      { reader_id: '0', read_pts: '70', channel_type: 2 },
+    ]);
+  });
+
+  it('suppresses a group aggregate that arrives on a direct channel', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const t = buildFake({
+        channels: [{ channel_id: 400, channel_type: 1, name: 'A', unread_count: 0 }],
+      });
+      const c = await newClient(t, true);
+      await c.bootstrapChannels();
+      const events: unknown[] = [];
+      c.onPeerReadCursorUpdated((event) => events.push(event));
+
+      fireOneWay(t, MessageType.PushMessageRequest, encodePushMessageRequest(
+        buildGroupAggregatePush({ channel_id: '400', channel_type: 1, read_pts: 70 }),
+      ));
+      await new Promise((r) => setTimeout(r, 5));
+
+      expect(events).toEqual([]);
+      expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it('suppresses peer push when channel_type !== 1 and warns (defensive)', async () => {

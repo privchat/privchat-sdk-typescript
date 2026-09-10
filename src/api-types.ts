@@ -862,7 +862,16 @@ export interface MarkReadResult {
 
 export type ReadCursorVisibility =
   | 'self_read_pts_updated'
-  | 'peer_read_pts_updated';
+  | 'peer_read_pts_updated'
+  /**
+   * Group read aggregate (READ_STATUS_SPEC §6.5.8).
+   *
+   * "The furthest anyone else in this group has read", carrying no reader
+   * identity: `reader_id` is 0 on purpose. Only the message's sender receives
+   * it, and it is the bubble's sole input for group "read" — the per-reader
+   * list stays query-only and windowed.
+   */
+  | 'group_read_aggregate_updated';
 
 export interface ChannelReadCursorNotificationMetadata {
   /** Always literal "channel_read_cursor_updated" — the discriminator
@@ -1190,6 +1199,14 @@ export interface MessageStatusCountResponse {
 export interface MessageReadListRequest {
   message_id: number;
   channel_id: number;
+  /**
+   * 键集分页游标：上一页最后一个 user_id，首页传 0。
+   *
+   * 不是 offset——名单在翻页途中会增长，offset 会把同一个人返回两次。
+   */
+  after_user_id?: number;
+  /** 每页条数，服务端 clamp 到 [1, 100]，缺省 30。 */
+  limit?: number;
 }
 export interface MessageReadUserEntry {
   user_id: number;
@@ -1197,7 +1214,11 @@ export interface MessageReadUserEntry {
   username: string;
   nickname: string;
   avatar_url?: string | null;
-  read_at: number;
+  /**
+   * 资料是否取到。取不到的人**仍在名单里**（阅读事实与资料分离），
+   * 客户端显示占位而不是把人丢掉。
+   */
+  profile_loaded: boolean;
 }
 /**
  * 字段名照 server 实际发的 JSON。protocol 那边 Rust 结构体上挂了 serde alias，
@@ -1207,9 +1228,15 @@ export interface MessageReadListResponse {
   message_id: number;
   channel_id: number;
   read_list: MessageReadUserEntry[];
-  total_members: number;
+  /** 发送时有权接收的人数（不含发送者），不是当前群成员数。 */
+  recipient_count: number;
   read_count: number;
-  unread_count: number;
+  /** 下一页游标；缺省表示到底了。 */
+  next_after_user_id?: number;
+  has_more: boolean;
+  /** 明细可查截止时间（毫秒），发送时固定在消息上。 */
+  detail_expires_at: number;
+  retention_days: number;
 }
 
 /** 某条消息的已读统计。`message/status/read_stats` */
@@ -1218,8 +1245,14 @@ export interface MessageReadStatsRequest {
   channel_id: number;
 }
 export interface MessageReadStatsResponse {
+  message_id: number;
+  channel_id: number;
   read_count: number;
-  total_count: number;
+  /** 发送时有权接收的人数（不含发送者）。 */
+  recipient_count: number;
+  unread_count: number;
+  detail_expires_at: number;
+  retention_days: number;
 }
 
 /** 表态统计。`message/reaction/stats` */

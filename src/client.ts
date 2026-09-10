@@ -580,9 +580,15 @@ function tryDecodeReadCursorNotification(
     if (typeof meta !== 'object' || meta === null) return null;
     const m = meta as Record<string, unknown>;
     if (m['notification_type'] !== 'channel_read_cursor_updated') return null;
+    // 🔴 判别符是 `visibility`，不是 `notification_type`。
+    //
+    // 后者恒为字面量 "channel_read_cursor_updated"（见 protocol 的
+    // ChannelReadCursorNotification::new），self / peer / 群聚合三种推送在这一层
+    // 长得一模一样。按 notification_type 去区分会写出永远命中不了的分支。
     if (
       m['visibility'] !== 'self_read_pts_updated' &&
-      m['visibility'] !== 'peer_read_pts_updated'
+      m['visibility'] !== 'peer_read_pts_updated' &&
+      m['visibility'] !== 'group_read_aggregate_updated'
     ) {
       return null;
     }
@@ -3972,9 +3978,11 @@ export class PrivchatClient {
    *     convergence with the local markRead path) + emit
    *     `read_cursor_updated` L1 event when the cache actually advanced.
    * `peer_read_pts_updated` → emit `peer_read_cursor_updated` L1 event
-   *     (Phase 5D). Defensively suppressed when `channel_type !== 1`
-   *     because group peer reads are query-based on the server, not
-   *     push-based — receiving one is a server bug.
+   *     (Phase 5D). Direct channels only.
+   * `group_read_aggregate_updated` → same cache write and same L1 event,
+   *     with `reader_id = "0"`. The group push is an aggregate ("someone
+   *     else has read up to here"), so it names nobody; the reader list
+   *     is query-only and windowed (READ_STATUS_SPEC §6.5.8).
    * Unknown `visibility` → return `false` so the push falls through to
    *     normal handling. Forward-compat hatch for future system
    *     notifications.
@@ -4010,11 +4018,18 @@ export class PrivchatClient {
       );
       return true;
     }
-    if (visibility === 'peer_read_pts_updated') {
-      if (channel_type !== 1) {
+    if (
+      visibility === 'peer_read_pts_updated' ||
+      visibility === 'group_read_aggregate_updated'
+    ) {
+      // 🔴 The direct push must stay direct-only, and the group push
+      // group-only. Crossing them is how a per-reader cursor would reach
+      // the sender for a group — which is the thing §6.5.8 forbids.
+      const expected_type = visibility === 'peer_read_pts_updated' ? 1 : 2;
+      if (channel_type !== expected_type) {
         // eslint-disable-next-line no-console
         console.warn(
-          `[privchat] dropped peer_read_pts_updated with channel_type=${channel_type} (expected 1; group peer reads are query-only)`,
+          `[privchat] dropped ${visibility} with channel_type=${channel_type} (expected ${expected_type})`,
           { channel_id, reader_id, read_pts },
         );
         return true;
