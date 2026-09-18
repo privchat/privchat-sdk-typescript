@@ -148,7 +148,7 @@ export type {
 } from './events.js';
 
 // ----- MessageType / SubscribeAction -----
-export { MessageType, SubscribeAction } from './message-type.js';
+export { ChannelType, MessageType, SubscribeAction, isChannelType } from './message-type.js';
 
 // ----- RPC routes (mirrors privchat_protocol::rpc::routes) -----
 export { Routes } from './routes.js';

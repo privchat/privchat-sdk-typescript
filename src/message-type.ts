@@ -37,3 +37,19 @@ export const SubscribeAction = {
 } as const;
 export type SubscribeAction =
   (typeof SubscribeAction)[keyof typeof SubscribeAction];
+
+/**
+ * 频道类型的 wire 编号——与 privchat-protocol `protocol::ChannelType` 一致,
+ * 所有端唯一真源:1=Direct, 2=Group, 3=Room。**没有 0**(0 是"未填",服务端拒绝)。
+ * server 数据库内部另有 0/1/2 的存储编号,绝不出现在线上。
+ */
+export const ChannelType = {
+  Direct: 1,
+  Group: 2,
+  Room: 3,
+} as const;
+export type ChannelType = (typeof ChannelType)[keyof typeof ChannelType];
+
+export function isChannelType(value: number): value is ChannelType {
+  return value === ChannelType.Direct || value === ChannelType.Group || value === ChannelType.Room;
+}

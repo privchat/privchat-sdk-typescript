@@ -245,7 +245,7 @@ export interface ReadCursorUpdatedEvent {
 export interface PeerReadCursorUpdatedEvent {
   type: 'peer_read_cursor_updated';
   channel_id: string;
-  /** 1 for a direct channel, 2 for a group aggregate. */
+  /** `ChannelType` wire value: 1 (Direct) for a peer cursor, 2 (Group) for a group aggregate. */
   channel_type: number;
   /** The peer who advanced, or `"0"` for a group aggregate (nobody named). */
   reader_id: string;

@@ -171,7 +171,7 @@ import {
   defaultProtocolVersion,
   generateLocalMessageId,
 } from './defaults.js';
-import { MessageType, SubscribeAction } from './message-type.js';
+import { ChannelType, MessageType, SubscribeAction } from './message-type.js';
 
 export interface PrivchatClientOptions
   extends Omit<TransportClientOptions, 'transport'> {
@@ -1656,11 +1656,13 @@ export class PrivchatClient {
 
   /**
    * Mirrors Rust `subscribe_channel(channel_id, channel_type, token?)`.
+   * `channel_type` is the wire value (`ChannelType`: 1=Direct, 2=Group, 3=Room);
+   * Room subscriptions must carry the ticket in `token`.
    * Throws `SubscribeError` when the server returns a non-zero reason_code.
    */
   async subscribeChannel(
     channel_id: string,
-    channel_type: number,
+    channel_type: ChannelType | number,
     token?: string,
   ): Promise<SubscribeResponse> {
     const resp = await this.subscribe({
@@ -1683,7 +1685,7 @@ export class PrivchatClient {
    */
   async unsubscribeChannel(
     channel_id: string,
-    channel_type: number,
+    channel_type: ChannelType | number,
   ): Promise<SubscribeResponse> {
     const resp = await this.subscribe({
       setting: 0,
@@ -2205,8 +2207,8 @@ export class PrivchatClient {
     //
     // Server returns TWO row classes per page (B-step protocol):
     //   - self rows  — caller's cursor on every channel
-    //   - peer rows  — for direct channels (channel_type=1 per the
-    //                  TS/messages-table convention), the OTHER party's
+    //   - peer rows  — for direct channels (channel_type=ChannelType.Direct,
+    //                  the wire value 1), the OTHER party's
     //                  cursor on the same channel; routed by reader_id
     //
     // Bucket cursor rows by channel_id with explicit self/peer slots so
@@ -3576,7 +3578,7 @@ export class PrivchatClient {
    * 群不适用：群名有 group 实体 / 成员拼接 / channel_id 兜底，总能算出来。
    */
   isConversationDisplayable(channel: ChannelRecord): boolean {
-    if (channel.channel_type !== 1) return true;
+    if (channel.channel_type !== ChannelType.Direct) return true;
     // channel 实体自带的解析后标题（系统会话、存量真名）——纯数字是老版本写进去的
     // uid，不算名字。
     if (
@@ -3600,7 +3602,7 @@ export class PrivchatClient {
       return; // 缓存未就绪（bootstrap 还没跑），下次读列表时再发现。
     }
     for (const channel of channels) {
-      if (channel.channel_type !== 1) continue;
+      if (channel.channel_type !== ChannelType.Direct) continue;
       const peer = channel.peer_user_id;
       if (peer === undefined || peer === '' || peer === '0') continue;
       if (this.userStore.get(peer) !== undefined) continue;
