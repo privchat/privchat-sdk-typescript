@@ -376,8 +376,25 @@ export interface RpcNotificationReceivedEvent {
   body: Uint8Array;
 }
 
+/** Server→device push-style Channel Transfer (biz19) on an authenticated connection
+ * (CHANNEL_TRANSFER_SPEC §5.2/§11). The application addressed this connection —
+ * possibly this one device only (`target_device_id`). Not persisted by the server:
+ * a missed push is gone, recover through an application pull route.
+ * No wire response is sent. Route: 1..256 UTF-8 bytes without whitespace/control
+ * characters. Body: <=64 KiB.
+ */
+export interface TransferReceivedEvent {
+  type: 'transfer_received';
+  request_id: string;
+  /** u64 decimal string. */
+  channel_id: string;
+  route: string;
+  body: Uint8Array;
+}
+
 export type SdkEvent =
   | RpcNotificationReceivedEvent
+  | TransferReceivedEvent
   | ConnectionStateChangedEvent
   | SyncReadinessChangedEvent
   | MessageReceivedEvent

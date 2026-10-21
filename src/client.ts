@@ -163,6 +163,7 @@ import {
 import {
   decodeTransferResponse,
   encodeTransferRequest,
+  decodeTransferRequest,
   type TransferRequest,
   type TransferResponse,
 } from './codec/transfer.js';
@@ -735,6 +736,9 @@ export type SendTextOperationResult =
     };
 
 export type Unsubscribe = () => void;
+
+/** CHANNEL_TRANSFER_SPEC §10: raw Transfer body ceiling. */
+const TRANSFER_MAX_BODY_BYTES = 64 * 1024;
 
 export class PrivchatClient {
   private readonly transport: TransportClient;
@@ -3485,6 +3489,29 @@ export class PrivchatClient {
             type: 'rpc_notification_received',
             route: notification.route,
             body: notification.body.slice(),
+          });
+        } catch {
+          // Malformed envelopes are ignored; never log opaque application bytes.
+        }
+        return;
+      }
+      case MessageType.TransferRequest: {
+        // Server-pushed Transfer (app→user/device). Same fences as one-way RPC
+        // notifications: authenticated only, bounded before decoding.
+        if (ctx.kind !== 'message' || this.state !== 'authenticated') return;
+        if (ctx.data.byteLength < 4 || ctx.data.byteLength > TRANSFER_MAX_BODY_BYTES + 1024) return;
+        try {
+          const transfer = decodeTransferRequest(ctx.data);
+          if (!transfer.request_id || !transfer.route ||
+              new TextEncoder().encode(transfer.route).byteLength > 256 ||
+              /[\p{White_Space}\p{Cc}]/u.test(transfer.route) ||
+              transfer.body.byteLength > TRANSFER_MAX_BODY_BYTES) return;
+          this.bus.emit({
+            type: 'transfer_received',
+            request_id: transfer.request_id,
+            channel_id: transfer.channel_id,
+            route: transfer.route,
+            body: transfer.body.slice(),
           });
         } catch {
           // Malformed envelopes are ignored; never log opaque application bytes.
