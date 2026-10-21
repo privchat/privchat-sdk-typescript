@@ -1358,3 +1358,7 @@ export interface StickerInfo {
 export interface StickerPackageInfo { package_id: string; [k: string]: unknown }
 export interface StickerPackageListResponse { packages: StickerPackageInfo[] }
 export interface StickerPackageDetailResponse { package: StickerPackageInfo }
+
+/** Group profile: owner/admin edits, separate from governance settings. */
+export interface GroupProfilePatch { name?: string; description?: string; }
+export interface GroupUpdateResponse { group_id: number; name: string; description: string | null; updated_at: number; sync_version: number; }

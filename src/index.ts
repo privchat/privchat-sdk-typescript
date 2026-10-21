@@ -145,6 +145,7 @@ export type {
   SyncReadinessChangedEvent,
   TypingReceivedEvent,
   ChannelPublishReceivedEvent,
+  RpcNotificationReceivedEvent,
 } from './events.js';
 
 // ----- MessageType / SubscribeAction -----

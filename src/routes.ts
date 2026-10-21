@@ -53,6 +53,7 @@ export const Routes = {
   group: {
     CREATE: 'group/group/create',
     INFO: 'group/group/info',
+    UPDATE: 'group/group/update',
   },
   group_member: {
     ADD: 'group/member/add',

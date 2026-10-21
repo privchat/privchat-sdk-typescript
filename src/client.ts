@@ -143,6 +143,7 @@ import {
 import {
   decodeRpcResponse,
   encodeRpcRequest,
+  decodeRpcRequest,
   type RpcRequest,
   type RpcResponse,
 } from './codec/rpc.js';
@@ -3470,6 +3471,26 @@ export class PrivchatClient {
     // enabled, also normalise + upsert into the local store (memory
     // synchronously, IndexedDB async).
     switch (ctx.bizType) {
+      case MessageType.RpcRequest: {
+        // TransportClient fences retired connections before dispatch. Notifications
+        // are one-way and must not escape while login/re-login is incomplete.
+        if (ctx.kind !== 'message' || this.state !== 'authenticated') return;
+        if (ctx.data.byteLength < 4 || ctx.data.byteLength > 256 * 1024 + 1024) return;
+        try {
+          const notification = decodeRpcRequest(ctx.data);
+          if (!notification.route || new TextEncoder().encode(notification.route).byteLength > 256 ||
+              /[\p{White_Space}\p{Cc}]/u.test(notification.route) ||
+              notification.body.byteLength > 256 * 1024) return;
+          this.bus.emit({
+            type: 'rpc_notification_received',
+            route: notification.route,
+            body: notification.body.slice(),
+          });
+        } catch {
+          // Malformed envelopes are ignored; never log opaque application bytes.
+        }
+        return;
+      }
       case MessageType.PushMessageRequest: {
         const message = decodePushMessageRequest(ctx.data);
         // Phase 5A: read-cursor system notifications piggyback on

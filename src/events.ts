@@ -365,7 +365,19 @@ export interface EntityChangedEvent {
   mutation_hint: 'unknown' | 'upsert' | 'delete';
 }
 
+/** Server one-way biz17 RpcRequest on an authenticated connection.
+ * Body is opaque codec bytes (e.g. JSON for call/state), not a pubsub payload.
+ * No response is sent. Consumers dispatch by route; unknown routes may be ignored.
+ * Route: 1..256 UTF-8 bytes without whitespace/control characters. Body: <=256 KiB.
+ */
+export interface RpcNotificationReceivedEvent {
+  type: 'rpc_notification_received';
+  route: string;
+  body: Uint8Array;
+}
+
 export type SdkEvent =
+  | RpcNotificationReceivedEvent
   | ConnectionStateChangedEvent
   | SyncReadinessChangedEvent
   | MessageReceivedEvent

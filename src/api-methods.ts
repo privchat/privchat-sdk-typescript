@@ -82,6 +82,8 @@ import type {
   GroupRoleSetValue,
   GroupSettingsGetResponse,
   GroupSettingsPatch,
+  GroupProfilePatch,
+  GroupUpdateResponse,
   GroupSettingsUpdateResponse,
   GroupTransferOwnerResponse,
   MessageHistoryResponse,
@@ -246,6 +248,7 @@ declare module './client.js' {
      *  approval flags / mute-all / member limit). Server fills the
      *  viewer uid from session; only members can read. */
     groupSettingsGet(groupId: number): Promise<GroupSettingsGetResponse>;
+    groupUpdate(groupId: string, profile: GroupProfilePatch): Promise<GroupUpdateResponse>;
 
     /** Apply a partial patch to the group's settings. Owner-only per
      *  spec; server validates `operatorId` against the group's owner.
@@ -1397,3 +1400,7 @@ export async function uploadSealedFileViaToken(args: {
     xhr.send(form);
   });
 }
+
+proto.groupUpdate = function (groupId, profile) {
+  return this.rpcCallTyped(Routes.group.UPDATE, { group_id: new RawU64(groupId), profile });
+};
