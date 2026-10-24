@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants, closeSync, existsSync, fstatSync, lstatSync, mkdtempSync, openSync,
-  readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs';
+  readFileSync, realpathSync, renameSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { PrivchatClient, RpcError, parseRpcJson } from '../../src/index.js';
 import { RawU64 } from '../../src/codec/safe-json.js';
 
@@ -30,7 +30,13 @@ if (parent !== '/tmp') {
   assert.equal(realpathSync(parent), parent, 'canonical simulator Documents directory required');
   assert.equal(statSync(parent).uid, process.getuid!());
 }
-const directory = mkdtempSync(`${parent}/privchat-native-peer-ts.`);
+const exchangeName = process.env.PRIVCHAT_NATIVE_EXCHANGE_NAME;
+if (exchangeName !== undefined) {
+  assert.notEqual(parent, '/tmp', 'named exchanges require the authorized simulator Documents directory');
+  assert.match(exchangeName, /^privchat-native-peer-[A-Za-z0-9-]{8,64}$/);
+}
+const directory = exchangeName === undefined ? mkdtempSync(`${parent}/privchat-native-peer-ts.`) : `${parent}/${exchangeName}`;
+if (exchangeName !== undefined) mkdirSync(directory, { mode: 0o700 });
 assert.equal(lstatSync(directory).mode & 0o777, 0o700);
 // Keep cancellation/evidence outside a simulator container that Xcode may delete.
 const control = mkdtempSync('/tmp/privchat-native-peer-control.');
