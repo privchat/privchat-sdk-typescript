@@ -1,24 +1,25 @@
-// Run: PRIVCHAT_FEATURE_ROOT=/tmp/privchat-features-im.F5xe3a node_modules/.bin/tsx examples/feature-acceptance/call-runtime.ts
+// Run with PRIVCHAT_FEATURE_ROOT pointing at a private project-local disposable fixture.
 // Real secondary-fixture RPC only: no Publish, subscriptions, SQL or media claim.
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { PrivchatClient, RpcError, parseRpcJson } from '../../src/index.js';
 import { RawU64 } from '../../src/codec/safe-json.js';
+import { assertPrivateFixtureRoot } from './fixture.js';
 
 type Json = Record<string, any>;
 type Role = 'owner' | 'admin';
 const root = process.env.PRIVCHAT_FEATURE_ROOT;
-assert.equal(root, '/tmp/privchat-features-im.F5xe3a', 'only the authorized secondary fixture');
-assert.equal(statSync(root).mode & 0o077, 0);
+assertPrivateFixtureRoot(root);
+for (const name of ['accounts.json', 'group.json']) {
+  assert.equal(statSync(`${root}/${name}`).mode & 0o077, 0, 'private fixture inputs required');
+}
 const fixture = parseRpcJson<Json>(readFileSync(`${root}/public.json`, 'utf8'));
 const accounts = parseRpcJson<Json>(readFileSync(`${root}/accounts.json`, 'utf8'));
 const group = parseRpcJson<Json>(readFileSync(`${root}/group.json`, 'utf8'));
 assert.equal(fixture.host, '127.0.0.1');
-assert.equal(fixture.wsPort, 58430);
-assert.equal(String(group.directChannelId), '4');
 const binarySha256 = createHash('sha256').update(readFileSync(`${root}/server-bin`)).digest('hex');
-assert.equal(binarySha256, '59c00ae1d531f5bcea8f69920bc19aa955ce602f4c84f70aa6da6912586bd67e');
+const sourceSha256 = createHash('sha256').update(readFileSync(new URL(import.meta.url))).digest('hex');
 const evidence = mkdtempSync(`${root}/call-runtime-`);
 const checks: string[] = [], violations: string[] = [];
 const clients: Endpoint[] = [];
@@ -218,7 +219,7 @@ try {
   await Promise.all(clients.map(e => e.client.disconnect().catch(() => undefined)));
   const report = { success: success && violations.length === 0, passed: success && violations.length === 0 ? 1 : 0,
     failed: success && violations.length === 0 ? 0 : 1, ignored: 0, fixture: root, wsPort: fixture.wsPort,
-    binarySha256, checks, callIds: ownedCalls, summaries, violations, failure,
+    binarySha256, sourceSha256, checks, callIds: ownedCalls, summaries, violations, failure,
     scope: 'real login/auth, one-way RPC, device contention, peer journal and server system history only; no media/SQL/server restart/crash-injection claim' };
   writeFileSync(`${evidence}/report.json`, JSON.stringify(report, null, 2), { mode: 0o600 });
   console.log(`${report.success ? 'CALL_RUNTIME_PASS' : 'CALL_RUNTIME_FAIL'}: ${report.passed} passed, ${report.failed} failed, 0 ignored; report=${evidence}/report.json`);

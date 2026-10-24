@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, statSync } from 'node:fs';
 import { MultiAccountManager } from '../accounts/src/account-manager.js';
 import { phase02_friend_system } from '../accounts/src/phases/phase02-friend.js';
+import { assertPrivateFixtureRoot } from './fixture.js';
 
 const root = process.env.PRIVCHAT_FEATURE_ROOT ?? '';
-assert.match(root, /^\/tmp\/privchat-features-im\.[A-Za-z0-9]+$/);
+assertPrivateFixtureRoot(root);
 assert.equal(statSync(root).mode & 0o077, 0, 'private disposable root required');
 const fixture = JSON.parse(readFileSync(`${root}/public.json`, 'utf8'));
 assert.equal(fixture.host, '127.0.0.1');
@@ -38,6 +39,7 @@ try {
     assert.equal(result.response.reason_code, 0);
     sent.push(result.response.server_message_id);
   }
+  assert.ok(sent[0] && sent[1], 'two acknowledged message IDs required');
   await owner.messagePin(groupId, groupId, sent[0], true);
   await admin.messagePin(groupId, groupId, sent[1], true);
   await assert.rejects(member.messagePin(groupId, groupId, sent[1], false));
@@ -48,8 +50,13 @@ try {
   const repeated = await owner.messagePinList(groupId);
   assert.deepEqual(repeated.items, pins.items);
   checks.push('two distinct pins; member forbidden; admin cannot unpin owner; retry preserves order');
-  writeFileSync(`${root}/group.json`, JSON.stringify({ groupId: String(groupId), channelId: String(groupId),
-    messageIds: sent, directChannelId: String(manager.cachedDirectChannel('alice', 'bob')) }, null, 2), { mode: 0o600 });
+  const channels = { groupId: String(groupId), channelId: String(groupId),
+    messageIds: sent, directChannelId: String(manager.cachedDirectChannel('alice', 'bob')) };
+  writeFileSync(`${root}/group.json`, JSON.stringify(channels, null, 2), { mode: 0o600 });
+  const pin = readFileSync(`${root}/spki-pins.txt`, 'utf8').trim();
+  assert.match(pin, /^[A-Za-z0-9+/]{43}=$/);
+  writeFileSync(`${root}/configuration.json`, JSON.stringify({ host: fixture.host,
+    port: fixture.tcpPort, pins: [pin], ...channels, accounts }, null, 2), { mode: 0o600 });
   report.groupId = String(groupId);
   report.messageIds = sent;
   report.success = true;
