@@ -114,6 +114,7 @@ import type {
 
 declare module './client.js' {
   interface PrivchatClient {
+    getComponentConfig(): Promise<import('./api-types.js').ComponentConfig>;
     // account/search
     accountSearch(query: string, page?: number, pageSize?: number): Promise<AccountSearchResponse>;
 
@@ -1403,4 +1404,8 @@ export async function uploadSealedFileViaToken(args: {
 
 proto.groupUpdate = function (groupId, profile) {
   return this.rpcCallTyped(Routes.group.UPDATE, { group_id: new RawU64(groupId), profile });
+};
+
+PrivchatClient.prototype.getComponentConfig = function () {
+  return this.rpcCallTyped<Record<string, never>, import('./api-types.js').ComponentConfig>('config/get', {});
 };

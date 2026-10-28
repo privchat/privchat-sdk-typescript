@@ -1362,3 +1362,18 @@ export interface StickerPackageDetailResponse { package: StickerPackageInfo }
 /** Group profile: owner/admin edits, separate from governance settings. */
 export interface GroupProfilePatch { name?: string; description?: string; }
 export interface GroupUpdateResponse { group_id: number; name: string; description: string | null; updated_at: number; sync_version: number; }
+
+/** Public server-owned capabilities, not call credentials or local connection policy. */
+export interface ComponentConfig {
+  schemaVersion: 1;
+  revision: string;
+  maxAgeSeconds: number;
+  components: { rtc: RtcComponent };
+}
+export interface RtcComponent {
+  schemaVersion: 1;
+  enabled: boolean;
+  livekitUrl: string;
+  peerEnabled: boolean;
+  allowTurn: boolean;
+}
