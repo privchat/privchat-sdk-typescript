@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { PrivchatClient } from '../../src/index.js';
+import { assertPrivateFixtureRoot } from './fixture.js';
 
 const root = process.env.PRIVCHAT_FEATURE_ROOT ?? '';
-assert.match(root, /^\/tmp\/privchat-features-im\.[A-Za-z0-9]+$/);
+assertPrivateFixtureRoot(root);
 const fixture = JSON.parse(readFileSync(`${root}/public.json`, 'utf8'));
 const group = JSON.parse(readFileSync(`${root}/group.json`, 'utf8'));
 const accounts = JSON.parse(readFileSync(`${root}/accounts.json`, 'utf8'));
