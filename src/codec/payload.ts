@@ -28,6 +28,8 @@ import {
 import {
   MessageMetadata as FbMessageMetadataTag,
 } from '../generated/privchat/protocol/message-metadata.js';
+import { MessageLink as FbMessageLink } from '../generated/privchat/protocol/message-link.js';
+import { MessageLinkParam as FbMessageLinkParam } from '../generated/privchat/protocol/message-link-param.js';
 import {
   MessagePayloadEnvelope as FbMessagePayloadEnvelope,
 } from '../generated/privchat/protocol/message-payload-envelope.js';
@@ -156,6 +158,43 @@ export interface MessageSource {
   source_id: string;
 }
 
+/**
+ * A page link in a message: `text` is shown as a link where it appears in the
+ * message and opens the page named by `route` with `params`. Any message type.
+ * In legacy JSON (history, commit content) links live at `metadata.links`.
+ */
+export interface MessageLink {
+  text: string;
+  route: string;
+  params: Record<string, string>;
+}
+
+const MAX_LINKS = 8;
+const MAX_TEXT_CHARS = 200;
+const MAX_ROUTE_CHARS = 64;
+const MAX_PARAMS = 8;
+const MAX_PARAM_CHARS = 128;
+
+/** The well-formed links in `value` (an array), bounded like privchat-protocol `MessageLink`. */
+export function sanitizeMessageLinks(value: unknown): MessageLink[] {
+  if (!Array.isArray(value)) return [];
+  const short = (s: unknown, max: number): s is string =>
+    typeof s === 'string' && s.trim() !== '' && [...s].length <= max;
+  const links: MessageLink[] = [];
+  for (const item of value) {
+    if (links.length >= MAX_LINKS) break;
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
+    const { text, route, params } = item as Record<string, unknown>;
+    if (!short(text, MAX_TEXT_CHARS) || !short(route, MAX_ROUTE_CHARS)) continue;
+    const entries = params === undefined ? [] :
+      typeof params === 'object' && params !== null && !Array.isArray(params) ? Object.entries(params) : null;
+    if (entries === null || entries.length > MAX_PARAMS) continue;
+    if (!entries.every(([k, v]) => short(k, MAX_PARAM_CHARS) && typeof v === 'string' && [...v].length <= MAX_PARAM_CHARS)) continue;
+    links.push({ text, route, params: Object.fromEntries(entries) as Record<string, string> });
+  }
+  return links;
+}
+
 export interface MessagePayloadEnvelope {
   content: string;
   /** None = text / system message. */
@@ -163,6 +202,8 @@ export interface MessagePayloadEnvelope {
   reply_to_message_id?: string;
   mentioned_user_ids: string[];
   message_source?: MessageSource;
+  /** Page links in the message text; absent or empty = none. */
+  links?: MessageLink[];
 }
 
 // ----- Encode helpers per variant (return discriminator + offset) -----
@@ -434,6 +475,24 @@ export function buildMessagePayloadEnvelopeTable(
     env.mentioned_user_ids.map(idStringToBigint),
   );
   const sourceOff = env.message_source ? buildMessageSource(builder, env.message_source) : 0;
+  const linksOff = env.links?.length
+    ? FbMessagePayloadEnvelope.createLinksVector(
+        builder,
+        env.links.map((link) =>
+          FbMessageLink.createMessageLink(
+            builder,
+            builder.createString(link.text),
+            builder.createString(link.route),
+            FbMessageLink.createParamsVector(
+              builder,
+              Object.entries(link.params).map(([key, value]) =>
+                FbMessageLinkParam.createMessageLinkParam(builder, builder.createString(key), builder.createString(value)),
+              ),
+            ),
+          ),
+        ),
+      )
+    : 0;
 
   FbMessagePayloadEnvelope.startMessagePayloadEnvelope(builder);
   FbMessagePayloadEnvelope.addContent(builder, contentOff);
@@ -447,6 +506,7 @@ export function buildMessagePayloadEnvelopeTable(
   );
   FbMessagePayloadEnvelope.addMentionedUserIds(builder, mentionsVec);
   if (sourceOff) FbMessagePayloadEnvelope.addMessageSource(builder, sourceOff);
+  if (linksOff) FbMessagePayloadEnvelope.addLinks(builder, linksOff);
   return FbMessagePayloadEnvelope.endMessagePayloadEnvelope(builder);
 }
 
@@ -483,11 +543,25 @@ export function decodeMessagePayloadEnvelopeTable(
       }
     : undefined;
 
+  const rawLinks: unknown[] = [];
+  for (let i = 0; i < view.linksLength(); i++) {
+    const link = view.links(i);
+    if (!link) continue;
+    const params: Record<string, string> = {};
+    for (let j = 0; j < link.paramsLength(); j++) {
+      const param = link.params(j);
+      if (param) params[param.key() ?? ''] = param.value() ?? '';
+    }
+    rawLinks.push({ text: link.text() ?? '', route: link.route() ?? '', params });
+  }
+  const links = sanitizeMessageLinks(rawLinks);
+
   return {
     content: view.content() ?? '',
     metadata,
     reply_to_message_id: bigintToOptionalIdString(view.replyToMessageId()),
     mentioned_user_ids,
     message_source,
+    ...(links.length ? { links } : {}),
   };
 }

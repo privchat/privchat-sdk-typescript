@@ -1,6 +1,7 @@
 import { parseRpcJson } from './codec/safe-json.js';
 import type { ContentTypeName } from './content-type.js';
-import type { MessageMetadata, MessagePayloadEnvelope } from './codec/payload.js';
+import { sanitizeMessageLinks } from './codec/payload.js';
+import type { MessageLink, MessageMetadata, MessagePayloadEnvelope } from './codec/payload.js';
 
 const LEGACY_ENVELOPE_MARKERS = [
   'metadata',
@@ -48,6 +49,8 @@ interface MessageContentBase {
   entities: readonly MessageTextEntity[];
   reply_to_message_id?: string;
   mentioned_user_ids: readonly string[];
+  /** Page links shown in the text (privchat-protocol `MessageLink`); empty = none. */
+  links: readonly MessageLink[];
 }
 
 export type MessageContent =
@@ -139,11 +142,15 @@ export function projectMessageContent(input: ProjectMessageContentInput): Messag
     replyAnchorId(input.envelope?.reply_to_message_id) ??
     replyAnchorId(input.reply_to_message_id) ??
     replyAnchorId(raw?.reply_to_message_id);
+  const links = sanitizeMessageLinks(
+    input.envelope?.links ?? (raw?.metadata as Record<string, unknown> | undefined)?.links,
+  );
   const base = (safeText: string): MessageContentBase => ({
     text: safeText,
     entities: scanMessageTextEntities(safeText, mentionedUserIds),
     reply_to_message_id: replyTo,
     mentioned_user_ids: mentionedUserIds,
+    links,
   });
 
   if (input.content_type === 'text') return { ...base(text), kind: 'text' };

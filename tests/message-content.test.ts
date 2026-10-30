@@ -212,3 +212,22 @@ describe('mention id pairing', () => {
     expect(mentions[0]?.user_id).toBe('9');
   });
 });
+
+describe('message page links', () => {
+  const link = { text: '修复按钮', route: 'workspace.task', params: { workspace_id: '5', work_item_id: '12' } };
+
+  it('come from the envelope or, for history, from metadata.links', () => {
+    const fromEnvelope = projectMessageContent({
+      content_type: 'text', content: '「修复按钮」卡住了',
+      envelope: { content: '「修复按钮」卡住了', mentioned_user_ids: [], links: [link] },
+    });
+    expect(fromEnvelope.links).toEqual([link]);
+    const fromHistory = projectMessageContent({
+      content_type: 'text',
+      content: JSON.stringify({ content: '「修复按钮」卡住了', metadata: { links: [link] }, mentioned_user_ids: [] }),
+    });
+    expect(fromHistory.text).toBe('「修复按钮」卡住了');
+    expect(fromHistory.links).toEqual([link]);
+    expect(projectMessageContent({ content_type: 'text', content: 'hi' }).links).toEqual([]);
+  });
+});

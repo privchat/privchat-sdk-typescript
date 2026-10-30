@@ -301,6 +301,7 @@ export type {
 export {
   decodeMessagePayloadEnvelope,
   encodeMessagePayloadEnvelope,
+  sanitizeMessageLinks,
 } from './codec/payload.js';
 
 export {
@@ -323,6 +324,7 @@ export type {
   ImageMetadata,
   LinkMetadata,
   LocationMetadata,
+  MessageLink,
   MessageMetadata,
   MessagePayloadEnvelope,
   MessageSource,

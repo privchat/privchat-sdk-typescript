@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   decodeMessagePayloadEnvelope,
   encodeMessagePayloadEnvelope,
+  sanitizeMessageLinks,
   type MessagePayloadEnvelope,
 } from '../src/index.js';
 
@@ -175,5 +176,27 @@ describe('MessagePayloadEnvelope metadata variants', () => {
     });
     const got = decodeMessagePayloadEnvelope(encodeMessagePayloadEnvelope(env));
     expect(got).toEqual(env);
+  });
+});
+
+describe('MessagePayloadEnvelope page links', () => {
+  const link = { text: '修复按钮', route: 'workspace.task', params: { workspace_id: '5', work_item_id: '12' } };
+
+  it('keeps the links of a text message on the wire', () => {
+    const decoded = decodeMessagePayloadEnvelope(encodeMessagePayloadEnvelope(wrap({ content: '「修复按钮」卡住了', links: [link] })));
+    expect(decoded.links).toEqual([link]);
+    expect(decodeMessagePayloadEnvelope(encodeMessagePayloadEnvelope(wrap({ content: 'hi' }))).links).toBeUndefined();
+  });
+
+  it('drops malformed and excess links', () => {
+    expect(sanitizeMessageLinks([
+      { text: '', route: 'r' },
+      { text: 'x' },
+      { text: 'x', route: 'r', params: { k: 1 } },
+      { text: 'x'.repeat(201), route: 'r' },
+      { text: 'ok', route: 'r', params: { k: 'v' } },
+    ])).toEqual([{ text: 'ok', route: 'r', params: { k: 'v' } }]);
+    expect(sanitizeMessageLinks(Array.from({ length: 20 }, (_, i) => ({ text: `t${i}`, route: 'r' })))).toHaveLength(8);
+    expect(sanitizeMessageLinks('x')).toEqual([]);
   });
 });

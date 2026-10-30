@@ -10,6 +10,7 @@ import { decodeLegacyMessageEnvelope } from '../message-content.js';
 import {
   buildMessagePayloadEnvelopeTable,
   decodeMessagePayloadEnvelopeTable,
+  sanitizeMessageLinks,
   type MessageMetadata,
   type MessagePayloadEnvelope,
 } from './payload.js';
@@ -246,6 +247,8 @@ function canonicalFromLegacy(commit: CanonicalEventCommit): CanonicalTimelineEve
   if (metadata && typeof metadata === 'object' && name !== 'red_packet' && name !== 'money_transfer') {
     envelope.metadata = { type: name, ...(metadata as object) } as MessageMetadata;
   }
+  const links = sanitizeMessageLinks((content.metadata as Record<string, unknown> | undefined)?.links);
+  if (links.length) envelope.links = links;
   const reply = idValue(content.reply_to_message_id);
   if (reply) envelope.reply_to_message_id = reply;
   if (content.message_source && typeof content.message_source === 'object') {
