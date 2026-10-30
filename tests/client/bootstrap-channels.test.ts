@@ -642,7 +642,7 @@ describe('bootstrapChannels', () => {
     await client.connect();
     await client.bootstrapChannels();
     // bootstrap kicks profile sync as fire-and-forget; let it settle.
-    await new Promise((r) => setTimeout(r, 30));
+    await vi.waitFor(() => { expect(client.cachedUsers()).toHaveLength(2); expect(client.cachedGroup('500')).toBeDefined(); });
 
     const users = client.cachedUsers();
     expect(users).toHaveLength(2);
@@ -686,7 +686,7 @@ describe('bootstrapChannels', () => {
       // Channel list still succeeds even though user/group RPC failed.
       expect(channels).toHaveLength(1);
       // Wait for the fire-and-forget profile sync to fail + warn.
-      await new Promise((r) => setTimeout(r, 30));
+      await vi.waitFor(() => expect(warnSpy).toHaveBeenCalled());
       expect(client.cachedUsers()).toHaveLength(0);
       expect(client.cachedGroups()).toHaveLength(0);
       expect(warnSpy).toHaveBeenCalled();
@@ -737,7 +737,7 @@ describe('bootstrapChannels', () => {
     });
     await client.connect();
     await client.bootstrapChannels();
-    await new Promise((r) => setTimeout(r, 30));
+    await vi.waitFor(() => expect(client.cachedFriendships()).toHaveLength(2));
 
     const friendships = client.cachedFriendships();
     expect(friendships).toHaveLength(2);
@@ -778,7 +778,7 @@ describe('bootstrapChannels', () => {
     });
     await client.connect();
     await client.bootstrapChannels();
-    await new Promise((r) => setTimeout(r, 30));
+    await vi.waitFor(() => expect(client.cachedFriendship('500')?.alias).toBe('老王'));
     expect(client.cachedFriendship('500')?.alias).toBe('老王');
 
     // Second sync: tombstone for the same uid.
@@ -805,7 +805,7 @@ describe('bootstrapChannels', () => {
       return okJson({ items: [], next_version: 0, has_more: false });
     };
     await client.bootstrapChannels();
-    await new Promise((r) => setTimeout(r, 30));
+    await vi.waitFor(() => expect(client.cachedFriendship('500')).toBeUndefined());
 
     // Friendship dropped — UserRecord stays, but the username is cleared:
     // PROFILE_VISIBILITY P1 makes username friend-channel-owned; after an
@@ -836,7 +836,7 @@ describe('bootstrapChannels', () => {
     try {
       const channels = await client.bootstrapChannels();
       expect(channels).toHaveLength(1);
-      await new Promise((r) => setTimeout(r, 30));
+      await vi.waitFor(() => expect(warnSpy).toHaveBeenCalled());
       expect(client.cachedFriendships()).toHaveLength(0);
       expect(warnSpy).toHaveBeenCalled();
     } finally {
@@ -865,7 +865,7 @@ describe('bootstrapChannels', () => {
       groupSnapshot = g.length;
     });
     await client.bootstrapChannels();
-    await new Promise((r) => setTimeout(r, 30));
+    await vi.waitFor(() => { expect(userSnapshot).toBe(1); expect(groupSnapshot).toBe(1); });
     expect(userSnapshot).toBe(1);
     expect(groupSnapshot).toBe(1);
   });
