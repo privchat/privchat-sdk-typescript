@@ -91,7 +91,7 @@ describe('conversation preview ownership', () => {
     const t = transport();
     client = new PrivchatClient({ transport: t, cache: { enabled: true, db: new CacheDB(dbName) } });
     await client.connect();
-    await client.authenticate('100000028', 'tok', 'dev');
+    await client.authenticate('100000028', 'tok', '0d1d1d1d-0000-4000-8000-000000000001');
     // 把持久化的频道读进内存 store（RPC 这边返回空，频道来自本地缓存）。
     await client.bootstrapChannels();
 

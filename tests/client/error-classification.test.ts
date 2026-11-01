@@ -105,7 +105,7 @@ describe('authenticate emits auth_expired on failure', () => {
     const seen: Array<{ reason: string; code: number }> = [];
     client.onAuthExpired((e) => seen.push({ reason: e.reason, code: e.error_code }));
 
-    await expect(client.authenticate('1', 't', 'd')).rejects.toMatchObject({
+    await expect(client.authenticate('1', 't', '0d1d1d1d-0000-4000-8000-000000000007')).rejects.toMatchObject({
       errorKind: 'recoverable',
     });
     expect(seen).toEqual([{ reason: 'recoverable', code: 10002 }]);
@@ -125,7 +125,7 @@ describe('authenticate emits auth_expired on failure', () => {
     const seen: Array<{ reason: string; code: number }> = [];
     client.onAuthExpired((e) => seen.push({ reason: e.reason, code: e.error_code }));
 
-    await expect(client.authenticate('1', 't', 'd')).rejects.toMatchObject({
+    await expect(client.authenticate('1', 't', '0d1d1d1d-0000-4000-8000-000000000007')).rejects.toMatchObject({
       errorKind: 'terminal',
     });
     expect(seen).toEqual([{ reason: 'terminal', code: 10009 }]);

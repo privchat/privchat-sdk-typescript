@@ -357,3 +357,4 @@ export type {
 } from './runtime/client-runtime.js';
 
 export { sealAttachment, type SealedAttachment } from './attachment-crypto.js';
+export { isCanonicalDeviceId, newDeviceId, InvalidDeviceIdError } from './device-id.js';

@@ -63,7 +63,7 @@ async function newAuthedClient(transport: FakeTransport, dbName: string): Promis
     cache: { enabled: true, db: new CacheDB(dbName) },
   });
   await c.connect();
-  await c.authenticate('1', 'tok', 'dev');
+  await c.authenticate('1', 'tok', '0d1d1d1d-0000-4000-8000-000000000001');
   return c;
 }
 

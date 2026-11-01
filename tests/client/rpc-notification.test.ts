@@ -48,7 +48,7 @@ describe('authenticated one-way RPC notifications', () => {
   it('bounds UTF-8 routes and bodies, and rejects whitespace/control routes', async () => {
     const { transport, client, events } = setup();
     await client.connect();
-    await client.authenticate('1', 'token', 'device');
+    await client.authenticate('1', 'token', '0d1d1d1d-0000-4000-8000-000000000003');
     transport.fireMessage(packet('é'.repeat(128), new Uint8Array(256 * 1024)));
     expect(events).toHaveLength(1);
     for (const route of ['x'.repeat(257), 'é'.repeat(129), 'call/ state', 'call/\tstate',
@@ -62,7 +62,7 @@ describe('authenticated one-way RPC notifications', () => {
   it('checks envelope size before accessing the FlatBuffers root', async () => {
     const { transport, client, events } = setup();
     await client.connect();
-    await client.authenticate('1', 'token', 'device');
+    await client.authenticate('1', 'token', '0d1d1d1d-0000-4000-8000-000000000003');
     // A valid root plus padding would decode if the predecode bound were missing.
     const padded = new Uint8Array(256 * 1024 + 1025);
     padded.set(packet().payload);
@@ -76,7 +76,7 @@ describe('authenticated one-way RPC notifications', () => {
   it('keeps matching RPC responses out of notification dispatch', async () => {
     const { transport, client, events } = setup();
     await client.connect();
-    await client.authenticate('1', 'token', 'device');
+    await client.authenticate('1', 'token', '0d1d1d1d-0000-4000-8000-000000000003');
     transport.responder = () => encodeRpcResponse({ code: 0, message: 'ok', data: new Uint8Array([42]) });
     const response = await client.rpc({ route: 'call/state', body: new Uint8Array() });
     expect(response).toEqual({ code: 0, message: 'ok', data: new Uint8Array([42]) });
@@ -86,7 +86,7 @@ describe('authenticated one-way RPC notifications', () => {
   it('dispatches the existing biz17 codec through real transport inbound without a reply', async () => {
     const { transport, client, events } = setup();
     await client.connect();
-    await client.authenticate('1', 'secret-token', 'device');
+    await client.authenticate('1', 'secret-token', '0d1d1d1d-0000-4000-8000-000000000003');
     const sent = transport.sent.length;
     const incoming = packet();
     transport.fireMessage(incoming);
@@ -104,10 +104,10 @@ describe('authenticated one-way RPC notifications', () => {
     await client.connect();
     transport.fireMessage(packet());
     transport.onSendHook = () => transport.fireMessage(packet());
-    await client.authenticate('1', 'token', 'device');
+    await client.authenticate('1', 'token', '0d1d1d1d-0000-4000-8000-000000000003');
     expect(events).toHaveLength(0);
     transport.fireMessage(packet());
-    await client.authenticate('1', 'fresh-token', 'device');
+    await client.authenticate('1', 'fresh-token', '0d1d1d1d-0000-4000-8000-000000000003');
     expect(events).toHaveLength(1);
     transport.fireMessage(packet());
     expect(events).toHaveLength(2);
@@ -117,10 +117,10 @@ describe('authenticated one-way RPC notifications', () => {
     const { transport, client, events } = setup();
     await client.connect();
     transport.responder = () => encodeAuthorizationResponse({ success: false, error_code: 10000 });
-    await expect(client.authenticate('1', 'bad', 'device')).rejects.toThrow();
+    await expect(client.authenticate('1', 'bad', '0d1d1d1d-0000-4000-8000-000000000003')).rejects.toThrow();
     transport.fireMessage(packet());
     transport.responder = () => encodeAuthorizationResponse({ success: true, user_id: '2' });
-    await expect(client.authenticate('1', 'wrong-account', 'device')).rejects.toThrow();
+    await expect(client.authenticate('1', 'wrong-account', '0d1d1d1d-0000-4000-8000-000000000003')).rejects.toThrow();
     transport.fireMessage(packet());
     expect(events).toHaveLength(0);
   });
@@ -128,13 +128,13 @@ describe('authenticated one-way RPC notifications', () => {
   it('fences late old-connection packets even after a new account logs in', async () => {
     const { transport, client, events } = setup();
     await client.connect();
-    await client.authenticate('1', 'token', 'device');
+    await client.authenticate('1', 'token', '0d1d1d1d-0000-4000-8000-000000000003');
     const oldObserver = transport.observers[0]!;
     await client.disconnect();
     oldObserver.onMessage?.(packet());
     await client.connect();
     transport.fireMessage(packet());
-    await client.authenticate('2', 'other-token', 'device');
+    await client.authenticate('2', 'other-token', '0d1d1d1d-0000-4000-8000-000000000003');
     oldObserver.onMessage?.(packet());
     expect(events).toHaveLength(0);
     transport.fireMessage(packet());
@@ -147,7 +147,7 @@ describe('authenticated one-way RPC notifications', () => {
   it('ignores request-typed RPC and malformed envelopes without payload logging', async () => {
     const { transport, client, events } = setup();
     await client.connect();
-    await client.authenticate('1', 'token', 'device');
+    await client.authenticate('1', 'token', '0d1d1d1d-0000-4000-8000-000000000003');
     const logs = [vi.spyOn(console, 'log'), vi.spyOn(console, 'warn'), vi.spyOn(console, 'error')];
     const sent = transport.sent.length;
     transport.fireMessage(new Packet({ packetType: PacketType.Request, messageId: 123,

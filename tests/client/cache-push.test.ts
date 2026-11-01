@@ -132,7 +132,7 @@ describe('inbound push → cache absorption', () => {
     // Authenticate as alice (not the sender) so unread bumps
     await client.connect();
     setupAuthOk(t);
-    await client.authenticate('1001', 'tok', 'dev-1');
+    await client.authenticate('1001', 'tok', '0d1d1d1d-0000-4000-8000-000000000002');
     await client.bootstrapChannels();
     const before = client.cachedChannels()[0]!;
     expect(before.latest_pts).toBe('0');
@@ -167,7 +167,7 @@ describe('inbound push → cache absorption', () => {
     });
     await client.connect();
     setupAuthOk(t);
-    await client.authenticate('999', 'tok', 'dev-1');
+    await client.authenticate('999', 'tok', '0d1d1d1d-0000-4000-8000-000000000002');
     await client.bootstrapChannels();
 
     fireOneWay(

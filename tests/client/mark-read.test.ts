@@ -621,7 +621,7 @@ describe('peer_read_pts_updated persists to ChannelRecord.peer_read_pts', () => 
     const c = await newClient(t, true);
     await c.bootstrapChannels();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (c as any).lastAuth = { user_id: '555', token: 't', device_id: 'd' };
+    (c as any).lastAuth = { user_id: '555', token: 't', device_id: '0d1d1d1d-0000-4000-8000-000000000007' };
 
     // Seed a self-sent row with pts=10 and an inbound row with pts=5.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

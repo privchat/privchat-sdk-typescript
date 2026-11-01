@@ -168,7 +168,7 @@ describe('connection_state_changed events', () => {
     client.onConnectionStateChanged((e) => states.push(e.state));
 
     await client.connect();
-    await client.authenticate('1', 't', 'd');
+    await client.authenticate('1', 't', '0d1d1d1d-0000-4000-8000-000000000007');
     await client.disconnect();
 
     expect(states).toEqual([

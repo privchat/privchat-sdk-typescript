@@ -50,7 +50,7 @@ function authResponder(t: FakeTransport): void {
 async function newAuthedClient(transport: FakeTransport, dbName: string): Promise<PrivchatClient> {
   const c = new PrivchatClient({ transport, cache: { enabled: true, db: new CacheDB(dbName) } });
   await c.connect();
-  await c.authenticate('1', 'tok', 'dev');
+  await c.authenticate('1', 'tok', '0d1d1d1d-0000-4000-8000-000000000001');
   return c;
 }
 
@@ -196,7 +196,7 @@ describe('sendTextMessage online → transport throw → queued', () => {
       cache: { enabled: true, db: new CacheDB(`transient-2-${dbCounter}`) },
     });
     await client.connect();
-    await client.authenticate('1', 'tok', 'dev');
+    await client.authenticate('1', 'tok', '0d1d1d1d-0000-4000-8000-000000000001');
 
     const patches: ConversationPatch[] = [];
     client.observeConversation('12345', 1, (_, p) => patches.push(p));

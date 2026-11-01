@@ -71,7 +71,7 @@ async function newAuthedClient(
 
 async function authenticate(c: PrivchatClient): Promise<void> {
   await c.connect();
-  await c.authenticate('1', 'tok', 'dev');
+  await c.authenticate('1', 'tok', '0d1d1d1d-0000-4000-8000-000000000001');
 }
 
 /** Settle async snapshot pushes / IDB writes. */
@@ -284,7 +284,7 @@ describe('outbox_state_changed event', () => {
     });
 
     await client.connect();
-    await client.authenticate('1', 'tok', 'dev');
+    await client.authenticate('1', 'tok', '0d1d1d1d-0000-4000-8000-000000000001');
     await client.disconnect();
 
     await client.sendTextMessage({
@@ -292,7 +292,7 @@ describe('outbox_state_changed event', () => {
       local_message_id: '9007199254740401',
     });
     await client.connect();
-    await client.authenticate('1', 'tok', 'dev');
+    await client.authenticate('1', 'tok', '0d1d1d1d-0000-4000-8000-000000000001');
     const result = await client.flushOutbox();
     expect(result.failed).toBe(1);
 
@@ -329,7 +329,7 @@ describe('outbox_drained event', () => {
 
     // Bind ownership, then enqueue while offline.
     await client.connect();
-    await client.authenticate('1', 'tok', 'dev');
+    await client.authenticate('1', 'tok', '0d1d1d1d-0000-4000-8000-000000000001');
     await client.disconnect();
     await client.sendTextMessage({
       ...SAMPLE_INPUT,
@@ -340,7 +340,7 @@ describe('outbox_drained event', () => {
 
     // Authenticate + flush → ACK → row deleted → drained.
     await client.connect();
-    await client.authenticate('1', 'tok', 'dev');
+    await client.authenticate('1', 'tok', '0d1d1d1d-0000-4000-8000-000000000001');
     await client.flushOutbox();
     await flushTicks();
 

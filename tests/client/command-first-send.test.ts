@@ -75,7 +75,7 @@ describe('command-first send', () => {
       cache: { enabled: true, db: new CacheDB(dbName) },
     });
     await client.connect();
-    await client.authenticate('999', 'tok', 'dev');
+    await client.authenticate('999', 'tok', '0d1d1d1d-0000-4000-8000-000000000001');
 
     const result = await client.sendTextMessage({
       channel_id: '12345',
@@ -161,7 +161,7 @@ describe('command-first send', () => {
     };
     client = new PrivchatClient({ transport: t, cache: { enabled: true, db: new CacheDB(dbName) } });
     await client.connect();
-    await client.authenticate('999', 'tok', 'dev');
+    await client.authenticate('999', 'tok', '0d1d1d1d-0000-4000-8000-000000000001');
 
     const result = await client.sendTextMessage({
       channel_id: '12345',

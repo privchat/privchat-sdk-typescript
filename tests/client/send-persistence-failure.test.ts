@@ -133,7 +133,7 @@ beforeEach(async () => {
     cache: { enabled: true, db: new CacheDB(dbName) },
   });
   await client.connect();
-  await client.authenticate('999', 'tok', 'dev');
+  await client.authenticate('999', 'tok', '0d1d1d1d-0000-4000-8000-000000000001');
   // Hydrates the memory store from the durable cache (the RPC leg returns
   // nothing here), which is what puts the seeded channel in front of
   // `refreshChannelOnSend`.

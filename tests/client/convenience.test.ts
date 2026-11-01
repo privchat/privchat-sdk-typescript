@@ -43,12 +43,12 @@ describe('authenticate', () => {
 
     const client = new PrivchatClient({ transport: t });
     await client.connect();
-    const resp = await client.authenticate('900710001', 'tok', 'dev-1');
+    const resp = await client.authenticate('900710001', 'tok', '0d1d1d1d-0000-4000-8000-000000000002');
 
     expect(observed).not.toBeNull();
     expect(observed!.auth_type).toBe('jwt');
     expect(observed!.auth_token).toBe('tok');
-    expect(observed!.device_info.device_id).toBe('dev-1');
+    expect(observed!.device_info.device_id).toBe('0d1d1d1d-0000-4000-8000-000000000002');
     expect(observed!.protocol_version).toBe('1.0');
     expect(observed!.properties.user_id).toBe('900710001');
     expect(observed!.properties.client_timestamp).toMatch(/^\d+$/);
@@ -67,7 +67,7 @@ describe('authenticate', () => {
 
     const client = new PrivchatClient({ transport: t });
     await client.connect();
-    await expect(client.authenticate('1', 'bad', 'd1')).rejects.toMatchObject({
+    await expect(client.authenticate('1', 'bad', '0d1d1d1d-0000-4000-8000-000000000005')).rejects.toMatchObject({
       name: 'AuthorizationError',
       message: '[401] invalid token',
     });
@@ -85,7 +85,7 @@ describe('authenticate', () => {
     await mismatched.connect();
 
     await expect(
-      mismatched.authenticate('100000028', 'token-for-31', 'dev'),
+      mismatched.authenticate('100000028', 'token-for-31', '0d1d1d1d-0000-4000-8000-000000000001'),
     ).rejects.toBeInstanceOf(AuthIdentityMismatchError);
     expect(mismatched.connectionState()).toBe('connected');
     expect(mismatched.currentUserId()).toBeUndefined();
@@ -114,12 +114,12 @@ describe('authenticate', () => {
       },
     });
     await client.connect();
-    await client.authenticate('1', 'tok', 'd1');
+    await client.authenticate('1', 'tok', '0d1d1d1d-0000-4000-8000-000000000005');
 
     expect(observed!.client_info.version).toBe('9.9.9');
     expect(observed!.client_info.os).toBe('linux');
     expect(observed!.device_info.app_id).toBe('override-app');
-    expect(observed!.device_info.device_id).toBe('d1');
+    expect(observed!.device_info.device_id).toBe('0d1d1d1d-0000-4000-8000-000000000005');
     expect(observed!.device_info.device_type).toBe('linux');
   });
 
@@ -151,7 +151,7 @@ describe('authenticate', () => {
     });
     await ownedClient.connect();
 
-    await ownedClient.authenticate('100000028', 'tok-28', 'dev-28');
+    await ownedClient.authenticate('100000028', 'tok-28', '0d1d1d1d-0000-4000-8000-000000000006');
 
     expect(ownedClient.cachedChannels()).toEqual([]);
     const verify = new CacheDB(dbName);
@@ -380,7 +380,7 @@ describe('AuthorizationError formatting', () => {
     t.responder = () => encodeAuthorizationResponse({ success: false });
     const client = new PrivchatClient({ transport: t });
     await client.connect();
-    return expect(client.authenticate('1', 't', 'd')).rejects.toMatchObject({
+    return expect(client.authenticate('1', 't', '0d1d1d1d-0000-4000-8000-000000000007')).rejects.toMatchObject({
       message: '[0] authorization failed',
     });
   });

@@ -101,7 +101,7 @@ describe('message_rehydrate repair', () => {
       cache: { enabled: true, db: new CacheDB(`rehydrate-${++dbCounter}`) },
     });
     await client.connect();
-    await client.authenticate('1', 'tok', 'dev');
+    await client.authenticate('1', 'tok', '0d1d1d1d-0000-4000-8000-000000000001');
 
     const db = (client as unknown as { cacheDb: Parameters<typeof putOutboxEntry>[0] }).cacheDb;
 

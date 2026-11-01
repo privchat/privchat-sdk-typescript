@@ -51,7 +51,7 @@ const authenticateClient = async (
   client: PrivchatClient,
   userId = '1',
   token = 't',
-  deviceId = 'd',
+  deviceId = '0d1d1d1d-0000-4000-8000-000000000007',
 ): Promise<void> => {
   vi.useRealTimers();
   try {
@@ -76,7 +76,7 @@ describe('auto-reconnect', () => {
       reconnect: { enabled: true, initialDelayMs: 100, maxDelayMs: 100, multiplier: 1 },
     });
     await client.connect();
-    await client.authenticate('900710001', 'tok', 'dev-1');
+    await client.authenticate('900710001', 'tok', '0d1d1d1d-0000-4000-8000-000000000002');
     expect(authCount).toBe(1);
 
     // Simulate an unexpected close.

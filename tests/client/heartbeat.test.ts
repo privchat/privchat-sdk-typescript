@@ -71,7 +71,7 @@ describe('idle heartbeat', () => {
       reconnect: { enabled: false },
     });
     await client.connect();
-    await client.authenticate('900710001', 'tok', 'dev-1');
+    await client.authenticate('900710001', 'tok', '0d1d1d1d-0000-4000-8000-000000000002');
     expect(r.pingCount()).toBe(0);
 
     // Sit idle past the interval — exactly one ping should fire.
@@ -93,7 +93,7 @@ describe('idle heartbeat', () => {
       reconnect: { enabled: false },
     });
     await client.connect();
-    await client.authenticate('1', 't', 'd');
+    await client.authenticate('1', 't', '0d1d1d1d-0000-4000-8000-000000000007');
 
     // Fake an inbound push every 600ms — well inside the 1000ms idle
     // window. The heartbeat tick should keep deferring without ever
@@ -124,7 +124,7 @@ describe('idle heartbeat', () => {
       reconnect: { enabled: false },
     });
     await client.connect();
-    await client.authenticate('1', 't', 'd');
+    await client.authenticate('1', 't', '0d1d1d1d-0000-4000-8000-000000000007');
 
     await advance(10_000);
     expect(r.pingCount()).toBe(0);
@@ -160,7 +160,7 @@ describe('idle heartbeat', () => {
       },
     });
     await client.connect();
-    await client.authenticate('1', 't', 'd');
+    await client.authenticate('1', 't', '0d1d1d1d-0000-4000-8000-000000000007');
     expect(authCount).toBe(1);
 
     // Idle past intervalMs → ping fires → no responder → SDK request
@@ -189,7 +189,7 @@ describe('idle heartbeat', () => {
       reconnect: { enabled: false },
     });
     await client.connect();
-    await client.authenticate('1', 't', 'd');
+    await client.authenticate('1', 't', '0d1d1d1d-0000-4000-8000-000000000007');
 
     await client.disconnect();
     expect(client.connectionState()).toBe('disconnected');

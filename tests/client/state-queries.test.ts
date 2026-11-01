@@ -32,7 +32,7 @@ describe('connectionState() / sessionSnapshot() / currentAccessToken()', () => {
     const readiness: string[] = [];
     client.onSyncReadinessChanged((event) => readiness.push(event.readiness));
     await client.connect();
-    await client.authenticate('900710001', 'TOKEN', 'dev-1');
+    await client.authenticate('900710001', 'TOKEN', '0d1d1d1d-0000-4000-8000-000000000002');
 
     expect(client.connectionState()).toBe('authenticated');
     expect(client.syncReadiness()).toBe('ready');
@@ -40,7 +40,7 @@ describe('connectionState() / sessionSnapshot() / currentAccessToken()', () => {
     expect(client.currentAccessToken()).toBe('TOKEN');
     const snap = client.sessionSnapshot();
     expect(snap.user_id).toBe('900710001');
-    expect(snap.device_id).toBe('dev-1');
+    expect(snap.device_id).toBe('0d1d1d1d-0000-4000-8000-000000000002');
     expect(snap.has_access_token).toBe(true);
     expect(snap.connection_state).toBe('authenticated');
   });
@@ -50,7 +50,7 @@ describe('connectionState() / sessionSnapshot() / currentAccessToken()', () => {
     t.responder = () => encodeAuthorizationResponse({ success: true });
     const client = new PrivchatClient({ transport: t });
     await client.connect();
-    await client.authenticate('1', 't', 'd');
+    await client.authenticate('1', 't', '0d1d1d1d-0000-4000-8000-000000000007');
     await client.disconnect();
     expect(client.connectionState()).toBe('disconnected');
     expect(client.syncReadiness()).toBe('disconnected');
@@ -91,7 +91,7 @@ describe('connectionState() / sessionSnapshot() / currentAccessToken()', () => {
     });
 
     await client.connect();
-    await client.authenticate('42', 'token', 'device');
+    await client.authenticate('42', 'token', '0d1d1d1d-0000-4000-8000-000000000003');
     expect(client.connectionState()).toBe('authenticated');
     expect(client.syncReadiness()).toBe('syncing_critical');
 

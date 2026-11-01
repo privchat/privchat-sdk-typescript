@@ -36,7 +36,7 @@ describe('server-pushed Channel Transfer', () => {
     await client.connect();
     transport.fireMessage(push());
     expect(events).toHaveLength(0);
-    await client.authenticate('1', 'token', 'node-a');
+    await client.authenticate('1', 'token', '0d1d1d1d-0000-4000-8000-000000000004');
     transport.fireMessage(push());
     expect(events).toEqual([{
       type: 'transfer_received',
@@ -50,7 +50,7 @@ describe('server-pushed Channel Transfer', () => {
   it('drops oversized bodies and malformed routes', async () => {
     const { transport, client, events } = setup();
     await client.connect();
-    await client.authenticate('1', 'token', 'node-a');
+    await client.authenticate('1', 'token', '0d1d1d1d-0000-4000-8000-000000000004');
     transport.fireMessage(push('agent/node/execute', new Uint8Array(64 * 1024 + 1)));
     for (const route of ['', 'x'.repeat(257), 'agent/ node', 'agent/\nnode']) transport.fireMessage(push(route));
     transport.fireMessage(new Packet({ packetType: PacketType.OneWay, messageId: 0,

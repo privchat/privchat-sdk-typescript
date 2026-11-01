@@ -29,7 +29,7 @@ const baseAuth: AuthorizationRequest = {
   auth_type: 'jwt',
   auth_token: 'tok',
   client_info: { client_type: 'web', version: '0.1.0', os: 'macos', os_version: '15' },
-  device_info: { device_id: 'd1', device_type: 'web', app_id: 'a1', device_name: 'n' },
+  device_info: { device_id: '0d1d1d1d-0000-4000-8000-000000000005', device_type: 'web', app_id: 'a1', device_name: 'n' },
   protocol_version: '1.0',
   properties: {},
 };
@@ -63,7 +63,7 @@ describe('PrivchatClient layer-1 protocol facade', () => {
       // Server sees the request bytes and decodes them.
       const decoded = decodeAuthorizationRequest(pkt.payload);
       expect(decoded.auth_token).toBe('tok');
-      expect(decoded.device_info.device_id).toBe('d1');
+      expect(decoded.device_info.device_id).toBe('0d1d1d1d-0000-4000-8000-000000000005');
       return encodeAuthorizationResponse({
         success: true,
         session_id: 'sess-1',

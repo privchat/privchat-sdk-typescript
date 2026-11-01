@@ -34,10 +34,10 @@ describe('refreshAccessToken (B1 non-rotation)', () => {
 
     const client = new PrivchatClient({ transport: t });
     await client.connect();
-    const result = await client.refreshAccessToken('OLD_REFRESH', 'dev-1');
+    const result = await client.refreshAccessToken('OLD_REFRESH', '0d1d1d1d-0000-4000-8000-000000000002');
 
     expect(observedRoute).toBe('account/auth/refresh');
-    expect(observedBody).toEqual({ refresh_token: 'OLD_REFRESH', device_id: 'dev-1' });
+    expect(observedBody).toEqual({ refresh_token: 'OLD_REFRESH', device_id: '0d1d1d1d-0000-4000-8000-000000000002' });
     expect(result.access_token).toBe('NEW_ACCESS');
     expect(result.expires_at).toBe(1_777_000_000_000);
     expect(result.refresh_token).toBeUndefined(); // B1 non-rotation
@@ -48,7 +48,7 @@ describe('refreshAccessToken (B1 non-rotation)', () => {
     t.responder = () => okPayload('A2', 999, 'R2');
     const client = new PrivchatClient({ transport: t });
     await client.connect();
-    const result = await client.refreshAccessToken('R1', 'dev-1');
+    const result = await client.refreshAccessToken('R1', '0d1d1d1d-0000-4000-8000-000000000002');
     expect(result.refresh_token).toBe('R2');
   });
 
@@ -57,7 +57,7 @@ describe('refreshAccessToken (B1 non-rotation)', () => {
     t.responder = () => encodeRpcResponse({ code: 10009, message: '[10009] refresh expired' });
     const client = new PrivchatClient({ transport: t });
     await client.connect();
-    const err = await client.refreshAccessToken('R', 'dev-1').catch((e: unknown) => e);
+    const err = await client.refreshAccessToken('R', '0d1d1d1d-0000-4000-8000-000000000002').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(RefreshTokenError);
     expect((err as RefreshTokenError).errorCode).toBe(10009);
     expect((err as RefreshTokenError).errorKind).toBe('terminal');
@@ -68,7 +68,7 @@ describe('refreshAccessToken (B1 non-rotation)', () => {
     t.responder = () => encodeRpcResponse({ code: 10010, message: '[10010] revoked' });
     const client = new PrivchatClient({ transport: t });
     await client.connect();
-    await expect(client.refreshAccessToken('R', 'dev-1')).rejects.toMatchObject({
+    await expect(client.refreshAccessToken('R', '0d1d1d1d-0000-4000-8000-000000000002')).rejects.toMatchObject({
       name: 'RefreshTokenError',
       errorCode: 10010,
       errorKind: 'terminal',
@@ -81,7 +81,7 @@ describe('refreshAccessToken (B1 non-rotation)', () => {
     const client = new PrivchatClient({ transport: t });
     await client.connect();
     const before = client.connectionState();
-    await client.refreshAccessToken('R', 'dev-1');
+    await client.refreshAccessToken('R', '0d1d1d1d-0000-4000-8000-000000000002');
     expect(client.connectionState()).toBe(before);
   });
 });

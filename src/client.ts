@@ -1,3 +1,4 @@
+import { requireCanonicalDeviceId } from './device-id.js';
 import {
   TransportClient,
   type ClientMessage,
@@ -1448,6 +1449,7 @@ export class PrivchatClient {
     device_id: string,
     opts: RequestOptions = {},
   ): Promise<AuthorizationResponse> {
+    requireCanonicalDeviceId(device_id);
     return this.authenticateInternal(user_id, token, device_id, opts, true);
   }
 
@@ -1642,6 +1644,7 @@ export class PrivchatClient {
     deviceId: string,
     opts: RequestOptions = {},
   ): Promise<RefreshAccessTokenResult> {
+    requireCanonicalDeviceId(deviceId);
     try {
       return await this.rpcCallTyped<
         RefreshAccessTokenRequest,

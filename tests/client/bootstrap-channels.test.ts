@@ -539,7 +539,7 @@ describe('bootstrapChannels', () => {
     // Pretend we authenticated as 555. The lastAuth.user_id field is
     // what the bucket-routing logic compares against.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (client as any).lastAuth = { user_id: '555', token: 't', device_id: 'd' };
+    (client as any).lastAuth = { user_id: '555', token: 't', device_id: '0d1d1d1d-0000-4000-8000-000000000007' };
 
     // Baseline must NOT raise peer_read_cursor_updated — that event is
     // reserved for live push advances. Re-login should not look like

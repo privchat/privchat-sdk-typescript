@@ -57,7 +57,7 @@ describe('client.dispose()', () => {
     });
 
     await client.connect();
-    await client.authenticate('1', 't', 'd');
+    await client.authenticate('1', 't', '0d1d1d1d-0000-4000-8000-000000000007');
     expect(client.connectionState()).toBe('authenticated');
 
     await client.dispose();
@@ -74,7 +74,7 @@ describe('client.dispose()', () => {
     t.responder = () => encodeAuthorizationResponse({ success: true });
     client = new PrivchatClient({ transport: t });
     await client.connect();
-    await client.authenticate('1', 't', 'd');
+    await client.authenticate('1', 't', '0d1d1d1d-0000-4000-8000-000000000007');
 
     let lastReason: string | undefined;
     client.observeEvents((env) => {
@@ -95,7 +95,7 @@ describe('client.dispose()', () => {
     t.responder = () => encodeAuthorizationResponse({ success: true });
     client = new PrivchatClient({ transport: t });
     await client.connect();
-    await client.authenticate('1', 't', 'd');
+    await client.authenticate('1', 't', '0d1d1d1d-0000-4000-8000-000000000007');
 
     const states: string[] = [];
     client.observeEvents((env) => {

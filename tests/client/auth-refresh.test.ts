@@ -82,7 +82,7 @@ describe('authenticate(): refresh-on-expiry + retry once', () => {
       },
     });
     await client.connect();
-    const resp = await client.authenticate('u', 'OLD', 'dev');
+    const resp = await client.authenticate('u', 'OLD', '0d1d1d1d-0000-4000-8000-000000000001');
     expect(resp.success).toBe(true);
     expect(refreshCalls).toBe(1);
     expect(authCalls).toBe(2); // original + one retry
@@ -106,7 +106,7 @@ describe('authenticate(): refresh-on-expiry + retry once', () => {
       },
     });
     await client.connect();
-    await expect(client.authenticate('u', 'OLD', 'dev')).rejects.toMatchObject({
+    await expect(client.authenticate('u', 'OLD', '0d1d1d1d-0000-4000-8000-000000000001')).rejects.toMatchObject({
       name: 'SessionExpiredError',
     });
     expect(onSessionExpired).toBe(1);
@@ -120,7 +120,7 @@ describe('authenticate(): refresh-on-expiry + retry once', () => {
     t.responder = () => fail10002();
     const client = new PrivchatClient({ transport: t });
     await client.connect();
-    await expect(client.authenticate('u', 'OLD', 'dev')).rejects.toMatchObject({
+    await expect(client.authenticate('u', 'OLD', '0d1d1d1d-0000-4000-8000-000000000001')).rejects.toMatchObject({
       name: 'AuthorizationError',
       errorKind: 'recoverable',
     });
@@ -150,7 +150,7 @@ describe('authenticate(): refresh-on-expiry + retry once', () => {
         },
       });
       await client.connect();
-      await client.authenticate('u', 'OLD', 'dev'); // OLD→refresh→NEW→authenticated
+      await client.authenticate('u', 'OLD', '0d1d1d1d-0000-4000-8000-000000000001'); // OLD→refresh→NEW→authenticated
       expect(refreshCalls).toBe(1);
       expect(client.connectionState()).toBe('authenticated');
 
@@ -197,7 +197,7 @@ describe('auto-reconnect: refresh-on-expiry during replay', () => {
       },
     });
     await client.connect();
-    await client.authenticate('u', 'OLD', 'dev');
+    await client.authenticate('u', 'OLD', '0d1d1d1d-0000-4000-8000-000000000001');
     expect(client.connectionState()).toBe('authenticated');
 
     t.fireClose();

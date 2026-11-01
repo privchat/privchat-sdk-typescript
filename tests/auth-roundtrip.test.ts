@@ -49,7 +49,7 @@ describe('AuthorizationRequest', () => {
       auth_type: 'anonymous',
       auth_token: '',
       client_info: { client_type: 'cli', version: '0.0.1', os: 'linux', os_version: '6.1' },
-      device_info: { device_id: 'd1', device_type: 'linux', app_id: 'a1', device_name: 'tty' },
+      device_info: { device_id: '0d1d1d1d-0000-4000-8000-000000000005', device_type: 'linux', app_id: 'a1', device_name: 'tty' },
       protocol_version: '1.0',
       properties: {},
     };
