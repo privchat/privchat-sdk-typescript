@@ -172,10 +172,16 @@ declare module './client.js' {
     /** 表态统计。 */
     messageReactionStats(serverMessageId: number): Promise<MessageReactionStatsResponse>;
 
-    // account/profile/get、account/profile/update、account/user/update 曾经封装在
-    // 这里，已撤回：前两条的模块在 server 的 account/mod.rs 里被注释掉、根本没注册，
-    // 三条的 handler 都是 `Ok(json!({"status":"success"}))` 占位实现。调用方会拿到
-    // 假成功而资料没有任何变化。server 真正实现之后再加回来。
+    // account/profile/get、account/profile/update、account/user/update 曾封装在这里，
+    // 已撤回。server 现状（P1-4 / R10 核实，别再照「协议里有常量」就当它可用）：
+    //   - account/profile/update：真实实现且已注册，是本人改昵称/头像的唯一 IM RPC
+    //     写入入口；仅 BUILTIN 部署可用，PLATFORM 部署显式拒绝（资料由平台账号系统管理）。
+    //   - account/user/update：已废弃，仍注册但显式拒绝（forbidden），指向 profile/update。
+    //   - account/profile/get：死文件已删除、从未注册；读本人资料走 account/user/detail
+    //     （source=self）。
+    // 目前三条都没有 TS 封装：web 资料编辑走 application HTTP（/member/user/*），
+    // native app 走 Kotlin SDK updateProfile → account/profile/update。需要 TS 封装时
+    // 按上述真实状态接。
     /** 生成名片分享。 */
     accountUserShareCard(req: AccountUserShareCardRequest): Promise<AccountUserShareCardResponse>;
     /** 扫码查人。 */
