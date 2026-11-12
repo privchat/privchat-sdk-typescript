@@ -358,3 +358,18 @@ export type {
 
 export { sealAttachment, type SealedAttachment } from './attachment-crypto.js';
 export { isCanonicalDeviceId, newDeviceId, InvalidDeviceIdError } from './device-id.js';
+
+// ----- Display timezone (TIMEZONE_SPEC; local-first, mirrors the Rust core) -----
+// Side-effect import installs the timezone methods on PrivchatClient.prototype.
+import './timezone.js';
+export {
+  DisplayTimezone,
+  UnknownTimezoneError,
+  InvalidTimestampError,
+  epochMillisToLocalDateTime,
+  systemDefaultTimezoneId,
+  formatMessageTime,
+  formatConversationTime,
+  formatSeparatorTime,
+} from './timezone.js';
+export type { LocalDateTimeParts } from './timezone.js';
