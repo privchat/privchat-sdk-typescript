@@ -519,7 +519,19 @@ export class SyncEngine {
         // here: a commit arriving from the wire has no local id yet, and the
         // whole point of the lookup is to find whether a row for that
         // message already exists.
-        const serverIds = [...new Set(commits.map((c) => String(c.server_msg_id)))];
+        const entries = commits.map(commit => {
+          const resolved = resolveCanonicalTimelineEvent(commit);
+          const event = resolved.event;
+          const legacy = commit.content as { revoke?: unknown; is_revoked?: unknown } | null;
+          const revokeTarget = event?.type === 'revoke' &&
+            (resolved.source === 'canonical' || commit.message_type === 'message.revoke' ||
+              legacy?.revoke === true || legacy?.is_revoked === true)
+            ? event.target_server_message_id
+            : undefined;
+          return { commit, resolved, revokeTarget };
+        });
+        const revoked = new Set(entries.flatMap(entry => entry.revokeTarget ?? []));
+        const serverIds = [...new Set(entries.map(entry => entry.revokeTarget ?? String(entry.commit.server_msg_id)))];
         const localIds = [
           ...new Set(
             commits
@@ -550,12 +562,14 @@ export class SyncEngine {
         const toUpsert: MessageRecord[] = [];
         const ackSwaps: Array<{ localKey: string; acked: MessageRecord }> = [];
 
-        for (const commit of commits) {
-          const targetKey = `s:${commit.server_msg_id}`;
-          const next = commitToMessageRecord(commit, channel_id, channel_type, currentUserId);
-
+        for (const { commit, resolved, revokeTarget } of entries) {
           const ptsBig = BigInt(commit.pts);
           if (ptsBig > maxPtsSeen) maxPtsSeen = ptsBig;
+          // The event advances the sync cursor, but is not itself a chat row.
+          if (revokeTarget !== undefined) continue;
+          const targetKey = `s:${commit.server_msg_id}`;
+          const next = commitToMessageRecord(commit, channel_id, channel_type, currentUserId, resolved);
+          if (revoked.has(String(commit.server_msg_id))) next.revoked = true;
           if (next.timestamp > maxTimestampSeen) maxTimestampSeen = next.timestamp;
 
           // ACK swap candidate: the server commit echoes our
@@ -623,6 +637,12 @@ export class SyncEngine {
           durableAcked.push({ localKey: stored.id, acked: stored });
         }
         await cacheUpsertMessages(db, toUpsert);
+        for (const target of revoked) {
+          await db.messages_v2
+            .where('[channel_id+server_message_id]')
+            .equals([channel_id, target])
+            .modify({ revoked: true });
+        }
 
         // Channel projection, derived from the row read inside this
         // transaction rather than from the memory snapshot.
@@ -735,8 +755,8 @@ export function commitToMessageRecord(
   channel_id: string,
   channel_type: number,
   selfUid?: string,
+  resolved = resolveCanonicalTimelineEvent(commit),
 ): MessageRecord {
-  const resolved = resolveCanonicalTimelineEvent(commit);
   const canonical =
     resolved.source === 'canonical' && resolved.event?.type === 'new_message'
       ? resolved.event

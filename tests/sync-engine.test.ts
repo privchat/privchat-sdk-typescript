@@ -10,6 +10,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CacheDB } from '../src/cache-idb.js';
 import { MessageStore } from '../src/cache/index.js';
+import { encodeCanonicalTimelineEvent } from '../src/codec/timeline.js';
 import {
   SyncEngine,
   SyncRpcError,
@@ -193,6 +194,47 @@ function ptsErr(code: number, dataObj?: Record<string, unknown>): SyncRpcError {
 // ----- Tests -----
 
 describe('SyncEngine', () => {
+  it('applies a missed revoke to the original row without inserting an event or unread', async () => {
+    const h = newHarness({ selfUid: SELF_UID });
+    seedChannel(h.store);
+    const target = '648591280498184193';
+    h.pageQueue.push(okPage([commit(1, { server_msg_id: target })], 1));
+    await h.engine.syncChannel(CHANNEL_ID, CHANNEL_TYPE);
+    const original = (await h.db.messages_v2.toArray())[0]!;
+
+    h.pageQueue.push(okPage([
+      commit(2, { message_type: 'message.revoke', content: { message_id: target, revoke: true } }),
+      commit(3),
+    ], 3));
+    expect((await h.engine.syncChannel(CHANNEL_ID, CHANNEL_TYPE)).commits_applied).toBe(1);
+
+    const rows = await h.db.messages_v2.toArray();
+    expect(rows).toHaveLength(2);
+    expect(rows.find(row => row.server_message_id === target)).toMatchObject({
+      id: original.id, pts: '1', revoked: true,
+    });
+    expect(h.store.getMessages(CHANNEL_ID, CHANNEL_TYPE).find(row => row.id === original.id)?.revoked).toBe(true);
+    expect(h.store.getChannel(CHANNEL_ID, CHANNEL_TYPE)).toMatchObject({ latest_pts: '3', unread_count: 2 });
+  });
+
+  it('applies a canonical revoke to a message from the same page without counting it as unread', async () => {
+    const h = newHarness({ selfUid: SELF_UID });
+    seedChannel(h.store);
+    const bytes = encodeCanonicalTimelineEvent({
+      type: 'revoke',
+      target_server_message_id: '1001',
+      revoked_by: '42',
+      revoked_at: 1_700_000_000_000,
+    });
+    h.pageQueue.push(okPage([
+      commit(1),
+      commit(2, { event_schema_version: 1, canonical_event: Buffer.from(bytes).toString('base64') }),
+    ], 2));
+    expect((await h.engine.syncChannel(CHANNEL_ID, CHANNEL_TYPE)).commits_applied).toBe(1);
+    expect(await h.db.messages_v2.toArray()).toMatchObject([{ server_message_id: '1001', revoked: true }]);
+    expect(h.store.getChannel(CHANNEL_ID, CHANNEL_TYPE)).toMatchObject({ latest_pts: '2', unread_count: 0 });
+  });
+
   describe('Case 1: empty response → status=current', () => {
     it('returns current with no patches when commits=[] and has_more=false', async () => {
       const h = newHarness();
