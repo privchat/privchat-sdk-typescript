@@ -23,6 +23,12 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCHEMA_DIR = resolve(__dirname, '..', '..', 'privchat-protocol', 'protocol');
 const OUT_DIR = resolve(__dirname, '..', 'src', 'generated');
+const FLATC = process.env.FLATC || 'flatc';
+const version = spawnSync(FLATC, ['--version'], { encoding: 'utf8' });
+if (version.status !== 0 || version.stdout?.trim() !== 'flatc version 25.12.19') {
+  console.error('Install flatc 25.12.19 from https://github.com/google/flatbuffers/releases/tag/v25.12.19-2026-02-06-03fffb2', version.error ?? version.stdout ?? '');
+  process.exit(1);
+}
 
 if (!existsSync(SCHEMA_DIR)) {
   console.error(`privchat-protocol schemas not found at: ${SCHEMA_DIR}`);
@@ -51,11 +57,11 @@ mkdirSync(OUT_DIR, { recursive: true });
 
 const args = ['--ts', '--gen-all', '-I', SCHEMA_DIR, '-o', OUT_DIR, ...schemas];
 console.log(`flatc ${args.join(' ')}`);
-const result = spawnSync('flatc', args, { stdio: 'inherit' });
+const result = spawnSync(FLATC, args, { stdio: 'inherit' });
 
 if (result.error) {
   console.error(
-    'Failed to spawn flatc. Install via `brew install flatbuffers` or https://github.com/google/flatbuffers/releases',
+    'Failed to spawn the configured FlatBuffers compiler',
   );
   process.exit(1);
 }

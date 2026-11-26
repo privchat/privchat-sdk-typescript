@@ -793,6 +793,11 @@ declarations, driven by plain `tsc` (`tsconfig.build.json`) — no bundler:
 
 FlatBuffers codegen runs automatically via `prebuild` (`scripts/codegen.mjs`). The generator reads `.fbs` files **directly from a sibling clone of `privchat-protocol`** — there is no vendored schema copy in this package, so the wire format is single-sourced and any drift surfaces immediately as a compile error.
 
+Use [flatc 25.12.19 (2026-02-06 build)](https://github.com/google/flatbuffers/releases/tag/v25.12.19-2026-02-06-03fffb2)
+on PATH or via `FLATC=/path/to/flatc`. The npm FlatBuffers runtime is pinned to
+25.9.23 because upstream did not publish 25.12.19 to npm. The generated bindings
+are checked against the shared Rust/TypeScript wire fixtures.
+
 #### Required layout
 
 ```

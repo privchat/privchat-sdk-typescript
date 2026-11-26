@@ -25,18 +25,33 @@ jobs:
       # Adjust `repository:`/`ref:` if the protocol repo lives elsewhere.
       - name: Checkout protocol schemas (sibling)
         uses: actions/checkout@v4
-        continue-on-error: true
         with:
-          repository: ${{ github.repository_owner }}/privchat-protocol
+          repository: privchat/privchat-protocol
           path: privchat-protocol
+      - uses: actions/checkout@v4
+        with:
+          repository: zoujiaqing/msgtrans-typescript
+          ref: 06981f7a3ba75cdfa2a818e39be39502afe30200
+          path: msgtrans-typescript
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Install flatc (for codegen)
-        run: sudo apt-get update && sudo apt-get install -y flatbuffers-compiler
+      - uses: actions/checkout@v4
+        with:
+          repository: google/flatbuffers
+          ref: v25.12.19-2026-02-06-03fffb2
+          path: flatbuffers
+      - name: Build pinned FlatBuffers compiler
+        run: |
+          cmake -S "$GITHUB_WORKSPACE/flatbuffers" -B "$RUNNER_TEMP/flatc-build" -DFLATBUFFERS_BUILD_TESTS=OFF
+          cmake --build "$RUNNER_TEMP/flatc-build" --target flatc --parallel 2
+          echo "$RUNNER_TEMP/flatc-build" >> "$GITHUB_PATH"
+      - name: Build sibling transport
+        working-directory: msgtrans-typescript
+        run: npm ci --ignore-scripts && npm run build
       - name: Install deps
         working-directory: privchat-sdk-typescript
-        run: npm install
+        run: npm ci --ignore-scripts
       - name: Codegen (flatc → src/generated)
         working-directory: privchat-sdk-typescript
         run: npm run codegen

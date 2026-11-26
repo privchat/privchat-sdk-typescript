@@ -642,7 +642,11 @@ describe('bootstrapChannels', () => {
     await client.connect();
     await client.bootstrapChannels();
     // bootstrap kicks profile sync as fire-and-forget; let it settle.
-    await vi.waitFor(() => { expect(client.cachedUsers()).toHaveLength(2); expect(client.cachedGroup('500')).toBeDefined(); });
+    const connected = client;
+    await vi.waitFor(() => {
+      expect(connected.cachedUsers()).toHaveLength(2);
+      expect(connected.cachedGroup('500')).toBeDefined();
+    });
 
     const users = client.cachedUsers();
     expect(users).toHaveLength(2);
@@ -737,7 +741,8 @@ describe('bootstrapChannels', () => {
     });
     await client.connect();
     await client.bootstrapChannels();
-    await vi.waitFor(() => expect(client.cachedFriendships()).toHaveLength(2));
+    const connected = client;
+    await vi.waitFor(() => expect(connected.cachedFriendships()).toHaveLength(2));
 
     const friendships = client.cachedFriendships();
     expect(friendships).toHaveLength(2);
@@ -778,7 +783,8 @@ describe('bootstrapChannels', () => {
     });
     await client.connect();
     await client.bootstrapChannels();
-    await vi.waitFor(() => expect(client.cachedFriendship('500')?.alias).toBe('老王'));
+    const connected = client;
+    await vi.waitFor(() => expect(connected.cachedFriendship('500')?.alias).toBe('老王'));
     expect(client.cachedFriendship('500')?.alias).toBe('老王');
 
     // Second sync: tombstone for the same uid.
@@ -805,7 +811,7 @@ describe('bootstrapChannels', () => {
       return okJson({ items: [], next_version: 0, has_more: false });
     };
     await client.bootstrapChannels();
-    await vi.waitFor(() => expect(client.cachedFriendship('500')).toBeUndefined());
+    await vi.waitFor(() => expect(connected.cachedFriendship('500')).toBeUndefined());
 
     // Friendship dropped — UserRecord stays, but the username is cleared:
     // PROFILE_VISIBILITY P1 makes username friend-channel-owned; after an

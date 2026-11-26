@@ -35,7 +35,7 @@
   },
   "dependencies": {
     "dexie": "^4.4.2",
-    "flatbuffers": "^24.3.25",
+    "flatbuffers": "25.9.23",
     "lossless-json": "^4.3.0"
   },
   "peerDependencies": {
